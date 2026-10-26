@@ -8,6 +8,7 @@ from .models import (
     ProposalWrite,
     RoundRecord,
     RoundWrite,
+    RunRecord,
     RunWrite,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "ProposalWrite",
     "RoundRecord",
     "RoundWrite",
+    "RunRecord",
     "RunWrite",
 ]

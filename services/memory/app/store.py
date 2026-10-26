@@ -140,6 +140,14 @@ class MemoryStore:
         with self._connect() as conn:
             return self._fetch(conn, "rounds", round_id)
 
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            return self._fetch(conn, "runs", run_id)
+
+    def get_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            return self._fetch(conn, "proposals", proposal_id)
+
     def create_round(self, request: RoundWrite) -> dict[str, Any]:
         request_hash = self._request_hash(request)
         record_id = stable_id("round", request.idempotency_key)

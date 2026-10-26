@@ -61,6 +61,24 @@ class RunWrite(Contract):
     ended_at: datetime | None = None
 
 
+class RunRecord(Contract):
+    id: str
+    agent_id: str
+    role: str
+    round_id: str
+    workflow_id: str
+    step: str
+    model: str | None
+    base_commit: str | None
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float
+    outcome: str
+    event_ids: list[str]
+    started_at: datetime
+    ended_at: datetime | None
+
+
 class ProposalWrite(Contract):
     idempotency_key: str = Field(min_length=1, max_length=256)
     round_id: str

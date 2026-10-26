@@ -8,6 +8,7 @@ from agentteam_contracts import (
     ProposalWrite,
     RoundRecord,
     RoundWrite,
+    RunRecord,
     RunWrite,
 )
 from fastapi import FastAPI, HTTPException
@@ -37,6 +38,26 @@ def _round(row: dict[str, Any]) -> RoundRecord:
         base_commit=row.get("base_commit"),
         read_basis=row["read_basis"],
         committed_proposals=list(row.get("committed_proposals") or []),
+    )
+
+
+def _run(row: dict[str, Any]) -> RunRecord:
+    return RunRecord(
+        id=row["_id"],
+        agent_id=row["agent_id"],
+        role=row["role"],
+        round_id=row["round_id"],
+        workflow_id=row["workflow_id"],
+        step=row["step"],
+        model=row.get("model"),
+        base_commit=row.get("base_commit"),
+        tokens_in=row["tokens_in"],
+        tokens_out=row["tokens_out"],
+        cost_usd=row["cost_usd"],
+        outcome=row["outcome"],
+        event_ids=list(row.get("event_ids") or []),
+        started_at=row["started_at"],
+        ended_at=row.get("ended_at"),
     )
 
 
@@ -95,6 +116,14 @@ def read_round(round_id: str) -> RoundRecord:
     return _round(row)
 
 
+@app.get("/v1/runs/{run_id}", response_model=RunRecord)
+def read_run(run_id: str) -> RunRecord:
+    row = store.get_run(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return _run(row)
+
+
 @app.post("/v1/runs", status_code=201)
 def write_run(request: RunWrite) -> dict[str, str]:
     try:
@@ -112,6 +141,14 @@ def write_proposal(round_id: str, request: ProposalWrite) -> ProposalRecord:
         return _proposal(store.create_proposal(request))
     except (IdempotencyConflict, RoundConflict) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get("/v1/proposals/{proposal_id}", response_model=ProposalRecord)
+def read_proposal(proposal_id: str) -> ProposalRecord:
+    row = store.get_proposal(proposal_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="proposal not found")
+    return _proposal(row)
 
 
 @app.post("/v1/rounds/{round_id}/commit", response_model=RoundRecord)
