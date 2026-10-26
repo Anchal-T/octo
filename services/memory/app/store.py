@@ -210,42 +210,90 @@ class MemoryStore:
             "proposals", record, request_hash, guard, (request.round_id,)
         )
 
+    @staticmethod
+    def _pending_proposals(
+        conn: psycopg.Connection[Any], round_id: str
+    ) -> list[dict[str, Any]]:
+        return conn.execute(
+            "SELECT * FROM proposals WHERE round_id = %s AND status = 'pending'",
+            (round_id,),
+        ).fetchall()
+
     def commit_round(self, round_id: str) -> dict[str, Any]:
         with self._connect() as conn:
+            state = self._fetch(conn, "rounds", round_id)
+            if state is None:
+                raise RoundConflict("round not found")
+            if state.get("status") == "committed":
+                return state
+            if state.get("status") not in {"open", "syncing"}:
+                raise RoundConflict("round cannot be synced from its current state")
+
+            if state["status"] == "open":
+                if not self._pending_proposals(conn, round_id):
+                    raise RoundConflict("a round needs at least one pending proposal")
+                try:
+                    with conn.transaction():
+                        conn.execute(
+                            "ASSERT EXISTS (SELECT 1 FROM rounds WHERE _id = %s AND status = 'open'), "
+                            "'round is not open'",
+                            (round_id,),
+                        )
+                        conn.execute(
+                            "UPDATE rounds SET status = 'syncing' WHERE _id = %s",
+                            (round_id,),
+                        )
+                except psycopg.Error as error:
+                    state = self._fetch(conn, "rounds", round_id)
+                    if state is not None and state.get("status") == "committed":
+                        return state
+                    if state is None or state.get("status") != "syncing":
+                        if "assert-failed" in str(error).lower():
+                            raise RoundConflict("round is not open") from error
+                        raise
+                else:
+                    state = self._fetch(conn, "rounds", round_id)
+                    if state is not None and state.get("status") == "committed":
+                        return state
+                    if state is None or state.get("status") != "syncing":
+                        raise RoundConflict("round did not enter syncing state")
+
+            proposals = self._pending_proposals(conn, round_id)
+            if not proposals:
+                raise RoundConflict("a syncing round needs pending proposals")
+
+            decisions = []
+            accepted_ids = []
+            for proposal in proposals:
+                run = self._fetch(conn, "runs", proposal["run_id"])
+                evidence_ids = list(proposal.get("evidence_event_ids") or [])
+                evidence = {
+                    event_id: self._fetch(conn, "events", event_id)
+                    for event_id in evidence_ids
+                }
+                status, reason = validate_proposal(round_id, proposal, run, evidence)
+                decisions.append((proposal, status, reason))
+                if status == "accepted":
+                    accepted_ids.append(proposal["_id"])
+
             try:
                 with conn.transaction():
                     conn.execute(
-                        "ASSERT EXISTS (SELECT 1 FROM rounds WHERE _id = %s AND status = 'open'), "
-                        "'round is not open'",
+                        "ASSERT EXISTS (SELECT 1 FROM rounds WHERE _id = %s AND status = 'syncing'), "
+                        "'round is not syncing'",
                         (round_id,),
                     )
-                    proposals = conn.execute(
-                        "SELECT * FROM proposals WHERE round_id = %s AND status = 'pending'",
-                        (round_id,),
-                    ).fetchall()
-                    if not proposals:
-                        raise RoundConflict(
-                            "a round needs at least one pending proposal"
-                        )
-
-                    accepted_ids = []
-                    for proposal in proposals:
-                        run = self._fetch(conn, "runs", proposal["run_id"])
-                        evidence_ids = list(proposal.get("evidence_event_ids") or [])
-                        evidence = {
-                            event_id: self._fetch(conn, "events", event_id)
-                            for event_id in evidence_ids
-                        }
-                        status, reason = validate_proposal(
-                            round_id, proposal, run, evidence
+                    for proposal, status, reason in decisions:
+                        conn.execute(
+                            "ASSERT EXISTS (SELECT 1 FROM proposals "
+                            "WHERE _id = %s AND round_id = %s AND status = 'pending'), "
+                            "'proposal is no longer pending in this round'",
+                            (proposal["_id"], round_id),
                         )
                         conn.execute(
                             "UPDATE proposals SET status = %s, reason = %s WHERE _id = %s",
                             (status, reason, proposal["_id"]),
                         )
-                        if status == "accepted":
-                            accepted_ids.append(proposal["_id"])
-
                     conn.execute(
                         "UPDATE rounds SET status = 'committed', committed_proposals = %s WHERE _id = %s",
                         (Jsonb(accepted_ids), round_id),
@@ -259,7 +307,9 @@ class MemoryStore:
                 if existing is not None and existing.get("status") == "committed":
                     return existing
                 if "assert-failed" in str(error).lower():
-                    raise RoundConflict("round is not open") from error
+                    raise RoundConflict(
+                        "round is not syncing or a proposal changed"
+                    ) from error
                 raise
 
             row = self._fetch(conn, "rounds", round_id)
