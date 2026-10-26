@@ -1,0 +1,46 @@
+services:
+  xtdb:
+    image: ghcr.io/xtdb/xtdb:2.1.1
+    ports:
+      - "5432:5432"
+      - "18080:8080"
+    volumes:
+      - xtdb-data:/var/lib/xtdb
+
+  restate:
+    image: docker.restate.dev/restatedev/restate:1.8.1
+    command: ["--node-name=restate-1"]
+    ports:
+      - "8080:8080"
+      - "9070:9070"
+      - "5122:5122"
+    volumes:
+      - restate-data:/restate-data
+
+  memory:
+    build:
+      context: ..
+      dockerfile: services/memory/Dockerfile
+    environment:
+      XTDB_HOST: xtdb
+    depends_on:
+      - xtdb
+    ports:
+      - "8001:8001"
+
+  workflow:
+    build:
+      context: ..
+      dockerfile: services/workflow/Dockerfile
+    environment:
+      MEMORY_URL: http://memory:8001
+      RESTATE_INGRESS: http://restate:8080
+    depends_on:
+      - memory
+      - restate
+    ports:
+      - "8002:8002"
+
+volumes:
+  xtdb-data:
+  restate-data:

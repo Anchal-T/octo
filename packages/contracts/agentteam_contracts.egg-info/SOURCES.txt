@@ -1,0 +1,8 @@
+pyproject.toml
+agentteam_contracts/__init__.py
+agentteam_contracts/models.py
+agentteam_contracts.egg-info/PKG-INFO
+agentteam_contracts.egg-info/SOURCES.txt
+agentteam_contracts.egg-info/dependency_links.txt
+agentteam_contracts.egg-info/requires.txt
+agentteam_contracts.egg-info/top_level.txt
