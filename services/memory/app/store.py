@@ -12,6 +12,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg.types.string import StrDumperVarchar
 
+from .sync import validate_proposal
+
 TAINT_LABELS = {0: "trusted", 1: "internal", 2: "untrusted", 3: "quarantined"}
 TABLES = {"events", "runs", "rounds", "proposals"}
 
@@ -208,11 +210,7 @@ class MemoryStore:
             "proposals", record, request_hash, guard, (request.round_id,)
         )
 
-    def commit_round(self, round_id: str, proposal_ids: list[str]) -> dict[str, Any]:
-        proposal_ids = list(dict.fromkeys(proposal_ids))
-        if not proposal_ids:
-            raise RoundConflict("a round needs at least one proposal")
-
+    def commit_round(self, round_id: str) -> dict[str, Any]:
         with self._connect() as conn:
             try:
                 with conn.transaction():
@@ -221,20 +219,36 @@ class MemoryStore:
                         "'round is not open'",
                         (round_id,),
                     )
-                    for proposal_id in proposal_ids:
-                        conn.execute(
-                            "ASSERT EXISTS (SELECT 1 FROM proposals "
-                            "WHERE _id = %s AND round_id = %s AND status = 'pending'), "
-                            "'proposal is not pending in this round'",
-                            (proposal_id, round_id),
+                    proposals = conn.execute(
+                        "SELECT * FROM proposals WHERE round_id = %s AND status = 'pending'",
+                        (round_id,),
+                    ).fetchall()
+                    if not proposals:
+                        raise RoundConflict(
+                            "a round needs at least one pending proposal"
+                        )
+
+                    accepted_ids = []
+                    for proposal in proposals:
+                        run = self._fetch(conn, "runs", proposal["run_id"])
+                        evidence_ids = list(proposal.get("evidence_event_ids") or [])
+                        evidence = {
+                            event_id: self._fetch(conn, "events", event_id)
+                            for event_id in evidence_ids
+                        }
+                        status, reason = validate_proposal(
+                            round_id, proposal, run, evidence
                         )
                         conn.execute(
-                            "UPDATE proposals SET status = 'accepted', reason = %s WHERE _id = %s",
-                            ("accepted by the checkpoint-3 stub sync", proposal_id),
+                            "UPDATE proposals SET status = %s, reason = %s WHERE _id = %s",
+                            (status, reason, proposal["_id"]),
                         )
+                        if status == "accepted":
+                            accepted_ids.append(proposal["_id"])
+
                     conn.execute(
                         "UPDATE rounds SET status = 'committed', committed_proposals = %s WHERE _id = %s",
-                        (Jsonb(proposal_ids), round_id),
+                        (Jsonb(accepted_ids), round_id),
                     )
             except psycopg.Error as error:
                 existing = None
@@ -242,16 +256,10 @@ class MemoryStore:
                     existing = self._fetch(conn, "rounds", round_id)
                 except psycopg.Error:
                     pass
-                if (
-                    existing is not None
-                    and existing.get("status") == "committed"
-                    and list(existing.get("committed_proposals") or []) == proposal_ids
-                ):
+                if existing is not None and existing.get("status") == "committed":
                     return existing
                 if "assert-failed" in str(error).lower():
-                    raise RoundConflict(
-                        "round is not open or proposals do not match"
-                    ) from error
+                    raise RoundConflict("round is not open") from error
                 raise
 
             row = self._fetch(conn, "rounds", round_id)

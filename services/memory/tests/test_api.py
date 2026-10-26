@@ -72,7 +72,7 @@ async def test_round_write_and_commit_are_exposed(monkeypatch):
         "create_round",
         lambda _: {**round_row, "status": "open", "committed_proposals": []},
     )
-    monkeypatch.setattr(store, "commit_round", lambda *_: round_row)
+    monkeypatch.setattr(store, "commit_round", lambda _: round_row)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -85,14 +85,17 @@ async def test_round_write_and_commit_are_exposed(monkeypatch):
                 "read_basis": read_basis,
             },
         )
-        committed = await client.post(
-            "/v1/rounds/round-example/commit", json={"proposal_ids": ["prop-example"]}
+        committed = await client.post("/v1/rounds/round-example/commit", json={})
+        caller_selected = await client.post(
+            "/v1/rounds/round-example/commit",
+            json={"proposal_ids": ["prop-example"]},
         )
 
     assert opened.status_code == 200
     assert opened.json()["status"] == "open"
     assert committed.status_code == 200
     assert committed.json()["status"] == "committed"
+    assert caller_selected.status_code == 422
 
 
 @pytest.mark.anyio

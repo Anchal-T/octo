@@ -154,6 +154,6 @@ def read_proposal(proposal_id: str) -> ProposalRecord:
 @app.post("/v1/rounds/{round_id}/commit", response_model=RoundRecord)
 def commit_round(round_id: str, request: CommitRound) -> RoundRecord:
     try:
-        return _round(store.commit_round(round_id, request.proposal_ids))
+        return _round(store.commit_round(round_id))
     except RoundConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error

@@ -65,7 +65,7 @@ async def run_issue(
         "commit-round",
         post_memory,
         path=f"/v1/rounds/{plan.round_id}/commit",
-        payload={"proposal_ids": [plan.proposal_id]},
+        payload={},
     )
 
     return IssueRunResult(

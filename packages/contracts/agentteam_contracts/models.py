@@ -102,7 +102,7 @@ class ProposalRecord(Contract):
 
 
 class CommitRound(Contract):
-    proposal_ids: list[str] = Field(min_length=1)
+    pass
 
 
 class IssueRunRequest(Contract):
