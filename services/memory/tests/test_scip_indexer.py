@@ -1,5 +1,6 @@
 import subprocess
 import sys
+from datetime import datetime
 
 import pytest
 
@@ -69,6 +70,14 @@ def test_indexes_a_commit_once_and_loads_the_cached_definition(tmp_path):
         if line.startswith("worktree ")
     ]
     assert worktrees == [str(repo.resolve())]
+
+
+def test_returns_git_committer_date_for_a_commit(tmp_path):
+    indexer, repo, sha, _ = _indexer(tmp_path, "print('{}')\n")
+
+    assert indexer.committer_date(sha) == datetime.fromisoformat(
+        _git(repo, "show", "-s", "--format=%cI", sha)
+    )
 
 
 def test_removes_temporary_worktree_when_scip_print_fails(tmp_path):

@@ -20,6 +20,7 @@ def test_supported_triage_route_with_existing_evidence_is_accepted():
     assert validate_proposal("round-1", proposal, run, evidence) == (
         "accepted",
         "supported triage routing proposal",
+        None,
     )
 
 
@@ -41,6 +42,7 @@ def test_proposal_from_another_agent_is_rejected():
     assert validate_proposal("round-1", proposal, run, {"ev-1": {"taint": 2}}) == (
         "rejected",
         "proposal run does not match its round and agent",
+        None,
     )
 
 
@@ -62,6 +64,7 @@ def test_missing_or_unlinked_evidence_is_rejected():
     assert validate_proposal("round-1", proposal, run, {}) == (
         "rejected",
         "proposal evidence is missing or not linked to its run",
+        None,
     )
 
 
@@ -83,6 +86,7 @@ def test_action_with_only_untrusted_evidence_is_rejected():
     assert validate_proposal("round-1", proposal, run, {"ev-1": {"taint": 2}}) == (
         "rejected",
         "action requires evidence with taint below 2",
+        None,
     )
 
 
@@ -104,6 +108,7 @@ def test_evidence_with_invalid_taint_is_rejected():
     assert validate_proposal("round-1", proposal, run, {"ev-1": {"taint": 4}}) == (
         "rejected",
         "evidence event has invalid taint",
+        None,
     )
 
 
@@ -125,4 +130,5 @@ def test_unsupported_operation_is_rejected_even_with_trusted_evidence():
     assert validate_proposal("round-1", proposal, run, {"ev-1": {"taint": 1}}) == (
         "rejected",
         "operation is not supported for this role",
+        None,
     )

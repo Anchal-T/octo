@@ -3,6 +3,7 @@ import re
 import subprocess
 import tempfile
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 
 from .scip import ScipIndex
@@ -96,6 +97,17 @@ class ScipIndexer:
     def load(self, sha: str) -> ScipIndex:
         path = self.index(sha)
         return ScipIndex.load(path, sha=path.parent.name)
+
+    def committer_date(self, sha: str) -> datetime:
+        resolved_sha = self._resolve_sha(sha)
+        result = subprocess.run(
+            ["git", "show", "-s", "--format=%cI", resolved_sha],
+            cwd=self.repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return datetime.fromisoformat(result.stdout.strip())
 
     def _resolve_sha(self, sha: str) -> str:
         if not re.fullmatch(r"[0-9a-fA-F]{7,64}", sha):

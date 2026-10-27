@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -12,6 +14,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg.types.string import StrDumperVarchar
 
+from .scip_indexer import ScipIndexer
 from .sync import validate_proposal
 
 TAINT_LABELS = {0: "trusted", 1: "internal", 2: "untrusted", 3: "quarantined"}
@@ -29,6 +32,18 @@ class RoundConflict(Exception):
 class MemoryStore:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings.from_env()
+        self.scip_indexer: ScipIndexer | None = None
+        if self.settings.scip_repo_path:
+            if not self.settings.scip_project_name:
+                raise ValueError("SCIP_PROJECT_NAME is required with SCIP_REPO_PATH")
+            cache_dir = self.settings.scip_cache_dir or str(
+                Path.home() / ".cache" / "agent-team" / "scip"
+            )
+            self.scip_indexer = ScipIndexer(
+                self.settings.scip_repo_path,
+                cache_dir,
+                self.settings.scip_project_name,
+            )
 
     def _connect(self) -> psycopg.Connection[Any]:
         conn = psycopg.connect(
@@ -262,6 +277,20 @@ class MemoryStore:
             if not proposals:
                 raise RoundConflict("a syncing round needs pending proposals")
 
+            base_commit = state.get("base_commit")
+            index = None
+            committed_at = None
+            if (
+                self.scip_indexer is not None
+                and base_commit
+                and any(proposal.get("op") == "assert_fact" for proposal in proposals)
+            ):
+                try:
+                    index = self.scip_indexer.load(base_commit)
+                    committed_at = self.scip_indexer.committer_date(base_commit)
+                except (OSError, ValueError, subprocess.CalledProcessError):
+                    pass
+
             decisions = []
             accepted_ids = []
             for proposal in proposals:
@@ -271,8 +300,16 @@ class MemoryStore:
                     event_id: self._fetch(conn, "events", event_id)
                     for event_id in evidence_ids
                 }
-                status, reason = validate_proposal(round_id, proposal, run, evidence)
-                decisions.append((proposal, status, reason))
+                status, reason, fact = validate_proposal(
+                    round_id,
+                    proposal,
+                    run,
+                    evidence,
+                    index=index,
+                    base_commit=base_commit,
+                    committed_at=committed_at,
+                )
+                decisions.append((proposal, status, reason, fact))
                 if status == "accepted":
                     accepted_ids.append(proposal["_id"])
 
@@ -283,17 +320,52 @@ class MemoryStore:
                         "'round is not syncing'",
                         (round_id,),
                     )
-                    for proposal, status, reason in decisions:
+                    for proposal, status, _, fact in decisions:
                         conn.execute(
                             "ASSERT EXISTS (SELECT 1 FROM proposals "
                             "WHERE _id = %s AND round_id = %s AND status = 'pending'), "
                             "'proposal is no longer pending in this round'",
                             (proposal["_id"], round_id),
                         )
+                        if status == "accepted" and fact is not None:
+                            conn.execute(
+                                "ASSERT NOT EXISTS (SELECT 1 FROM facts WHERE _id = %s), "
+                                "'fact id already exists'",
+                                (fact["_id"],),
+                            )
+                    for proposal, status, reason, _ in decisions:
                         conn.execute(
                             "UPDATE proposals SET status = %s, reason = %s WHERE _id = %s",
                             (status, reason, proposal["_id"]),
                         )
+                    for _, status, _, fact in decisions:
+                        if status == "accepted" and fact is not None:
+                            conn.execute(
+                                "INSERT INTO facts ("
+                                "_id, _valid_from, claim, kind, area, anchors, "
+                                "provenance_event_ids, confidence, decay_half_life_days, "
+                                "last_confirmed_at, taint, valid_from_commit, supersedes, "
+                                "evidence_test, created_in_round, proposal_id"
+                                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                                (
+                                    fact["_id"],
+                                    fact["_valid_from"],
+                                    fact["claim"],
+                                    fact["kind"],
+                                    fact["area"],
+                                    Jsonb(fact["anchors"]),
+                                    Jsonb(fact["provenance_event_ids"]),
+                                    fact["confidence"],
+                                    fact["decay_half_life_days"],
+                                    fact["last_confirmed_at"],
+                                    fact["taint"],
+                                    fact["valid_from_commit"],
+                                    fact["supersedes"],
+                                    fact["evidence_test"],
+                                    fact["created_in_round"],
+                                    fact["proposal_id"],
+                                ),
+                            )
                     conn.execute(
                         "UPDATE rounds SET status = 'committed', committed_proposals = %s WHERE _id = %s",
                         (Jsonb(accepted_ids), round_id),
