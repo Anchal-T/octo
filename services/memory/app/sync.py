@@ -1,7 +1,31 @@
 from typing import Any, Literal
 
+from .scip import ScipIndex
+
 Validation = tuple[Literal["accepted", "rejected"], str]
 ACTION_OPS = frozenset({"edit_file", "grant_role"})
+
+
+def resolve_anchors(
+    anchor_names: Any, index: ScipIndex, base_commit: str | None
+) -> list[dict[str, str]] | None:
+    if (
+        not isinstance(anchor_names, list)
+        or not anchor_names
+        or not base_commit
+        or index.sha != base_commit
+    ):
+        return None
+
+    anchors = []
+    for name in anchor_names:
+        if not isinstance(name, str):
+            return None
+        symbol = index.resolve(name)
+        if symbol is None:
+            return None
+        anchors.append({"symbol": symbol, "sha": base_commit})
+    return anchors
 
 
 def validate_proposal(

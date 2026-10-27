@@ -17,9 +17,10 @@ class ScipDefinition:
 @dataclass(frozen=True)
 class ScipIndex:
     _definitions: dict[str, tuple[ScipDefinition, ...]]
+    sha: str | None = None
 
     @classmethod
-    def load(cls, path: str | Path) -> "ScipIndex":
+    def load(cls, path: str | Path, sha: str | None = None) -> "ScipIndex":
         index: Any = json.loads(Path(path).read_text(encoding="utf-8"))
         if not isinstance(index, dict):
             raise TypeError("SCIP JSON root must be an object")
@@ -66,10 +67,17 @@ class ScipIndex:
                 )
                 definitions.setdefault(symbol, []).append(definition)
 
-        return cls({symbol: tuple(items) for symbol, items in definitions.items()})
+        return cls({symbol: tuple(items) for symbol, items in definitions.items()}, sha)
 
     def definitions_for(self, symbol: str) -> tuple[ScipDefinition, ...]:
         return self._definitions.get(symbol, ())
+
+    def resolve(self, name: str) -> str | None:
+        # ponytail: exact SCIP symbols only; add aliases if proposals need short names.
+        return name if self.has_definition(name) else None
+
+    def has_definition(self, symbol: str) -> bool:
+        return bool(self.definitions_for(symbol))
 
     @staticmethod
     def _range(value: Any) -> tuple[int, ...] | None:
