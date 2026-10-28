@@ -5,6 +5,7 @@ import tempfile
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from shutil import copyfileobj
 
 from .scip import ScipIndex
 
@@ -97,6 +98,21 @@ class ScipIndexer:
     def load(self, sha: str) -> ScipIndex:
         path = self.index(sha)
         return ScipIndex.load(path, sha=path.parent.name)
+
+    def reuse(self, source_sha: str, target_sha: str) -> ScipIndex:
+        source = self.index(source_sha)
+        target = self.cache_dir / self._resolve_sha(target_sha) / "index.json"
+        if not target.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(dir=target.parent, suffix=".json")
+            try:
+                with os.fdopen(fd, "wb") as output, source.open("rb") as input_file:
+                    copyfileobj(input_file, output)
+                os.replace(temporary, target)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        return ScipIndex.load(target, sha=target.parent.name)
 
     def committer_date(self, sha: str) -> datetime:
         resolved_sha = self._resolve_sha(sha)

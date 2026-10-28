@@ -1,4 +1,5 @@
 import subprocess
+from datetime import datetime
 
 from services.memory.app.git_repo import GitRepo, Hunk
 
@@ -60,6 +61,24 @@ def test_diff_hunk_parser_ignores_header_like_changed_source(tmp_path):
         Hunk("module.py", old_start=2, old_len=1, new_start=2, new_len=1),
         Hunk("module.py", old_start=5, old_len=1, new_start=5, new_len=1),
     ]
+
+
+def test_rev_list_parents_and_commit_metadata(tmp_path):
+    path = tmp_path / "repo"
+    repo = _repo(path)
+    (path / "module.py").write_text("before\n", encoding="utf-8")
+    parent = _commit(path, "parent")
+    (path / "module.py").write_text("after\n", encoding="utf-8")
+    child = _commit(path, "child")
+
+    assert repo.rev_list_parents(child) == {
+        parent: (),
+        child: (parent,),
+    }
+    assert repo.committer_date(child) == datetime.fromisoformat(
+        _git(path, "show", "-s", "--format=%cI", child)
+    )
+    assert repo.author(child) == "Test"
 
 
 def test_changed_py_ignores_non_python_files(tmp_path):

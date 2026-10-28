@@ -171,6 +171,28 @@ class MemoryStore:
         with self._connect() as conn:
             return self._fetch(conn, "commits", sha)
 
+    def get_commits(self) -> list[Commit]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT _id, parents, committed_at, branch, author, changed_symbols, "
+                "merge_side_symbols FROM commits"
+            ).fetchall()
+        return [
+            Commit(
+                sha=row["_id"],
+                parents=tuple(row["parents"] or ()),
+                committed_at=row["committed_at"],
+                branch=row["branch"],
+                author=row["author"],
+                changed_symbols=tuple(row["changed_symbols"] or ()),
+                merge_side_symbols=tuple(
+                    (item["parent"], tuple(item["symbols"]))
+                    for item in row["merge_side_symbols"] or ()
+                ),
+            )
+            for row in rows
+        ]
+
     def facts_for_symbols(self, symbols: list[str]) -> list[dict[str, Any]]:
         if not symbols:
             return []

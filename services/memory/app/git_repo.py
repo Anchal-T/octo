@@ -1,6 +1,7 @@
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 
@@ -19,6 +20,40 @@ _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 class GitRepo:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).resolve()
+
+    def rev_list_parents(self, rev: str = "--all") -> dict[str, tuple[str, ...]]:
+        result = subprocess.run(
+            ["git", "rev-list", "--parents", "--topo-order", "--reverse", rev],
+            cwd=self.path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return {
+            fields[0]: tuple(fields[1:])
+            for line in result.stdout.splitlines()
+            if (fields := line.split())
+        }
+
+    def committer_date(self, sha: str) -> datetime:
+        result = subprocess.run(
+            ["git", "show", "-s", "--format=%cI", sha],
+            cwd=self.path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return datetime.fromisoformat(result.stdout.strip())
+
+    def author(self, sha: str) -> str:
+        result = subprocess.run(
+            ["git", "show", "-s", "--format=%an", sha],
+            cwd=self.path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
 
     def diff_u0(self, a: str, b: str) -> list[Hunk]:
         result = subprocess.run(

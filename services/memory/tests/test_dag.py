@@ -52,6 +52,17 @@ def test_dag_tracks_branch_ancestry_descendants_and_parent_symbol_diffs():
     assert dag.topological_descendants("a") == ["b", "c", "d", "e"]
 
 
+def test_dag_can_load_commit_rows_in_any_order():
+    root = _commit("a")
+    main = _commit("b", (root.sha,))
+    side = _commit("c", (root.sha,))
+    merge = _commit("d", (main.sha, side.sha))
+
+    dag = Dag.from_commits((merge, side, root, main))
+
+    assert dag.ancestors(merge.sha) == frozenset({"a", "b", "c", "d"})
+
+
 def test_dag_rejects_unknown_bases_and_parents():
     dag = Dag((_commit("a"),))
 

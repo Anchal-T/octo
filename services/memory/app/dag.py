@@ -40,6 +40,45 @@ class Dag:
         for commit in commits:
             self.add(commit)
 
+    @classmethod
+    def from_commits(cls, commits: Iterable[Commit]) -> "Dag":
+        by_sha: dict[str, Commit] = {}
+        for commit in commits:
+            previous = by_sha.get(commit.sha)
+            if previous is not None and previous != commit:
+                raise ValueError(
+                    f"commit {commit.sha} was recorded with different data"
+                )
+            by_sha[commit.sha] = commit
+
+        missing = {
+            parent
+            for commit in by_sha.values()
+            for parent in commit.parents
+            if parent not in by_sha
+        }
+        if missing:
+            raise KeyError(min(missing))
+
+        children: dict[str, set[str]] = {sha: set() for sha in by_sha}
+        indegree = {sha: len(commit.parents) for sha, commit in by_sha.items()}
+        for commit in by_sha.values():
+            for parent in commit.parents:
+                children[parent].add(commit.sha)
+        ready = [sha for sha, degree in indegree.items() if degree == 0]
+        heapify(ready)
+        dag = cls()
+        while ready:
+            sha = heappop(ready)
+            dag.add(by_sha[sha])
+            for child in children[sha]:
+                indegree[child] -= 1
+                if indegree[child] == 0:
+                    heappush(ready, child)
+        if len(dag.commits) != len(by_sha):
+            raise ValueError("commit graph contains a cycle")
+        return dag
+
     def add(self, commit: Commit) -> None:
         existing = self.commits.get(commit.sha)
         if existing is not None:

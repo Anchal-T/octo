@@ -72,6 +72,29 @@ def test_indexes_a_commit_once_and_loads_the_cached_definition(tmp_path):
     assert worktrees == [str(repo.resolve())]
 
 
+def test_reuses_a_cached_index_for_a_commit_without_python_changes(tmp_path):
+    symbol = "scip-python python demo 0 `module`/example()."
+    printer = (
+        "import json\n"
+        "print(json.dumps({'documents': [{'relative_path': 'module.py', 'occurrences': ["
+        f"{{'range': [0, 4, 11], 'symbol': {symbol!r}, 'symbol_roles': 1}}"
+        "]}]}))\n"
+    )
+    indexer, repo, parent, calls = _indexer(tmp_path, printer)
+    parent_index = indexer.load(parent)
+    (repo / "README.md").write_text("docs\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "--quiet", "-m", "docs")
+    child = _git(repo, "rev-parse", "HEAD")
+
+    reused = indexer.reuse(parent, child)
+
+    assert reused.sha == child
+    assert reused.definitions_for(symbol) == parent_index.definitions_for(symbol)
+    assert indexer.load(child) == reused
+    assert len(calls.read_text(encoding="utf-8").splitlines()) == 1
+
+
 def test_returns_git_committer_date_for_a_commit(tmp_path):
     indexer, repo, sha, _ = _indexer(tmp_path, "print('{}')\n")
 

@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from services.memory.app.dag import Commit, UnknownCommit
+from services.memory.app.dag import Commit, Dag, UnknownCommit
 from services.memory.app.store import IdempotencyConflict, MemoryStore
 
 pytestmark = pytest.mark.skipif(
@@ -55,6 +55,8 @@ def test_commit_records_preserve_parent_diffs_and_are_idempotent():
     assert row["merge_side_symbols"] == [
         {"parent": side.sha, "symbols": ["sym-side", "sym-merge"]}
     ]
+    loaded = Dag.from_commits(store.get_commits())
+    assert loaded.commits[merge.sha] == merge
     assert store.record_commit(merge) == row
 
     with pytest.raises(IdempotencyConflict):
