@@ -14,11 +14,12 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg.types.string import StrDumperVarchar
 
+from .dag import Commit, UnknownCommit
 from .scip_indexer import ScipIndexer
 from .sync import validate_proposal
 
 TAINT_LABELS = {0: "trusted", 1: "internal", 2: "untrusted", 3: "quarantined"}
-TABLES = {"events", "runs", "rounds", "proposals"}
+TABLES = {"events", "runs", "rounds", "proposals", "commits"}
 
 
 class IdempotencyConflict(Exception):
@@ -164,6 +165,83 @@ class MemoryStore:
     def get_proposal(self, proposal_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             return self._fetch(conn, "proposals", proposal_id)
+
+    def get_commit(self, sha: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            return self._fetch(conn, "commits", sha)
+
+    def record_commit(self, commit: Commit) -> dict[str, Any]:
+        record = {
+            "_id": commit.sha,
+            "_valid_from": commit.committed_at,
+            "parents": list(commit.parents),
+            "committed_at": commit.committed_at,
+            "branch": commit.branch,
+            "author": commit.author,
+            "changed_symbols": list(commit.changed_symbols),
+            "merge_side_symbols": [
+                {"parent": parent, "symbols": list(symbols)}
+                for parent, symbols in commit.merge_side_symbols
+            ],
+        }
+        with self._connect() as conn:
+            for parent in commit.parents:
+                if self._fetch(conn, "commits", parent) is None:
+                    raise UnknownCommit(parent)
+            try:
+                with conn.transaction():
+                    conn.execute(
+                        "ASSERT NOT EXISTS (SELECT 1 FROM commits WHERE _id = %s), "
+                        "'commit already exists'",
+                        (commit.sha,),
+                    )
+                    for parent in commit.parents:
+                        conn.execute(
+                            "ASSERT EXISTS (SELECT 1 FROM commits WHERE _id = %s), "
+                            "'commit parent is missing'",
+                            (parent,),
+                        )
+                    conn.execute(
+                        "INSERT INTO commits (_id, _valid_from, parents, committed_at, "
+                        "branch, author, changed_symbols, merge_side_symbols) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (
+                            record["_id"],
+                            record["_valid_from"],
+                            Jsonb(record["parents"]),
+                            record["committed_at"],
+                            record["branch"],
+                            record["author"],
+                            Jsonb(record["changed_symbols"]),
+                            Jsonb(record["merge_side_symbols"]),
+                        ),
+                    )
+            except psycopg.Error as error:
+                existing = self._fetch(conn, "commits", commit.sha)
+                if existing is None:
+                    for parent in commit.parents:
+                        if self._fetch(conn, "commits", parent) is None:
+                            raise UnknownCommit(parent) from error
+                    raise
+                fields = (
+                    "_id",
+                    "parents",
+                    "committed_at",
+                    "branch",
+                    "author",
+                    "changed_symbols",
+                    "merge_side_symbols",
+                )
+                if all(existing.get(field) == record[field] for field in fields):
+                    return existing
+                raise IdempotencyConflict(
+                    f"commit {commit.sha} was recorded with different data"
+                ) from error
+
+            row = self._fetch(conn, "commits", commit.sha)
+            if row is None:
+                raise RuntimeError("XTDB did not return the inserted commit")
+            return row
 
     def create_round(self, request: RoundWrite) -> dict[str, Any]:
         request_hash = self._request_hash(request)

@@ -3,6 +3,10 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
+class UnknownCommit(KeyError):
+    pass
+
+
 @dataclass(frozen=True)
 class Commit:
     sha: str

@@ -11,9 +11,8 @@ from services.memory.app.scip_indexer import ScipIndexer
 from services.memory.app.store import MemoryStore, RoundConflict
 
 pytestmark = pytest.mark.skipif(
-    os.getenv("AGENTTEAM_TEST_XTDB") != "1"
-    or os.getenv("XTDB_DATABASE") != "agentteam_test",
-    reason="set AGENTTEAM_TEST_XTDB=1 and XTDB_DATABASE=agentteam_test to opt into XTDB tests",
+    os.getenv("AGENTTEAM_TEST_XTDB") != "1" or os.getenv("XTDB_PORT") != "5433",
+    reason="set AGENTTEAM_TEST_XTDB=1 and XTDB_PORT=5433 to opt into XTDB tests",
 )
 
 COMMIT_TIME = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
