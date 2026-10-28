@@ -69,8 +69,38 @@ class ScipIndex:
 
         return cls({symbol: tuple(items) for symbol, items in definitions.items()}, sha)
 
+    @property
+    def symbols(self) -> frozenset[str]:
+        return frozenset(self._definitions)
+
     def definitions_for(self, symbol: str) -> tuple[ScipDefinition, ...]:
         return self._definitions.get(symbol, ())
+
+    def innermost(self, file: str, start: int, end: int) -> str | None:
+        """Return the smallest definition containing a zero-based half-open line range."""
+        if start < 0 or end <= start:
+            return None
+
+        matches: list[tuple[int, str]] = []
+        for definitions in self._definitions.values():
+            for definition in definitions:
+                if definition.relative_path != file:
+                    continue
+                range_ = definition.enclosing_range or definition.range
+                range_start, range_end = self._line_span(range_)
+                if range_start <= start and end <= range_end:
+                    matches.append((range_end - range_start, definition.symbol))
+        return min(matches)[1] if matches else None
+
+    @staticmethod
+    def _line_span(range_: tuple[int, ...]) -> tuple[int, int]:
+        start = range_[0]
+        if len(range_) == 3:
+            return start, start + 1
+        end = range_[2]
+        if end == start or range_[3] > 0:
+            end += 1
+        return start, end
 
     def resolve(self, name: str) -> str | None:
         # ponytail: exact SCIP symbols only; add aliases if proposals need short names.
