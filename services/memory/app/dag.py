@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from heapq import heapify, heappop, heappush
 
 
 class UnknownCommit(KeyError):
@@ -90,3 +91,43 @@ class Dag:
                 pending.extend(self.children[child])
             self._descendants_cache[sha] = frozenset(found)
         return self._descendants_cache[sha]
+
+    def first_parent_path(self, head: str) -> list[str]:
+        if head not in self.commits:
+            raise KeyError(head)
+        path = []
+        sha = head
+        while True:
+            path.append(sha)
+            parents = self.commits[sha].parents
+            if not parents:
+                break
+            sha = parents[0]
+        path.reverse()
+        return path
+
+    def topological_order(self, shas: Iterable[str] | None = None) -> list[str]:
+        pending = set(self.commits if shas is None else shas)
+        missing = pending - self.commits.keys()
+        if missing:
+            raise KeyError(min(missing))
+        indegree = {
+            sha: sum(parent in pending for parent in self.commits[sha].parents)
+            for sha in pending
+        }
+        ready = [sha for sha, degree in indegree.items() if degree == 0]
+        heapify(ready)
+        ordered = []
+        while ready:
+            parent = heappop(ready)
+            ordered.append(parent)
+            for child in self.children[parent] & pending:
+                indegree[child] -= 1
+                if indegree[child] == 0:
+                    heappush(ready, child)
+        if len(ordered) != len(pending):
+            raise ValueError("commit graph contains a cycle")
+        return ordered
+
+    def topological_descendants(self, sha: str) -> list[str]:
+        return self.topological_order(self.descendants(sha))

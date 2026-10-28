@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import psycopg
-from agentteam_common import Settings, stable_id
+from agentteam_common import Settings, closure_id, stable_id
 from agentteam_contracts import EventWrite, ProposalWrite, RoundWrite, RunWrite
 from psycopg import sql
 from psycopg.rows import dict_row
@@ -169,6 +170,89 @@ class MemoryStore:
     def get_commit(self, sha: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             return self._fetch(conn, "commits", sha)
+
+    def facts_for_symbols(self, symbols: list[str]) -> list[dict[str, Any]]:
+        if not symbols:
+            return []
+        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in symbols)
+        query = sql.SQL(
+            "SELECT _id, valid_from_commit, anchors, evidence_test "
+            "FROM facts FOR ALL VALID_TIME "
+            "WHERE EXISTS (SELECT 1 FROM UNNEST(anchors) AS a(anc) "
+            "WHERE (a.anc).symbol IN ({}))"
+        ).format(placeholders)
+        with self._connect() as conn:
+            return list(conn.execute(query, symbols).fetchall())
+
+    def facts_by_ids(self, fact_ids: list[str]) -> list[dict[str, Any]]:
+        if not fact_ids:
+            return []
+        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in fact_ids)
+        query = sql.SQL(
+            "SELECT _id, valid_from_commit, anchors, evidence_test "
+            "FROM facts FOR ALL VALID_TIME WHERE _id IN ({})"
+        ).format(placeholders)
+        with self._connect() as conn:
+            return list(conn.execute(query, fact_ids).fetchall())
+
+    def closures_for_facts(self, fact_ids: list[str]) -> list[dict[str, Any]]:
+        if not fact_ids:
+            return []
+        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in fact_ids)
+        query = sql.SQL(
+            "SELECT fact_id, closing_commit FROM fact_closures FOR ALL VALID_TIME "
+            "WHERE fact_id IN ({})"
+        ).format(placeholders)
+        with self._connect() as conn:
+            return list(conn.execute(query, fact_ids).fetchall())
+
+    def all_fact_closures(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            return list(
+                conn.execute(
+                    "SELECT fact_id, closing_commit FROM fact_closures FOR ALL VALID_TIME"
+                ).fetchall()
+            )
+
+    def end_fact_valid_time(self, fact_ids: list[str], committed_at: datetime) -> None:
+        if not fact_ids:
+            return
+        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in fact_ids)
+        query = sql.SQL(
+            "DELETE FROM facts FOR PORTION OF VALID_TIME FROM %s TO NULL "
+            "WHERE _id IN ({})"
+        ).format(placeholders)
+        with self._connect() as conn:
+            conn.execute(query, (committed_at, *fact_ids))
+
+    def record_fact_closure(
+        self,
+        fact_id: str,
+        closing_commit: str,
+        branch: str,
+        closed_by_agent: str,
+        reason: str,
+        committed_at: datetime,
+        evidence_test: str | None = None,
+    ) -> str:
+        record_id = closure_id(fact_id, closing_commit)
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO fact_closures (_id, _valid_from, fact_id, closing_commit, "
+                "branch, closed_by_agent, reason, evidence_test) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    record_id,
+                    committed_at,
+                    fact_id,
+                    closing_commit,
+                    branch,
+                    closed_by_agent,
+                    reason,
+                    evidence_test,
+                ),
+            )
+        return record_id
 
     def record_commit(self, commit: Commit) -> dict[str, Any]:
         record = {

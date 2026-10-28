@@ -48,6 +48,8 @@ def test_dag_tracks_branch_ancestry_descendants_and_parent_symbol_diffs():
     dag.add(_commit("e", ("d",)))
     assert dag.ancestors("e") == frozenset({"a", "b", "c", "d", "e"})
     assert "e" in dag.descendants("a")
+    assert dag.first_parent_path("e") == ["a", "b", "d", "e"]
+    assert dag.topological_descendants("a") == ["b", "c", "d", "e"]
 
 
 def test_dag_rejects_unknown_bases_and_parents():

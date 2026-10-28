@@ -1,4 +1,4 @@
-from .ids import stable_id
+from .ids import closure_id, stable_id
 from .settings import Settings
 
-__all__ = ["Settings", "stable_id"]
+__all__ = ["Settings", "closure_id", "stable_id"]
