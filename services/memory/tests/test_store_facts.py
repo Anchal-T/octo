@@ -56,7 +56,7 @@ def _new_round(store, base_commit):
     return row["_id"]
 
 
-def _new_run_and_evidence(store, round_id):
+def _new_run_and_evidence(store, round_id, role="triager"):
     evidence_ids = [
         store.create_event(
             EventWrite(
@@ -72,8 +72,8 @@ def _new_run_and_evidence(store, round_id):
     run_id = store.create_run(
         RunWrite(
             idempotency_key=str(uuid4()),
-            agent_id="triager-test",
-            role="triager",
+            agent_id=f"{role}-test",
+            role=role,
             round_id=round_id,
             workflow_id="workflow-test",
             step="triage",
@@ -85,12 +85,14 @@ def _new_run_and_evidence(store, round_id):
     return run_id, evidence_ids
 
 
-def _proposal(store, round_id, run_id, evidence_ids, *, payload, key=None):
+def _proposal(
+    store, round_id, run_id, evidence_ids, *, payload, key=None, agent_id="triager-test"
+):
     return store.create_proposal(
         ProposalWrite(
             idempotency_key=key or str(uuid4()),
             round_id=round_id,
-            agent_id="triager-test",
+            agent_id=agent_id,
             run_id=run_id,
             op="assert_fact",
             evidence_event_ids=evidence_ids,
@@ -198,6 +200,55 @@ def test_commit_round_persists_normalized_facts_with_proposal_verdicts():
             _read(store, "SELECT _id FROM facts WHERE _id = %s", (rejected_fact_id,))
             is None
         )
+
+
+def test_reproducer_can_assert_only_test_backed_bug_cause_facts():
+    store = MemoryStore()
+    base_commit = "e" * 40
+    store.scip_indexer = FixedIndexer(base_commit)
+    round_id = _new_round(store, base_commit)
+    run_id, evidence_ids = _new_run_and_evidence(store, round_id, role="reproducer")
+
+    valid = _proposal(
+        store,
+        round_id,
+        run_id,
+        evidence_ids,
+        agent_id="reproducer-test",
+        payload=_payload(kind="bug_cause", evidence_test="tests/test_bug.py::test_bug"),
+    )
+    missing_test = _proposal(
+        store,
+        round_id,
+        run_id,
+        evidence_ids,
+        agent_id="reproducer-test",
+        payload=_payload(kind="bug_cause", evidence_test=None),
+    )
+    wrong_kind = _proposal(
+        store,
+        round_id,
+        run_id,
+        evidence_ids,
+        agent_id="reproducer-test",
+        payload=_payload(
+            kind="user_report", evidence_test="tests/test_bug.py::test_bug"
+        ),
+    )
+
+    result = store.commit_round(round_id)
+
+    assert result["committed_proposals"] == [valid["_id"]]
+    fact_id = "fact-" + hashlib.sha1(valid["_id"].encode()).hexdigest()[:12]
+    fact = _read(
+        store,
+        "SELECT kind, evidence_test FROM facts WHERE _id = %s",
+        (fact_id,),
+    )
+    assert fact == {"kind": "bug_cause", "evidence_test": "tests/test_bug.py::test_bug"}
+    for proposal in (missing_test, wrong_kind):
+        row = store.get_proposal(proposal["_id"])
+        assert row is not None and row["status"] == "rejected"
 
 
 def test_fact_commit_requires_a_matching_index_and_base_commit():

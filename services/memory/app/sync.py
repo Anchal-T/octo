@@ -1,5 +1,6 @@
 import hashlib
 import math
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Literal
 
@@ -7,6 +8,7 @@ from .scip import ScipIndex
 
 Validation = tuple[Literal["accepted", "rejected"], str, dict[str, Any] | None]
 ACTION_OPS = frozenset({"edit_file", "grant_role"})
+FACT_KINDS = {"triager": "user_report", "reproducer": "bug_cause"}
 
 
 def resolve_anchors(
@@ -39,7 +41,7 @@ def validate_proposal(
     round_id: str,
     proposal: dict[str, Any],
     run: dict[str, Any] | None,
-    evidence: dict[str, dict[str, Any] | None],
+    evidence: Mapping[str, Mapping[str, Any] | None],
     *,
     index: ScipIndex | None = None,
     base_commit: str | None = None,
@@ -76,16 +78,18 @@ def validate_proposal(
     ):
         return "rejected", "action requires evidence with taint below 2", None
 
-    if run.get("role") != "triager":
-        return "rejected", "operation is not supported for this role", None
+    role = run.get("role")
     if proposal.get("op") == "route_issue":
-        return "accepted", "supported triage routing proposal", None
+        if role == "triager":
+            return "accepted", "supported triage routing proposal", None
+        return "rejected", "operation is not supported for this role", None
     if proposal.get("op") != "assert_fact":
         return "rejected", "operation is not supported for this role", None
 
+    fact_kind = FACT_KINDS.get(role) if isinstance(role, str) else None
     payload = proposal.get("payload")
-    if not isinstance(payload, dict) or payload.get("kind") != "user_report":
-        return "rejected", "triager may only assert user_report facts", None
+    if not isinstance(payload, dict) or payload.get("kind") != fact_kind:
+        return "rejected", "fact kind is not supported for this role", None
     claim = payload.get("claim")
     area = payload.get("area")
     if (
@@ -119,6 +123,10 @@ def validate_proposal(
         supersedes is not None and not isinstance(supersedes, str)
     ):
         return "rejected", "fact optional fields must be strings", None
+    if role == "reproducer" and (
+        not isinstance(evidence_test, str) or not evidence_test.strip()
+    ):
+        return "rejected", "bug_cause facts require an evidence test", None
     if (
         index is None
         or not base_commit
@@ -129,7 +137,10 @@ def validate_proposal(
         return "rejected", "fact requires a matching index and base commit", None
 
     anchors = resolve_anchors(
-        payload.get("anchor_names"), index, base_commit, allow_empty=True
+        payload.get("anchor_names"),
+        index,
+        base_commit,
+        allow_empty=fact_kind == "user_report",
     )
     if anchors is None:
         return "rejected", "fact anchors could not be resolved at the base commit", None
@@ -139,7 +150,7 @@ def validate_proposal(
         "_id": fact_id,
         "_valid_from": committed_at,
         "claim": claim,
-        "kind": "user_report",
+        "kind": fact_kind,
         "area": area,
         "anchors": anchors,
         "provenance_event_ids": evidence_ids,
