@@ -35,6 +35,24 @@ services:
     environment:
       MEMORY_URL: http://memory:8001
       RESTATE_INGRESS: http://restate:8080
+      TRIAGER_MODEL: ${TRIAGER_MODEL:-openai/gpt-oss-20b}
+      TRIAGER_MAX_TOKENS: ${TRIAGER_MAX_TOKENS:-1024}
+      TRIAGER_PROMPT_TOKEN_CAP: ${TRIAGER_PROMPT_TOKEN_CAP:-6000}
+      TRIAGER_TIMEOUT_S: ${TRIAGER_TIMEOUT_S:-60}
+      TRIAGER_EXPECTED_GENERATION_S: ${TRIAGER_EXPECTED_GENERATION_S:-15}
+      TRIAGER_WAIT_CAP_S: ${TRIAGER_WAIT_CAP_S:-7200}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      GROQ_API_KEY: ${GROQ_API_KEY:?GROQ_API_KEY must be set}
+      GROQ_RESET_TZ: ${GROQ_RESET_TZ:-UTC}
+      GROQ_RPM: ${GROQ_RPM:-30}
+      GROQ_TPM: ${GROQ_TPM:-8000}
+      GROQ_RPD: ${GROQ_RPD:-1000}
+      GROQ_TPD: ${GROQ_TPD:-200000}
+      MODELS_FREE_HOSTS: ${MODELS_FREE_HOSTS:-https://api.groq.com}
+      MODELS_SQLITE_PATH: /var/lib/agent-team/models/models.sqlite
+      MODELS_BUSY_TIMEOUT_MS: ${MODELS_BUSY_TIMEOUT_MS:-5000}
+    volumes:
+      - models-data:/var/lib/agent-team/models
     depends_on:
       - memory
       - restate
@@ -44,3 +62,4 @@ services:
 volumes:
   xtdb-data:
   restate-data:
+  models-data:
