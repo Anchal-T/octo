@@ -99,11 +99,42 @@ Some notes predate these. These win:
   | triager | `openai/gpt-oss-20b` (short prompts only, 8K TPM) | Groq free plan |
   | spare | `thinkingmachines/inkling-small:free` | OpenRouter (50 req/day shared cap) |
 
-  Rules: pin one model per role during eval (no silent fallback; turn off OpenRouter
-  provider fallback); retry 429s with backoff on the same model and count retries;
-  record model ids and dates per condition; never put secrets or `.env` contents in a
-  prompt (free endpoints log/train on prompts). NVIDIA's trial terms say "evaluation
-  and prototyping"; check them before using NIM for live PRs.
+  Rules (429 split decided 2026-10-29): pin one model per role during eval (no silent
+  fallback; turn off OpenRouter provider fallback). Never switch models, and count
+  every retry. "Retry 429s" does not mean holding the HTTP request open until the
+  provider accepts.
+
+  - **Short throttle** (amended 2026-10-30). `models` retries a 429 or 503 on the
+    same pinned model only when `Retry-After` plus the role's expected generation
+    time fits inside that role's client timeout. It counts the retry. If the wait
+    does not fit, `models` returns immediately with outcome `throttled` and
+    `retry_in` (seconds). The workflow sleeps that long with a durable `ctx.sleep`
+    outside `ctx.run`, then calls the same pinned model again. A 30-second
+    `Retry-After` does not imply an in-call retry: generation has to fit in what
+    remains of the role timeout (60 seconds for the triager).
+  - **Daily or weekly exhaustion.** `models` returns immediately with HTTP 429 or
+    503 and a body `{"error": "quota_exhausted", "model": "<pinned id>", "retry_at": "<UTC time>", "scope": "<dimension>"}`.
+    The workflow handles this outside `ctx.run`. If `retry_at` is at most 2 hours
+    away, it does a durable `ctx.sleep` until `retry_at` (that wait lives in the
+    Restate journal, not a table) and then calls the same pinned model again. If
+    `retry_at` is more than 2 hours away, it returns `quota_exhausted` to the
+    caller and does not sleep and does not park. It does not sleep silently
+    through an eval stall.
+  - **Quota ledger.** `models` counts each provider's usage and returns
+    `quota_exhausted` before sending a request the ledger says will fail. Use the
+    reset time in the provider response when one is present. Otherwise use that
+    provider's documented reset (midnight UTC when that is the documented reset).
+  - **Idempotency.** Every call carries a request id the workflow derives
+    deterministically from run id, step, and an input hash that does not change
+    across retries of that same attempt. A Restate retry while the call is in flight
+    joins that call or returns the stored successful completion. A `quota_exhausted`
+    result is not stored as the completion for that key, so the call after
+    `ctx.sleep` reaches the provider again.
+  - **Record.** Log the quota stop and the resumed call with model id and
+    timestamps, and record model ids and dates per condition. Never put secrets or
+    `.env` contents in a prompt (free endpoints log/train on prompts). NVIDIA's
+    trial terms say "evaluation and prototyping"; check them before using NIM for
+    live PRs.
 - **Free models only in the initial phase**: free API tiers (and free GPUs if ever
   needed). Paid APIs may be considered later, only when Anchal says so. Keep the
   model layer provider-agnostic so switching is a config change.
