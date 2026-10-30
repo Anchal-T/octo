@@ -4,12 +4,15 @@ from .models import (
     EventWrite,
     IssueRunRequest,
     IssueRunResult,
+    ModelCallRequest,
+    ModelOutcome,
     ProposalRecord,
     ProposalWrite,
     RoundRecord,
     RoundWrite,
     RunRecord,
     RunWrite,
+    Sampling,
 )
 
 __all__ = [
@@ -18,10 +21,13 @@ __all__ = [
     "EventWrite",
     "IssueRunRequest",
     "IssueRunResult",
+    "ModelCallRequest",
+    "ModelOutcome",
     "ProposalRecord",
     "ProposalWrite",
     "RoundRecord",
     "RoundWrite",
     "RunRecord",
     "RunWrite",
+    "Sampling",
 ]

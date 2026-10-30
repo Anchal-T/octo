@@ -105,6 +105,57 @@ class CommitRound(Contract):
     pass
 
 
+class Sampling(Contract):
+    temperature: float = Field(default=0.2, ge=0, le=2)
+    top_p: float = Field(default=1, gt=0, le=1)
+    seed: int | None = None
+    max_tokens: int | None = Field(default=None, ge=1)
+
+
+class ModelCallRequest(Contract):
+    run_id: str = Field(min_length=1, max_length=256)
+    step: str = Field(min_length=1, max_length=128)
+    role: Literal["triager"]
+    messages: list[dict[str, Any]] = Field(min_length=1)
+    sampling: Sampling = Field(default_factory=Sampling)
+    taint: int = Field(ge=0, le=3)
+    source: Literal["github_issue", "user_feedback"]
+
+
+class ModelOutcome(Contract):
+    outcome: Literal[
+        "completed", "quota_exhausted", "throttled", "failed", "ledger_unavailable"
+    ]
+    request_id: str
+    decided_at: datetime
+    model_pinned: str
+    run_id: str
+    step: str
+    model_reported: str | None = None
+    text: str | None = None
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    tokens_in: int = Field(default=0, ge=0)
+    tokens_out: int = Field(default=0, ge=0)
+    retry_count: int = Field(default=0, ge=0)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    retry_at: datetime | None = None
+    retry_in: float | None = Field(default=None, ge=0)
+    scope: (
+        Literal[
+            "minute_requests",
+            "minute_tokens",
+            "day_requests",
+            "day_tokens",
+            "week_requests",
+        ]
+        | None
+    ) = None
+    http_status: int | None = None
+    error_code: str | None = None
+    reason: str | None = None
+
+
 class IssueRunRequest(Contract):
     issue_id: str = Field(min_length=1, max_length=256)
     title: str = Field(min_length=1, max_length=500)
