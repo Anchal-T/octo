@@ -1,0 +1,129 @@
+from datetime import UTC, datetime, timedelta
+
+from agentteam_contracts import IssueRunRequest, IssueRunResult, ModelOutcome
+
+from services.workflow.app.plan import (
+    build_issue_plan_v1,
+    build_triage_proposal_v1,
+    map_triage_return_v1,
+    map_triage_run_v1,
+)
+from services.workflow.app.retries import decide_wait
+
+
+def test_v1_plan_uses_separate_memory_keys_and_maps_model_completion():
+    basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
+    request = IssueRunRequest(
+        issue_id="issue-17",
+        title="Example title",
+        body="Example body",
+        read_basis=basis,
+    )
+    outcome = ModelOutcome(
+        outcome="completed",
+        request_id="mc-example",
+        decided_at=basis,
+        model_pinned="openai/gpt-oss-20b",
+        model_reported="openai/gpt-oss-20b",
+        run_id="run-example",
+        step="triage",
+        text="Private triage result",
+        tokens_in=12,
+        tokens_out=3,
+        started_at=basis,
+        finished_at=basis,
+    )
+
+    plan = build_issue_plan_v1(request)
+    run = map_triage_run_v1(plan, outcome)
+    proposal = build_triage_proposal_v1(plan, outcome)
+
+    assert plan.round.idempotency_key == "issue-17:v1:round:1"
+    assert plan.event.idempotency_key == "issue-17:v1:issue"
+    assert run.idempotency_key == "issue-17:v1:triage:1"
+    assert proposal.idempotency_key == "issue-17:v1:triage-proposal:1"
+    assert run.model == "openai/gpt-oss-20b"
+    assert run.outcome == "completed"
+    assert run.tokens_in == 12
+    assert run.tokens_out == 3
+    assert proposal.payload == {
+        "stub": True,
+        "issue_id": "issue-17",
+        "routing": "not_implemented",
+        "model": "openai/gpt-oss-20b",
+        "request_id": "mc-example",
+    }
+    assert "Private triage result" not in str(proposal.payload)
+
+
+def test_decide_wait_includes_exact_two_hour_cap():
+    decided_at = datetime(2026, 10, 31, 12, tzinfo=UTC)
+
+    assert decide_wait(
+        retry_at=decided_at + timedelta(hours=2),
+        decided_at=decided_at,
+        cap_s=7200,
+    ) == {"action": "sleep", "wait_s": 7200}
+    assert decide_wait(
+        retry_at=decided_at + timedelta(hours=2, seconds=1),
+        decided_at=decided_at,
+        cap_s=7200,
+    ) == {"action": "return", "wait_s": None}
+
+
+def test_issue_run_result_adds_throttle_metadata_without_changing_old_fields():
+    decided_at = datetime(2026, 10, 31, 12, tzinfo=UTC)
+    result = IssueRunResult(
+        issue_id="issue-17",
+        round_id="round-17",
+        event_id="event-17",
+        run_id="run-17",
+        proposal_id="proposal-17",
+        status="throttled",
+        model="openai/gpt-oss-20b",
+        provider="groq",
+        retry_in=30,
+        decided_at=decided_at,
+        started_at=decided_at,
+        finished_at=decided_at,
+    )
+
+    assert result.status == "throttled"
+    assert result.model == "openai/gpt-oss-20b"
+    assert result.provider == "groq"
+    assert result.retry_in == 30
+    assert result.decided_at == decided_at
+    assert result.model_dump(mode="json")["status"] == "throttled"
+
+
+def test_second_throttle_result_preserves_retry_and_model_metadata():
+    basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
+    plan = build_issue_plan_v1(
+        IssueRunRequest(
+            issue_id="issue-17",
+            title="Example title",
+            read_basis=basis,
+        )
+    )
+    outcome = ModelOutcome(
+        outcome="throttled",
+        request_id="mc-example",
+        decided_at=basis,
+        model_pinned="openai/gpt-oss-20b",
+        run_id=plan.run_id,
+        step="triage",
+        retry_count=1,
+        retry_in=30,
+        started_at=basis,
+        finished_at=basis,
+    )
+
+    result = map_triage_return_v1(plan, outcome)
+
+    assert result.status == "throttled"
+    assert result.retry_in == 30
+    assert result.model == "openai/gpt-oss-20b"
+    assert result.provider == "groq"
+    assert result.started_at == basis
+    assert result.finished_at == basis
+    assert result.decided_at == basis

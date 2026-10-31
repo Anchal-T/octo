@@ -169,4 +169,21 @@ class IssueRunResult(Contract):
     event_id: str
     run_id: str
     proposal_id: str
-    status: Literal["committed"]
+    status: Literal["committed", "quota_exhausted", "throttled"]
+    model: str | None = None
+    provider: Literal["groq"] | None = None
+    retry_at: datetime | None = None
+    retry_in: float | None = Field(default=None, ge=0)
+    scope: (
+        Literal[
+            "minute_requests",
+            "minute_tokens",
+            "day_requests",
+            "day_tokens",
+            "week_requests",
+        ]
+        | None
+    ) = None
+    decided_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
