@@ -96,6 +96,22 @@ def test_issue_run_result_adds_throttle_metadata_without_changing_old_fields():
     assert result.model_dump(mode="json")["status"] == "throttled"
 
 
+def test_committed_issue_result_keeps_legacy_required_fields():
+    result = IssueRunResult(
+        issue_id="issue-17",
+        round_id="round-17",
+        event_id="event-17",
+        run_id="run-17",
+        proposal_id="proposal-17",
+        status="committed",
+    )
+
+    assert result.status == "committed"
+    assert result.model is None
+    assert result.provider is None
+    assert result.retry_in is None
+
+
 def test_second_throttle_result_preserves_retry_and_model_metadata():
     basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
     plan = build_issue_plan_v1(
