@@ -334,6 +334,64 @@ def test_taint_and_prompt_caps_refuse_before_provider_call(tmp_path):
     assert calls == 0
 
 
+@pytest.mark.parametrize(
+    ("usage", "content"),
+    [
+        ({"prompt_tokens": "abc", "completion_tokens": 1}, "Example triage"),
+        ([], "Example triage"),
+        ({"prompt_tokens": float("inf"), "completion_tokens": 1}, "Example"),
+        ({"prompt_tokens": 10**30, "completion_tokens": 1}, "Example"),
+        ({"prompt_tokens": 1, "completion_tokens": 1}, float("nan")),
+    ],
+    ids=["string-token", "list-usage", "infinite-token", "huge-token", "nan-content"],
+)
+def test_malformed_provider_response_settles_reserved_attempt(tmp_path, usage, content):
+    def provider(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=json.dumps(
+                {
+                    "model": MODEL,
+                    "choices": [{"message": {"content": content}}],
+                    "usage": usage,
+                },
+                allow_nan=True,
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+
+    client, _ = make_client(tmp_path, provider)
+
+    result = client.call(model_request())
+
+    assert result.outcome == "failed"
+    assert result.error_code == "invalid_provider_response"
+    with client.store.connection() as connection:
+        attempts = connection.execute(
+            "SELECT state FROM call_attempt WHERE request_id = ?",
+            (result.request_id,),
+        ).fetchall()
+    assert [attempt["state"] for attempt in attempts] == ["failed"]
+
+
+def test_non_http_provider_exception_settles_reserved_attempt(tmp_path):
+    def provider(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError("provider adapter failed")
+
+    client, _ = make_client(tmp_path, provider)
+
+    result = client.call(model_request())
+
+    assert result.outcome == "failed"
+    assert result.error_code == "provider_processing_error"
+    with client.store.connection() as connection:
+        attempts = connection.execute(
+            "SELECT state FROM call_attempt WHERE request_id = ?",
+            (result.request_id,),
+        ).fetchall()
+    assert [attempt["state"] for attempt in attempts] == ["failed"]
+
+
 def test_reported_model_mismatch_is_not_cached(tmp_path):
     calls = 0
 

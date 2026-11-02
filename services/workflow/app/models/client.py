@@ -133,33 +133,47 @@ class ModelClient:
             try:
                 response = self._send(request, pin, sampling, pool, call_started_mono)
             except httpx.HTTPError:
-                finished = self._now()
-                outcome = self._result(
-                    "failed",
+                return self._fail_reserved(
                     request,
                     request_id,
                     pin,
-                    retry_count=retry_count,
-                    started=overall_started,
-                    finished=finished,
-                    http_status=None,
+                    retry_count,
+                    ordinal,
+                    overall_started,
+                    started,
                     error_code="provider_unavailable",
                     reason="provider request failed",
                 )
-                self._finish(
-                    outcome,
+            except Exception:  # noqa: BLE001 — settle any failure after reservation.
+                return self._fail_reserved(
+                    request,
+                    request_id,
+                    pin,
+                    retry_count,
                     ordinal,
-                    "reserved",
-                    decision="failed",
-                    started=started,
-                    finished=finished,
+                    overall_started,
+                    started,
+                    error_code="provider_processing_error",
+                    reason="provider request could not be processed",
                 )
-                return outcome
 
-            status = response.status_code
-            finished = self._now()
-            body = _json_object(response)
-            quota = _provider_quota(body, response, self._now())
+            try:
+                status = response.status_code
+                finished = self._now()
+                body = _json_object(response)
+                quota = _provider_quota(body, response, finished)
+            except Exception:  # noqa: BLE001 — settle any failure after reservation.
+                return self._fail_reserved(
+                    request,
+                    request_id,
+                    pin,
+                    retry_count,
+                    ordinal,
+                    overall_started,
+                    started,
+                    error_code="provider_processing_error",
+                    reason="provider response could not be processed",
+                )
             if quota is not None:
                 outcome = self._result(
                     "quota_exhausted",
@@ -281,7 +295,21 @@ class ModelClient:
                 )
                 return outcome
 
-            completed = _completion_fields(body)
+            try:
+                completed = _completion_fields(body)
+            except Exception:  # noqa: BLE001 — settle any failure after reservation.
+                return self._fail_reserved(
+                    request,
+                    request_id,
+                    pin,
+                    retry_count,
+                    ordinal,
+                    overall_started,
+                    started,
+                    error_code="provider_processing_error",
+                    reason="provider completion could not be processed",
+                    http_status=status,
+                )
             if completed is None:
                 outcome = self._result(
                     "failed",
@@ -371,6 +399,19 @@ class ModelClient:
                 return self._ledger_error(
                     request, request_id, pin, error, overall_started, ordinal
                 )
+            except Exception:  # noqa: BLE001 — settle any failure after reservation.
+                return self._fail_reserved(
+                    request,
+                    request_id,
+                    pin,
+                    retry_count,
+                    ordinal,
+                    overall_started,
+                    started,
+                    error_code="provider_processing_error",
+                    reason="provider completion could not be persisted",
+                    http_status=status,
+                )
             self._log(outcome, decision="completed", retry_ordinal=ordinal)
             return outcome
 
@@ -394,6 +435,45 @@ class ModelClient:
             headers={"Authorization": f"Bearer {self.settings.groq_api_key}"},
             timeout=remaining,
         )
+
+    def _fail_reserved(
+        self,
+        request: ModelCallRequest,
+        request_id: str,
+        pin: Pin,
+        retry_count: int,
+        retry_ordinal: int,
+        overall_started: datetime,
+        attempt_started: datetime,
+        *,
+        error_code: str,
+        reason: str,
+        http_status: int | None = None,
+    ) -> ModelOutcome:
+        finished = self._now()
+        outcome = self._result(
+            "failed",
+            request,
+            request_id,
+            pin,
+            retry_count=retry_count,
+            started=overall_started,
+            finished=finished,
+            http_status=http_status,
+            error_code=error_code,
+            reason=reason,
+        )
+        self._finish(
+            outcome,
+            retry_ordinal,
+            "failed",
+            decision="failed",
+            started=attempt_started,
+            finished=finished,
+            http_status=http_status,
+            error_code=error_code,
+        )
+        return outcome
 
     def _uncalled_outcome(
         self,
@@ -733,19 +813,30 @@ def _completion_fields(
     message = choices[0].get("message")
     if not isinstance(message, dict):
         return None
-    usage = body.get("usage") or {}
-    if not isinstance(usage, dict):
+    usage = body.get("usage")
+    if usage is None:
         usage = {}
+    if not isinstance(usage, dict):
+        return None
+    content = message.get("content")
+    if content is not None and not isinstance(content, str):
+        return None
     tool_calls = message.get("tool_calls") or []
-    if not isinstance(tool_calls, list):
-        tool_calls = []
-    return (
-        model,
-        message.get("content") if isinstance(message.get("content"), str) else None,
-        tool_calls,
-        max(0, int(usage.get("prompt_tokens") or 0)),
-        max(0, int(usage.get("completion_tokens") or 0)),
-    )
+    if not isinstance(tool_calls, list) or any(
+        not isinstance(tool_call, dict) for tool_call in tool_calls
+    ):
+        return None
+    prompt_tokens = usage.get("prompt_tokens", 0)
+    completion_tokens = usage.get("completion_tokens", 0)
+    prompt_tokens = 0 if prompt_tokens is None else prompt_tokens
+    completion_tokens = 0 if completion_tokens is None else completion_tokens
+    max_sqlite_integer = 2**63 - 1
+    if any(
+        type(value) is not int or value < 0 or value > max_sqlite_integer
+        for value in (prompt_tokens, completion_tokens)
+    ):
+        return None
+    return model, content, tool_calls, prompt_tokens, completion_tokens
 
 
 def _provider_error_code(status: int) -> str:
