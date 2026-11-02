@@ -196,6 +196,73 @@ def test_short_429_retries_once_on_the_same_pinned_model(tmp_path):
     assert sleeps == [5.0]
 
 
+def test_provider_500_returns_retryable_outcome_and_retries_same_model(tmp_path):
+    calls = 0
+    models = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        models.append(json.loads(request.content)["model"])
+        if calls == 1:
+            return httpx.Response(
+                500,
+                headers={"Retry-After": "7"},
+                json={"error": "server_error"},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": MODEL,
+                "choices": [{"message": {"content": "recovered"}}],
+            },
+        )
+
+    client, _ = make_client(tmp_path, provider)
+    request = model_request()
+
+    first = client.call(request)
+    second = client.call(request)
+
+    assert first.outcome == "throttled"
+    assert first.retry_in == 7
+    assert first.error_code == "provider_http_500"
+    assert second.outcome == "completed"
+    assert second.retry_count == 1
+    assert models == [MODEL, MODEL]
+    assert calls == 2
+
+
+def test_connect_error_returns_retryable_outcome_and_retries_same_model(tmp_path):
+    calls = 0
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "model": MODEL,
+                "choices": [{"message": {"content": "recovered"}}],
+            },
+        )
+
+    client, _ = make_client(tmp_path, provider)
+    request = model_request()
+
+    first = client.call(request)
+    second = client.call(request)
+
+    assert first.outcome == "throttled"
+    assert first.retry_in == 5
+    assert first.error_code == "provider_unavailable"
+    assert second.outcome == "completed"
+    assert second.retry_count == 1
+    assert calls == 2
+
+
 def test_503_uses_same_pinned_model_for_one_fitting_retry(tmp_path):
     calls = 0
 

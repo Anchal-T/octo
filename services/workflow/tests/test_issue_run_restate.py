@@ -72,6 +72,7 @@ def test_restate_replay_and_triager_retry_paths(monkeypatch, tmp_path):
             name
             for name in (
                 "replay-case",
+                "transient-5xx-case",
                 "throttle-success-case",
                 "second-throttle-case",
                 "quota-retry-case",
@@ -82,6 +83,13 @@ def test_restate_replay_and_triager_retry_paths(monkeypatch, tmp_path):
         )
         provider_calls[case] = provider_calls.get(case, 0) + 1
         count = provider_calls[case]
+
+        if case == "transient-5xx-case" and count == 1:
+            return httpx.Response(
+                500,
+                headers={"Retry-After": "0.01"},
+                json={"error": "server_error"},
+            )
 
         throttle_limit = 1 if case == "throttle-success-case" else 2
         if (
@@ -189,6 +197,11 @@ def test_restate_replay_and_triager_retry_paths(monkeypatch, tmp_path):
             assert len(outcomes_for("replay-case")) == 1
             assert replay_result.run_id == replay_run_id
 
+            transient_result = await invoke(env, "transient-5xx-case")
+            assert transient_result.status == "committed"
+            assert provider_calls["transient-5xx-case"] == 2
+            assert_retry_attempts("transient-5xx-case")
+
             throttle_result = await invoke(env, "throttle-success-case")
             assert throttle_result.status == "committed"
             assert provider_calls["throttle-success-case"] == 2
@@ -233,4 +246,4 @@ def test_restate_replay_and_triager_retry_paths(monkeypatch, tmp_path):
 
     assert requested_models
     assert set(requested_models) == {MODEL}
-    assert len([call for call in memory_calls if call[0].endswith("/commit")]) == 3
+    assert len([call for call in memory_calls if call[0].endswith("/commit")]) == 4

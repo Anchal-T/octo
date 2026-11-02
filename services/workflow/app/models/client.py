@@ -132,6 +132,18 @@ class ModelClient:
             retry_count = max(retry_count, ordinal - 1)
             try:
                 response = self._send(request, pin, sampling, pool, call_started_mono)
+            except (httpx.TimeoutException, httpx.NetworkError):
+                return self._throttled_reserved(
+                    request,
+                    request_id,
+                    pin,
+                    retry_count,
+                    ordinal,
+                    overall_started,
+                    started,
+                    retry_in=5.0,
+                    error_code="provider_unavailable",
+                )
             except httpx.HTTPError:
                 return self._fail_reserved(
                     request,
@@ -262,6 +274,40 @@ class ModelClient:
                     finished=finished,
                     retry_after_raw=retry_after_raw,
                     retry_in=retry_after,
+                )
+                return outcome
+
+            if status == 408 or status >= 500:
+                retry_after_raw = response.headers.get("retry-after")
+                retry_after = _retry_after_seconds(retry_after_raw, finished)
+                if retry_after is None:
+                    retry_after = _body_retry_after(body, finished)
+                if retry_after is None:
+                    retry_after = 5.0
+                error_code = _provider_error_code(status)
+                outcome = self._result(
+                    "throttled",
+                    request,
+                    request_id,
+                    pin,
+                    retry_count=retry_count,
+                    started=overall_started,
+                    finished=finished,
+                    retry_in=retry_after,
+                    http_status=status,
+                    error_code=error_code,
+                )
+                self._finish(
+                    outcome,
+                    ordinal,
+                    "throttled",
+                    decision="provider_retry",
+                    started=started,
+                    finished=finished,
+                    http_status=status,
+                    retry_after_raw=retry_after_raw,
+                    retry_in=retry_after,
+                    error_code=error_code,
                 )
                 return outcome
 
@@ -435,6 +481,43 @@ class ModelClient:
             headers={"Authorization": f"Bearer {self.settings.groq_api_key}"},
             timeout=remaining,
         )
+
+    def _throttled_reserved(
+        self,
+        request: ModelCallRequest,
+        request_id: str,
+        pin: Pin,
+        retry_count: int,
+        retry_ordinal: int,
+        overall_started: datetime,
+        attempt_started: datetime,
+        *,
+        retry_in: float,
+        error_code: str,
+    ) -> ModelOutcome:
+        finished = self._now()
+        outcome = self._result(
+            "throttled",
+            request,
+            request_id,
+            pin,
+            retry_count=retry_count,
+            started=overall_started,
+            finished=finished,
+            retry_in=retry_in,
+            error_code=error_code,
+        )
+        self._finish(
+            outcome,
+            retry_ordinal,
+            "throttled",
+            decision="provider_retry",
+            started=attempt_started,
+            finished=finished,
+            retry_in=retry_in,
+            error_code=error_code,
+        )
+        return outcome
 
     def _fail_reserved(
         self,
