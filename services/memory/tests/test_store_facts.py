@@ -270,6 +270,36 @@ def test_fact_commit_requires_a_matching_index_and_base_commit():
         assert proposal_row is not None and proposal_row["status"] == "rejected"
 
 
+def test_supersedes_persists_lineage_without_closing_old_fact():
+    store = MemoryStore()
+    base_commit = "e" * 40
+    old_fact_id = f"fact-{uuid4().hex}"
+    store.scip_indexer = FixedIndexer(base_commit)
+    with store._connect() as conn:
+        conn.execute("INSERT INTO facts (_id) VALUES (%s)", (old_fact_id,))
+    round_id = _new_round(store, base_commit)
+    run_id, evidence_ids = _new_run_and_evidence(store, round_id)
+    proposal = _proposal(
+        store,
+        round_id,
+        run_id,
+        evidence_ids,
+        payload=_payload(supersedes=old_fact_id),
+    )
+
+    result = store.commit_round(round_id)
+
+    new_fact_id = "fact-" + hashlib.sha1(proposal["_id"].encode()).hexdigest()[:12]
+    new_fact = _read(
+        store, "SELECT supersedes FROM facts WHERE _id = %s", (new_fact_id,)
+    )
+    old_fact = _read(store, "SELECT _id FROM facts WHERE _id = %s", (old_fact_id,))
+    assert result["committed_proposals"] == [proposal["_id"]]
+    assert new_fact == {"supersedes": old_fact_id}
+    assert old_fact == {"_id": old_fact_id}
+    assert store.closures_for_facts([old_fact_id]) == []
+
+
 def test_scip_index_load_failure_keeps_round_retryable(monkeypatch):
     store = MemoryStore()
     base_commit = "f" * 40

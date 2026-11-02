@@ -181,6 +181,71 @@ def test_reproducer_bug_cause_requires_a_test_and_resolved_anchor():
     )
 
 
+def test_supersedes_must_reference_an_existing_fact():
+    symbol = "scip-python python demo 1.0 `demo.module`/example()."
+    proposal = {
+        "_id": "prop-superseding",
+        "round_id": "round-1",
+        "agent_id": "triager-1",
+        "run_id": "run-1",
+        "op": "assert_fact",
+        "evidence_event_ids": ["ev-1"],
+        "payload": {
+            "claim": "The report has been reconfirmed",
+            "kind": "user_report",
+            "area": "demo",
+            "anchor_names": [symbol],
+            "confidence": 0.8,
+            "decay_half_life_days": 30,
+            "evidence_test": None,
+            "supersedes": "fact-previous",
+        },
+    }
+    run = {
+        "round_id": "round-1",
+        "agent_id": "triager-1",
+        "role": "triager",
+        "event_ids": ["ev-1"],
+    }
+    evidence = {"ev-1": {"taint": 0}}
+    index = ScipIndex(
+        {symbol: (ScipDefinition(symbol, "demo.py", (0, 0, 1), None),)},
+        sha="base-1",
+    )
+    options = {
+        "index": index,
+        "base_commit": "base-1",
+        "committed_at": datetime(2026, 1, 1, tzinfo=UTC),
+    }
+
+    status, _, fact = validate_proposal(
+        "round-1",
+        proposal,
+        run,
+        evidence,
+        existing_fact_ids={"fact-previous"},
+        **options,
+    )
+
+    assert status == "accepted"
+    assert fact is not None and fact["supersedes"] == "fact-previous"
+
+    status, reason, fact = validate_proposal(
+        "round-1",
+        proposal,
+        run,
+        evidence,
+        existing_fact_ids=set(),
+        **options,
+    )
+
+    assert (status, reason, fact) == (
+        "rejected",
+        "supersedes target does not exist",
+        None,
+    )
+
+
 def test_unsupported_operation_is_rejected_even_with_trusted_evidence():
     proposal = {
         "round_id": "round-1",

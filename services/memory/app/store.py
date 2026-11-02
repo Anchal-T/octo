@@ -461,6 +461,23 @@ class MemoryStore:
                 raise RoundConflict("a syncing round needs pending proposals")
 
             base_commit = state.get("base_commit")
+            supersedes_ids = {
+                payload["supersedes"]
+                for proposal in proposals
+                if isinstance((payload := proposal.get("payload")), dict)
+                and isinstance(payload.get("supersedes"), str)
+            }
+            existing_fact_ids = set()
+            for fact_id in supersedes_ids:
+                if (
+                    conn.execute(
+                        "SELECT _id FROM facts FOR ALL VALID_TIME WHERE _id = %s",
+                        (fact_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    existing_fact_ids.add(fact_id)
+
             index = None
             committed_at = None
             if (
@@ -488,6 +505,7 @@ class MemoryStore:
                     index=index,
                     base_commit=base_commit,
                     committed_at=committed_at,
+                    existing_fact_ids=existing_fact_ids,
                 )
                 decisions.append((proposal, status, reason, fact))
                 if status == "accepted":
@@ -508,6 +526,13 @@ class MemoryStore:
                             (proposal["_id"], round_id),
                         )
                         if status == "accepted" and fact is not None:
+                            if fact["supersedes"] is not None:
+                                conn.execute(
+                                    "ASSERT EXISTS (SELECT 1 FROM facts FOR ALL VALID_TIME "
+                                    "WHERE _id = %s), "
+                                    "'supersedes target does not exist'",
+                                    (fact["supersedes"],),
+                                )
                             conn.execute(
                                 "ASSERT NOT EXISTS (SELECT 1 FROM facts WHERE _id = %s), "
                                 "'fact id already exists'",

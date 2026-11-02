@@ -46,6 +46,7 @@ def validate_proposal(
     index: ScipIndex | None = None,
     base_commit: str | None = None,
     committed_at: datetime | None = None,
+    existing_fact_ids: set[str] | frozenset[str] | None = None,
 ) -> Validation:
     if (
         run is None
@@ -123,6 +124,10 @@ def validate_proposal(
         supersedes is not None and not isinstance(supersedes, str)
     ):
         return "rejected", "fact optional fields must be strings", None
+    if supersedes is not None and (
+        existing_fact_ids is None or supersedes not in existing_fact_ids
+    ):
+        return "rejected", "supersedes target does not exist", None
     if role == "reproducer" and (
         not isinstance(evidence_test, str) or not evidence_test.strip()
     ):
