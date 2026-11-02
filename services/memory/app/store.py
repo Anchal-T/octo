@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -469,11 +468,8 @@ class MemoryStore:
                 and base_commit
                 and any(proposal.get("op") == "assert_fact" for proposal in proposals)
             ):
-                try:
-                    index = self.scip_indexer.load(base_commit)
-                    committed_at = self.scip_indexer.committer_date(base_commit)
-                except (OSError, ValueError, subprocess.CalledProcessError):
-                    pass
+                index = self.scip_indexer.load(base_commit)
+                committed_at = self.scip_indexer.committer_date(base_commit)
 
             decisions = []
             accepted_ids = []

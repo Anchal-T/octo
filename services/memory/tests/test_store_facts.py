@@ -270,6 +270,29 @@ def test_fact_commit_requires_a_matching_index_and_base_commit():
         assert proposal_row is not None and proposal_row["status"] == "rejected"
 
 
+def test_scip_index_load_failure_keeps_round_retryable(monkeypatch):
+    store = MemoryStore()
+    base_commit = "f" * 40
+    indexer = FixedIndexer(base_commit)
+
+    def fail_load(sha):
+        raise FileNotFoundError(f"SCIP index missing for {sha}")
+
+    monkeypatch.setattr(indexer, "load", fail_load)
+    store.scip_indexer = indexer
+    round_id = _new_round(store, base_commit)
+    run_id, evidence_ids = _new_run_and_evidence(store, round_id)
+    proposal = _proposal(store, round_id, run_id, evidence_ids, payload=_payload())
+
+    with pytest.raises(FileNotFoundError, match="SCIP index missing"):
+        store.commit_round(round_id)
+
+    round_row = store.get_round(round_id)
+    proposal_row = store.get_proposal(proposal["_id"])
+    assert round_row is not None and round_row["status"] == "syncing"
+    assert proposal_row is not None and proposal_row["status"] == "pending"
+
+
 def test_fact_insert_conflict_rolls_back_proposal_and_round_updates():
     store = MemoryStore()
     base_commit = "d" * 40
