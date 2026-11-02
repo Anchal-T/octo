@@ -157,7 +157,7 @@ class ModelOutcome(Contract):
 
 
 class IssueRunRequest(Contract):
-    issue_id: str = Field(min_length=1, max_length=256)
+    issue_id: str = Field(min_length=1, max_length=200)
     title: str = Field(min_length=1, max_length=500)
     body: str = Field(default="", max_length=100_000)
     read_basis: datetime | None = None

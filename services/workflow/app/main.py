@@ -12,6 +12,7 @@ from agentteam_contracts import (
     Sampling,
 )
 from fastapi import FastAPI, HTTPException
+from pydantic import ValidationError
 from restate.client_types import HttpError as RestateHttpError
 
 from .models import Ledger, ModelClient, Store
@@ -117,7 +118,10 @@ async def run_issue_v1(
         request = request.model_copy(
             update={"read_basis": datetime.fromisoformat(basis)}
         )
-    plan = build_issue_plan_v1(request)
+    try:
+        plan = build_issue_plan_v1(request)
+    except (ValidationError, ValueError) as error:
+        raise restate.TerminalError("invalid triager issue plan") from error
 
     await ctx.run_typed(
         "open-round",
@@ -205,8 +209,11 @@ async def run_issue_v1(
     else:
         raise restate.TerminalError("triager did not complete within two calls")
 
-    run = map_triage_run_v1(plan, outcome)
-    proposal = build_triage_proposal_v1(plan, outcome)
+    try:
+        run = map_triage_run_v1(plan, outcome)
+        proposal = build_triage_proposal_v1(plan, outcome)
+    except (ValidationError, ValueError) as error:
+        raise restate.TerminalError("invalid triage result") from error
     await ctx.run_typed(
         "record-triager-run",
         post_memory,

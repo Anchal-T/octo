@@ -1,7 +1,14 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 
-from agentteam_contracts import IssueRunRequest, IssueRunResult, ModelOutcome
+import pytest
+import restate
+from agentteam_contracts import (
+    EventWrite,
+    IssueRunRequest,
+    IssueRunResult,
+    ModelOutcome,
+)
 
 from services.workflow.app import main as workflow
 from services.workflow.app.plan import (
@@ -154,6 +161,59 @@ def test_throttle_wait_over_two_hours_returns_without_sleeping():
     assert result.status == "throttled"
     assert result.retry_in == 31_536_000
     assert context.sleeps == []
+
+
+def test_issue_plan_validation_error_is_terminal(monkeypatch):
+    basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
+    request = IssueRunRequest(
+        issue_id="issue-17", title="Example title", read_basis=basis
+    )
+
+    class Context:
+        async def run_typed(self, *args, **kwargs):
+            raise AssertionError("no durable steps should run after an invalid plan")
+
+    monkeypatch.setattr(
+        workflow,
+        "build_issue_plan_v1",
+        lambda request: EventWrite(idempotency_key="invalid"),
+    )
+
+    with pytest.raises(restate.TerminalError, match="invalid triager issue plan"):
+        asyncio.run(workflow.run_issue_v1(Context(), request))
+
+
+def test_triage_plan_validation_error_is_terminal_after_model_call(monkeypatch):
+    basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
+    request = IssueRunRequest(
+        issue_id="issue-17", title="Example title", read_basis=basis
+    )
+    plan = workflow.build_issue_plan_v1(request)
+    model_outcome = ModelOutcome(
+        outcome="completed",
+        request_id="mc-example",
+        decided_at=basis,
+        model_pinned="openai/gpt-oss-20b",
+        run_id=plan.run_id,
+        step="triage",
+        text="Example triage",
+        started_at=basis,
+        finished_at=basis,
+    )
+
+    class Context:
+        async def run_typed(self, name, *args, **kwargs):
+            if name == "triage-call:1":
+                return model_outcome
+            return {}
+
+    def invalid_proposal(*args):
+        return EventWrite(idempotency_key="invalid")
+
+    monkeypatch.setattr(workflow, "build_triage_proposal_v1", invalid_proposal)
+
+    with pytest.raises(restate.TerminalError, match="triage result"):
+        asyncio.run(workflow.run_issue_v1(Context(), request))
 
 
 def test_second_throttle_result_preserves_retry_and_model_metadata():
