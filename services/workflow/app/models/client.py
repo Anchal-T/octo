@@ -816,22 +816,22 @@ def _payload_identity(
 def _retry_after_seconds(value: str | None, now: datetime) -> float | None:
     if not value:
         return None
+    seconds = _finite_seconds(value)
+    if seconds is not None:
+        return seconds
     try:
-        return max(0.0, float(value))
-    except ValueError:
-        try:
-            retry_at = parsedate_to_datetime(value)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        if retry_at.tzinfo is None or retry_at.utcoffset() is None:
-            return None
-        return max(0.0, (retry_at - now).total_seconds())
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+        return None
+    return max(0.0, (retry_at - now).total_seconds())
 
 
 def _body_retry_after(body: dict[str, Any], now: datetime) -> float | None:
     value = body.get("retry_in")
-    if isinstance(value, (int, float)):
-        return max(0.0, float(value))
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return _finite_seconds(value)
     retry_at = _parse_datetime(body.get("retry_at"))
     if retry_at is not None:
         return max(0.0, (retry_at - now).total_seconds())
@@ -864,6 +864,16 @@ def _provider_quota(
     if retry_after is not None:
         return now + timedelta(seconds=retry_after), scope, "header"
     return None
+
+
+def _finite_seconds(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(0.0, seconds) if math.isfinite(seconds) else None
 
 
 def _parse_datetime(value: Any) -> datetime | None:

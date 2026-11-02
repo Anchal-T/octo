@@ -140,7 +140,7 @@ class ModelOutcome(Contract):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     retry_at: datetime | None = None
-    retry_in: float | None = Field(default=None, ge=0)
+    retry_in: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     scope: (
         Literal[
             "minute_requests",
@@ -173,7 +173,7 @@ class IssueRunResult(Contract):
     model: str | None = None
     provider: Literal["groq"] | None = None
     retry_at: datetime | None = None
-    retry_in: float | None = Field(default=None, ge=0)
+    retry_in: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     scope: (
         Literal[
             "minute_requests",

@@ -6,7 +6,12 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from agentteam_common import Settings
-from agentteam_contracts import ModelCallRequest, ModelOutcome, Sampling
+from agentteam_contracts import (
+    IssueRunResult,
+    ModelCallRequest,
+    ModelOutcome,
+    Sampling,
+)
 from pydantic import ValidationError
 
 from services.workflow.app.models.client import ModelClient, retry_fits
@@ -330,6 +335,90 @@ def test_provider_quota_result_carries_retry_at_and_scope(tmp_path):
     assert result.outcome == "quota_exhausted"
     assert result.retry_at == datetime(2026, 10, 31, tzinfo=UTC)
     assert result.scope == "day_tokens"
+
+
+@pytest.mark.parametrize("retry_after", ["inf", "Infinity", "1e999", "nan"])
+def test_nonfinite_retry_after_falls_back_to_finite_delay(tmp_path, retry_after):
+    def provider(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": retry_after},
+            json={"error": {"code": "rate_limit_exceeded"}},
+        )
+
+    client, _ = make_client(tmp_path, provider)
+
+    result = client.call(model_request())
+
+    assert result.outcome == "throttled"
+    assert result.retry_in == 5
+
+
+def test_nonfinite_quota_retry_after_does_not_raise_or_leave_reserved_attempt(
+    tmp_path,
+):
+    def provider(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "Infinity"},
+            json={"error": "quota_exhausted", "scope": "day_tokens"},
+        )
+
+    client, _ = make_client(tmp_path, provider)
+    result = client.call(model_request())
+
+    assert result.outcome == "throttled"
+    assert result.retry_in == 5
+    with client.store.connection() as connection:
+        attempts = connection.execute(
+            "SELECT state FROM call_attempt WHERE request_id = ?",
+            (result.request_id,),
+        ).fetchall()
+    assert attempts
+    assert {attempt["state"] for attempt in attempts} == {"throttled"}
+
+
+def test_nonfinite_body_retry_in_falls_back_to_finite_delay(tmp_path):
+    def provider(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            content=json.dumps(
+                {"error": {"code": "rate_limit_exceeded"}, "retry_in": float("nan")},
+                allow_nan=True,
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+
+    client, _ = make_client(tmp_path, provider)
+
+    result = client.call(model_request())
+
+    assert result.outcome == "throttled"
+    assert result.retry_in == 5
+
+
+def test_retry_delay_contracts_reject_nonfinite_values():
+    for value in (float("inf"), float("nan")):
+        with pytest.raises(ValidationError):
+            ModelOutcome(
+                outcome="throttled",
+                request_id="mc-example",
+                decided_at=FIXED_NOW,
+                model_pinned=MODEL,
+                run_id="run-1",
+                step="triage",
+                retry_in=value,
+            )
+        with pytest.raises(ValidationError):
+            IssueRunResult(
+                issue_id="issue-1",
+                round_id="round-1",
+                event_id="event-1",
+                run_id="run-1",
+                proposal_id="proposal-1",
+                status="throttled",
+                retry_in=value,
+            )
 
 
 def test_429_that_does_not_fit_returns_throttled_without_retry(tmp_path):
