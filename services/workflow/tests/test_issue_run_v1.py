@@ -1,7 +1,9 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 from agentteam_contracts import IssueRunRequest, IssueRunResult, ModelOutcome
 
+from services.workflow.app import main as workflow
 from services.workflow.app.plan import (
     build_issue_plan_v1,
     build_triage_proposal_v1,
@@ -110,6 +112,48 @@ def test_committed_issue_result_keeps_legacy_required_fields():
     assert result.model is None
     assert result.provider is None
     assert result.retry_in is None
+
+
+def test_throttle_wait_over_two_hours_returns_without_sleeping():
+    basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
+    model_outcome = ModelOutcome(
+        outcome="throttled",
+        request_id="mc-example",
+        decided_at=basis,
+        model_pinned="openai/gpt-oss-20b",
+        run_id="run-example",
+        step="triage",
+        retry_in=31_536_000,
+        started_at=basis,
+        finished_at=basis,
+    )
+
+    class Context:
+        def __init__(self):
+            self.sleeps = []
+
+        async def run_typed(self, name, *args, **kwargs):
+            if name == "read-basis":
+                return basis.isoformat()
+            if name in ("triage-call:1", "triage-call:2"):
+                return model_outcome
+            if name == "triage-throttle-wait:1":
+                return args[0](**kwargs)
+            if name in ("open-round", "record-issue"):
+                return {}
+            raise AssertionError(f"unexpected workflow step: {name}")
+
+        async def sleep(self, duration, *, name):
+            self.sleeps.append((duration, name))
+
+    context = Context()
+    request = IssueRunRequest(issue_id="issue-17", title="Example title")
+
+    result = asyncio.run(workflow.run_issue_v1(context, request))
+
+    assert result.status == "throttled"
+    assert result.retry_in == 31_536_000
+    assert context.sleeps == []
 
 
 def test_second_throttle_result_preserves_retry_and_model_metadata():

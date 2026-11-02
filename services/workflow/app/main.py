@@ -22,7 +22,7 @@ from .plan import (
     map_triage_return_v1,
     map_triage_run_v1,
 )
-from .retries import WaitDecision, decide_wait
+from .retries import WaitDecision, decide_delay, decide_wait
 
 settings = Settings.from_env()
 issue_run = restate.Workflow("IssueRun")
@@ -164,8 +164,20 @@ async def run_issue_v1(
                 raise restate.TerminalError("triager throttle is missing retry_in")
             if call_number == 2:
                 return map_triage_return_v1(plan, outcome)
+            wait = await ctx.run_typed(
+                f"triage-throttle-wait:{call_number}",
+                decide_delay,
+                restate.RunOptions(type_hint=WaitDecision),
+                delay_s=outcome.retry_in,
+                cap_s=settings.triager_wait_cap_s,
+            )
+            if wait["action"] == "return":
+                return map_triage_return_v1(plan, outcome)
+            wait_s = wait["wait_s"]
+            if wait_s is None:
+                raise restate.TerminalError("triager wait decision is missing wait_s")
             await ctx.sleep(
-                timedelta(seconds=outcome.retry_in),
+                timedelta(seconds=wait_s),
                 name=f"triage-throttle:{call_number}",
             )
             continue
