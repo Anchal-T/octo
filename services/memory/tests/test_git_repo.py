@@ -44,6 +44,26 @@ def test_diff_u0_parses_replacements_additions_and_file_deletions(tmp_path):
     assert repo.changed_py(parent, child)
 
 
+def test_diff_u0_preserves_special_filenames(tmp_path):
+    path = tmp_path / "repo"
+    repo = _repo(path)
+    names = ["space name.py", "tab\tname.py", 'quote"name.py', "café.py"]
+    for index, name in enumerate(names):
+        before = "\n".join(["same"] * index + ["before"]) + "\n"
+        (path / name).write_text(before, encoding="utf-8")
+    parent = _commit(path, "parent")
+
+    for index, name in enumerate(names):
+        after = "\n".join(["same"] * index + ["after"]) + "\n"
+        (path / name).write_text(after, encoding="utf-8")
+    child = _commit(path, "child")
+
+    assert {hunk.file: hunk.old_start for hunk in repo.diff_u0(parent, child)} == {
+        name: index + 1 for index, name in enumerate(names)
+    }
+    assert repo.changed_py(parent, child)
+
+
 def test_diff_hunk_parser_ignores_header_like_changed_source(tmp_path):
     path = tmp_path / "repo"
     repo = _repo(path)

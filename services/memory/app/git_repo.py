@@ -1,3 +1,4 @@
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -59,6 +60,8 @@ class GitRepo:
         result = subprocess.run(
             [
                 "git",
+                "-c",
+                "core.quotePath=false",
                 "diff",
                 "--no-ext-diff",
                 "--no-color",
@@ -74,7 +77,14 @@ class GitRepo:
             capture_output=True,
             text=True,
         )
-        return self._parse_hunks(result.stdout)
+        paths = subprocess.run(
+            ["git", "diff", "--no-renames", "--name-only", "-z", a, b, "--"],
+            cwd=self.path,
+            check=True,
+            capture_output=True,
+        ).stdout
+        files = [os.fsdecode(path) for path in paths.split(b"\0") if path]
+        return self._parse_hunks(result.stdout, files)
 
     def changed_py(self, a: str, b: str) -> bool:
         result = subprocess.run(
@@ -87,23 +97,19 @@ class GitRepo:
         return any(path.endswith(".py") for path in result.stdout.split("\0"))
 
     @staticmethod
-    def _parse_hunks(diff: str) -> list[Hunk]:
+    def _parse_hunks(diff: str, files: list[str]) -> list[Hunk]:
         hunks: list[Hunk] = []
-        old_file: str | None = None
-        new_file: str | None = None
-        in_hunk = False
+        file_index = -1
         for line in diff.splitlines():
             if line.startswith("diff --git "):
-                old_file = new_file = None
-                in_hunk = False
+                file_index += 1
                 continue
 
             match = _HUNK_HEADER.match(line)
             if match is not None:
-                in_hunk = True
-                file = new_file if new_file != "/dev/null" else old_file
-                if file is None or file == "/dev/null":
+                if file_index >= len(files):
                     continue
+                file = files[file_index]
                 old_start, old_len, new_start, new_len = match.groups()
                 hunks.append(
                     Hunk(
@@ -114,8 +120,5 @@ class GitRepo:
                         new_len=int(new_len or 1),
                     )
                 )
-            elif not in_hunk and line.startswith("--- "):
-                old_file = line[4:]
-            elif not in_hunk and line.startswith("+++ "):
-                new_file = line[4:]
+
         return hunks

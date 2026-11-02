@@ -76,6 +76,24 @@ class ScipIndex:
     def definitions_for(self, symbol: str) -> tuple[ScipDefinition, ...]:
         return self._definitions.get(symbol, ())
 
+    def overlapping(self, file: str, start: int, end: int) -> set[str]:
+        """Return definitions overlapping a zero-based half-open line range."""
+        if start < 0 or end <= start:
+            return set()
+
+        overlapping = set()
+        for symbol, definitions in self._definitions.items():
+            for definition in definitions:
+                if definition.relative_path != file:
+                    continue
+                range_start, range_end = self._line_span(
+                    definition.enclosing_range or definition.range
+                )
+                if range_start < end and start < range_end:
+                    overlapping.add(symbol)
+                    break
+        return overlapping
+
     def innermost(self, file: str, start: int, end: int) -> str | None:
         """Return the smallest definition containing a zero-based half-open line range."""
         if start < 0 or end <= start:

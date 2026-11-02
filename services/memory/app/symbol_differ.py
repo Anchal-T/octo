@@ -11,12 +11,12 @@ class SymbolDiffer:
         for hunk in hunks:
             if hunk.old_len:
                 start = hunk.old_start - 1
-                symbol = parent.innermost(hunk.file, start, start + hunk.old_len)
-                if symbol is not None:
-                    changed.add(symbol)
+                changed.update(
+                    parent.overlapping(hunk.file, start, start + hunk.old_len)
+                )
             if hunk.new_len:
                 start = hunk.new_start - 1
-                symbol = child.innermost(hunk.file, start, start + hunk.new_len)
-                if symbol is not None:
-                    changed.add(symbol)
+                changed.update(
+                    child.overlapping(hunk.file, start, start + hunk.new_len)
+                )
         return changed
