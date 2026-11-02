@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import pytest
 import restate
@@ -156,7 +157,9 @@ def test_throttle_wait_over_two_hours_returns_without_sleeping():
     context = Context()
     request = IssueRunRequest(issue_id="issue-17", title="Example title")
 
-    result = asyncio.run(workflow.run_issue_v1(context, request))
+    result = asyncio.run(
+        workflow.run_issue_v1(cast(restate.WorkflowContext, context), request)
+    )
 
     assert result.status == "throttled"
     assert result.retry_in == 31_536_000
@@ -180,7 +183,9 @@ def test_issue_plan_validation_error_is_terminal(monkeypatch):
     )
 
     with pytest.raises(restate.TerminalError, match="invalid triager issue plan"):
-        asyncio.run(workflow.run_issue_v1(Context(), request))
+        asyncio.run(
+            workflow.run_issue_v1(cast(restate.WorkflowContext, Context()), request)
+        )
 
 
 def test_triage_plan_validation_error_is_terminal_after_model_call(monkeypatch):
@@ -213,7 +218,9 @@ def test_triage_plan_validation_error_is_terminal_after_model_call(monkeypatch):
     monkeypatch.setattr(workflow, "build_triage_proposal_v1", invalid_proposal)
 
     with pytest.raises(restate.TerminalError, match="triage result"):
-        asyncio.run(workflow.run_issue_v1(Context(), request))
+        asyncio.run(
+            workflow.run_issue_v1(cast(restate.WorkflowContext, Context()), request)
+        )
 
 
 def test_second_throttle_result_preserves_retry_and_model_metadata():
