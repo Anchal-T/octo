@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,12 @@ from .sync import validate_proposal
 
 TAINT_LABELS = {0: "trusted", 1: "internal", 2: "untrusted", 3: "quarantined"}
 TABLES = {"events", "runs", "rounds", "proposals", "commits"}
+_MAX_QUERY_PARAMS = 60_000
+
+
+def _chunks(values: list[str], size: int) -> Iterator[list[str]]:
+    for offset in range(0, len(values), size):
+        yield values[offset : offset + size]
 
 
 class IdempotencyConflict(Exception):
@@ -193,39 +200,58 @@ class MemoryStore:
         ]
 
     def facts_for_symbols(self, symbols: list[str]) -> list[dict[str, Any]]:
+        if any("\x00" in symbol for symbol in symbols):
+            raise ValueError("symbol names must not contain NUL characters")
+        symbols = list(dict.fromkeys(symbols))
         if not symbols:
             return []
-        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in symbols)
-        query = sql.SQL(
-            "SELECT _id, valid_from_commit, anchors, evidence_test "
-            "FROM facts FOR ALL VALID_TIME "
-            "WHERE EXISTS (SELECT 1 FROM UNNEST(anchors) AS a(anc) "
-            "WHERE (a.anc).symbol IN ({}))"
-        ).format(placeholders)
+        rows_by_id = {}
         with self._connect() as conn:
-            return list(conn.execute(query, symbols).fetchall())
+            for chunk in _chunks(symbols, _MAX_QUERY_PARAMS):
+                placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in chunk)
+                query = sql.SQL(
+                    "SELECT _id, valid_from_commit, anchors, evidence_test "
+                    "FROM facts FOR ALL VALID_TIME "
+                    "WHERE EXISTS (SELECT 1 FROM UNNEST(anchors) AS a(anc) "
+                    "WHERE (a.anc).symbol IN ({}))"
+                ).format(placeholders)
+                for row in conn.execute(query, chunk).fetchall():
+                    rows_by_id.setdefault(row["_id"], row)
+        return list(rows_by_id.values())
 
     def facts_by_ids(self, fact_ids: list[str]) -> list[dict[str, Any]]:
+        fact_ids = list(dict.fromkeys(fact_ids))
         if not fact_ids:
             return []
-        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in fact_ids)
-        query = sql.SQL(
-            "SELECT _id, valid_from_commit, anchors, evidence_test "
-            "FROM facts FOR ALL VALID_TIME WHERE _id IN ({})"
-        ).format(placeholders)
+        rows_by_id = {}
         with self._connect() as conn:
-            return list(conn.execute(query, fact_ids).fetchall())
+            for chunk in _chunks(fact_ids, _MAX_QUERY_PARAMS):
+                placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in chunk)
+                query = sql.SQL(
+                    "SELECT _id, valid_from_commit, anchors, evidence_test "
+                    "FROM facts FOR ALL VALID_TIME WHERE _id IN ({})"
+                ).format(placeholders)
+                for row in conn.execute(query, chunk).fetchall():
+                    rows_by_id.setdefault(row["_id"], row)
+        return list(rows_by_id.values())
 
     def closures_for_facts(self, fact_ids: list[str]) -> list[dict[str, Any]]:
+        fact_ids = list(dict.fromkeys(fact_ids))
         if not fact_ids:
             return []
-        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in fact_ids)
-        query = sql.SQL(
-            "SELECT fact_id, closing_commit FROM fact_closures FOR ALL VALID_TIME "
-            "WHERE fact_id IN ({})"
-        ).format(placeholders)
+        rows_by_closure = {}
         with self._connect() as conn:
-            return list(conn.execute(query, fact_ids).fetchall())
+            for chunk in _chunks(fact_ids, _MAX_QUERY_PARAMS):
+                placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in chunk)
+                query = sql.SQL(
+                    "SELECT fact_id, closing_commit FROM fact_closures FOR ALL VALID_TIME "
+                    "WHERE fact_id IN ({})"
+                ).format(placeholders)
+                for row in conn.execute(query, chunk).fetchall():
+                    rows_by_closure.setdefault(
+                        (row["fact_id"], row["closing_commit"]), row
+                    )
+        return list(rows_by_closure.values())
 
     def all_fact_closures(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -239,20 +265,22 @@ class MemoryStore:
         if not fact_ids:
             return
         fact_ids = list(dict.fromkeys(fact_ids))
-        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in fact_ids)
-        query = sql.SQL(
-            "SELECT _id, _valid_from FROM facts FOR ALL VALID_TIME WHERE _id IN ({})"
-        ).format(placeholders)
         with self._connect() as conn:
             valid_from_by_id = {}
-            for row in conn.execute(query, fact_ids).fetchall():
-                fact_id = row["_id"]
-                valid_from = row["_valid_from"]
-                if (
-                    fact_id not in valid_from_by_id
-                    or valid_from < valid_from_by_id[fact_id]
-                ):
-                    valid_from_by_id[fact_id] = valid_from
+            for chunk in _chunks(fact_ids, _MAX_QUERY_PARAMS):
+                placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in chunk)
+                query = sql.SQL(
+                    "SELECT _id, _valid_from FROM facts FOR ALL VALID_TIME "
+                    "WHERE _id IN ({})"
+                ).format(placeholders)
+                for row in conn.execute(query, chunk).fetchall():
+                    fact_id = row["_id"]
+                    valid_from = row["_valid_from"]
+                    if (
+                        fact_id not in valid_from_by_id
+                        or valid_from < valid_from_by_id[fact_id]
+                    ):
+                        valid_from_by_id[fact_id] = valid_from
 
             close_ids_by_time = {}
             for fact_id in fact_ids:
@@ -262,12 +290,13 @@ class MemoryStore:
                 close_ids_by_time.setdefault(close_at, []).append(fact_id)
 
             for close_at, ids in close_ids_by_time.items():
-                placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in ids)
-                delete = sql.SQL(
-                    "DELETE FROM facts FOR PORTION OF VALID_TIME FROM %s TO NULL "
-                    "WHERE _id IN ({})"
-                ).format(placeholders)
-                conn.execute(delete, (close_at, *ids))
+                for chunk in _chunks(ids, _MAX_QUERY_PARAMS - 1):
+                    placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in chunk)
+                    delete = sql.SQL(
+                        "DELETE FROM facts FOR PORTION OF VALID_TIME FROM %s TO NULL "
+                        "WHERE _id IN ({})"
+                    ).format(placeholders)
+                    conn.execute(delete, (close_at, *chunk))
 
     def record_fact_closure(
         self,
