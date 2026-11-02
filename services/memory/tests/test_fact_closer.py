@@ -1,7 +1,9 @@
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 
 from services.memory.app.dag import Commit, Dag
 from services.memory.app.fact_closer import FactCloser
+from services.memory.app.store import MemoryStore
 
 
 class FakeStore:
@@ -114,6 +116,34 @@ def test_advance_main_projects_a_branch_closure_at_the_first_merge():
     assert closer.advance_main(main.sha) == []
     assert closer.advance_main(merge.sha) == ["fact-side"]
     assert store.ended == [(("fact-side",), merge.committed_at)]
+
+
+def test_end_fact_valid_time_clamps_each_close_to_fact_start(monkeypatch):
+    requested_at = datetime(2026, 1, 1, tzinfo=UTC)
+    earlier_start = datetime(2025, 12, 1, tzinfo=UTC)
+    later_start = datetime(2026, 1, 5, tzinfo=UTC)
+    rows = [
+        {"_id": "fact-earlier", "_valid_from": earlier_start},
+        {"_id": "fact-later", "_valid_from": later_start},
+    ]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    select_cursor = MagicMock()
+    select_cursor.fetchall.return_value = rows
+    connection.execute.side_effect = [select_cursor, MagicMock(), MagicMock()]
+    store = MemoryStore()
+    monkeypatch.setattr(store, "_connect", lambda: connection)
+
+    store.end_fact_valid_time(["fact-earlier", "fact-later"], requested_at)
+
+    close_params = [call.args[1] for call in connection.execute.call_args_list[1:]]
+    close_time_by_fact = {
+        fact_id: params[0] for params in close_params for fact_id in params[1:]
+    }
+    assert close_time_by_fact == {
+        "fact-earlier": requested_at,
+        "fact-later": later_start,
+    }
 
 
 def test_merge_checks_fact_validity_and_changed_symbols_against_each_parent():

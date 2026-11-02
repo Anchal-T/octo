@@ -238,13 +238,36 @@ class MemoryStore:
     def end_fact_valid_time(self, fact_ids: list[str], committed_at: datetime) -> None:
         if not fact_ids:
             return
+        fact_ids = list(dict.fromkeys(fact_ids))
         placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in fact_ids)
         query = sql.SQL(
-            "DELETE FROM facts FOR PORTION OF VALID_TIME FROM %s TO NULL "
-            "WHERE _id IN ({})"
+            "SELECT _id, _valid_from FROM facts FOR ALL VALID_TIME WHERE _id IN ({})"
         ).format(placeholders)
         with self._connect() as conn:
-            conn.execute(query, (committed_at, *fact_ids))
+            valid_from_by_id = {}
+            for row in conn.execute(query, fact_ids).fetchall():
+                fact_id = row["_id"]
+                valid_from = row["_valid_from"]
+                if (
+                    fact_id not in valid_from_by_id
+                    or valid_from < valid_from_by_id[fact_id]
+                ):
+                    valid_from_by_id[fact_id] = valid_from
+
+            close_ids_by_time = {}
+            for fact_id in fact_ids:
+                if fact_id not in valid_from_by_id:
+                    continue
+                close_at = max(committed_at, valid_from_by_id[fact_id])
+                close_ids_by_time.setdefault(close_at, []).append(fact_id)
+
+            for close_at, ids in close_ids_by_time.items():
+                placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in ids)
+                delete = sql.SQL(
+                    "DELETE FROM facts FOR PORTION OF VALID_TIME FROM %s TO NULL "
+                    "WHERE _id IN ({})"
+                ).format(placeholders)
+                conn.execute(delete, (close_at, *ids))
 
     def record_fact_closure(
         self,
