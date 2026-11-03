@@ -42,6 +42,9 @@ class Dag:
     def __init__(self, commits: Iterable[Commit] = ()) -> None:
         self.commits: dict[str, Commit] = {}
         self.children: dict[str, set[str]] = {}
+        self._commit_indexes: dict[str, int] = {}
+        self._shas_by_index: list[str] = []
+        self._ancestor_masks: list[int] = []
         self._ancestors_cache: OrderedDict[str, frozenset[str]] = OrderedDict()
         self._descendants_cache: dict[str, frozenset[str]] = {}
         for commit in commits:
@@ -98,10 +101,18 @@ class Dag:
             if parent not in self.commits:
                 raise KeyError(parent)
 
+        index = len(self._shas_by_index)
+        ancestor_mask = 1 << index
+        for parent in commit.parents:
+            ancestor_mask |= self._ancestor_masks[self._commit_indexes[parent]]
+
         self.commits[commit.sha] = commit
         self.children.setdefault(commit.sha, set())
         for parent in commit.parents:
             self.children[parent].add(commit.sha)
+        self._commit_indexes[commit.sha] = index
+        self._shas_by_index.append(commit.sha)
+        self._ancestor_masks.append(ancestor_mask)
         self._ancestors_cache.clear()
         self._descendants_cache.clear()
 
@@ -113,22 +124,40 @@ class Dag:
             self._ancestors_cache.move_to_end(base)
             return cached
 
-        found = set()
-        pending = [base]
-        while pending:
-            sha = pending.pop()
-            if sha in found:
-                continue
-            found.add(sha)
-            pending.extend(self.commits[sha].parents)
+        ancestors = self._shas_for_mask(
+            self._ancestor_masks[self._commit_indexes[base]]
+        )
         if len(self._ancestors_cache) >= self._ANCESTOR_CACHE_LIMIT:
             self._ancestors_cache.popitem(last=False)
-        ancestors = frozenset(found)
         self._ancestors_cache[base] = ancestors
         return ancestors
 
+    def new_ancestors(self, base: str, previous: str | None) -> frozenset[str]:
+        if base not in self._commit_indexes:
+            raise KeyError(base)
+        new_mask = self._ancestor_masks[self._commit_indexes[base]]
+        if previous is not None:
+            if previous not in self._commit_indexes:
+                raise KeyError(previous)
+            new_mask &= ~self._ancestor_masks[self._commit_indexes[previous]]
+        return self._shas_for_mask(new_mask)
+
     def is_ancestor(self, ancestor: str, descendant: str) -> bool:
-        return ancestor in self.ancestors(descendant)
+        if descendant not in self._commit_indexes:
+            raise KeyError(descendant)
+        ancestor_index = self._commit_indexes.get(ancestor)
+        return ancestor_index is not None and bool(
+            self._ancestor_masks[self._commit_indexes[descendant]]
+            & (1 << ancestor_index)
+        )
+
+    def _shas_for_mask(self, mask: int) -> frozenset[str]:
+        shas = set()
+        while mask:
+            bit = mask & -mask
+            shas.add(self._shas_by_index[bit.bit_length() - 1])
+            mask ^= bit
+        return frozenset(shas)
 
     def descendants(self, sha: str) -> frozenset[str]:
         if sha not in self.commits:

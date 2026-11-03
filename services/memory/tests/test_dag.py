@@ -63,6 +63,18 @@ def test_dag_can_load_commit_rows_in_any_order():
     assert dag.ancestors(merge.sha) == frozenset({"a", "b", "c", "d"})
 
 
+def test_new_ancestors_returns_only_nodes_not_reached_from_previous():
+    root = _commit("a")
+    main = _commit("b", (root.sha,))
+    side = _commit("c", (root.sha,))
+    merge = _commit("d", (main.sha, side.sha))
+    dag = Dag((root, main, side, merge))
+
+    assert dag.new_ancestors(merge.sha, main.sha) == frozenset({side.sha, merge.sha})
+    assert dag.new_ancestors(merge.sha, side.sha) == frozenset({main.sha, merge.sha})
+    assert dag.new_ancestors(main.sha, None) == frozenset({root.sha, main.sha})
+
+
 def test_commit_rejects_naive_committed_at():
     with pytest.raises(ValueError, match="committed_at must be timezone-aware"):
         Commit(
@@ -82,6 +94,20 @@ def test_dag_rejects_unknown_bases_and_parents():
         dag.ancestors("missing")
     with pytest.raises(KeyError):
         dag.add(_commit("b", ("missing",)))
+
+
+def test_ancestor_check_does_not_materialize_the_full_ancestor_set(monkeypatch):
+    root = _commit("a")
+    child = _commit("b", (root.sha,))
+    dag = Dag((root, child))
+
+    def fail_if_materialized(_base):
+        pytest.fail("is_ancestor should use the reachability index")
+
+    monkeypatch.setattr(dag, "ancestors", fail_if_materialized)
+
+    assert dag.is_ancestor(root.sha, child.sha)
+    assert not dag.is_ancestor(child.sha, root.sha)
 
 
 def test_ancestor_cache_stays_bounded_when_querying_a_long_history():

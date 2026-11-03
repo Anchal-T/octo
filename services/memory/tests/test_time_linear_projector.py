@@ -1,8 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
-from services.memory.app.time_linear_projector import TimeLinearProjector
+import pytest
 
 from services.memory.app.dag import Commit, Dag
+from services.memory.app.time_linear_projector import TimeLinearProjector
 
 
 class FakeStore:
@@ -24,14 +25,20 @@ def _commit(sha, parents=(), branch="main"):
     )
 
 
-def test_projects_a_side_branch_closure_at_its_first_main_merge():
+def test_projects_a_side_branch_closure_at_its_first_main_merge(monkeypatch):
     root = _commit("a")
     main = _commit("b", (root.sha,))
     side = _commit("c", (root.sha,), branch="feature")
     merge = _commit("d", (main.sha, side.sha))
     store = FakeStore()
 
-    end = TimeLinearProjector(Dag((root, main, side, merge)), store).end_for(
+    dag = Dag((root, main, side, merge))
+    monkeypatch.setattr(
+        dag,
+        "ancestors",
+        lambda sha: pytest.fail("projection should process ancestry deltas"),
+    )
+    end = TimeLinearProjector(dag, store).end_for(
         "fact-1", side.sha, main_head=merge.sha
     )
 

@@ -14,9 +14,11 @@ class TimeLinearProjector:
     ) -> datetime | None:
         if closing_commit not in self.dag.commits:
             raise KeyError(closing_commit)
+        previous: str | None = None
         for sha in self.dag.first_parent_path(main_head):
-            if closing_commit in self.dag.ancestors(sha):
+            if closing_commit in self.dag.new_ancestors(sha, previous):
                 committed_at = self.dag.commits[sha].committed_at
                 self.store.end_fact_valid_time([fact_id], committed_at)
                 return committed_at
+            previous = sha
         return None

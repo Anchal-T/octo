@@ -21,11 +21,10 @@ class FactCloser:
         for closure in self.store.all_fact_closures():
             closures_by_commit[closure["closing_commit"]].add(closure["fact_id"])
 
-        seen: frozenset[str] = frozenset()
+        previous: str | None = None
         projected: set[str] = set()
         for sha in path:
-            ancestors = self.dag.ancestors(sha)
-            reached = ancestors - seen
+            reached = self.dag.new_ancestors(sha, previous)
             fact_ids = {
                 fact_id
                 for closing_commit in reached
@@ -37,7 +36,7 @@ class FactCloser:
                     sorted(fact_ids), self.dag.commits[sha].committed_at
                 )
                 projected.update(fact_ids)
-            seen = ancestors
+            previous = sha
 
         self.main_head = head
         return sorted(projected)
@@ -79,13 +78,13 @@ class FactCloser:
                 )
                 if not candidates:
                     continue
-                ancestors = self.dag.ancestors(parent)
                 for fact_id in candidates:
                     fact = facts[fact_id]
-                    if fact["valid_from_commit"] not in ancestors:
+                    if not self.dag.is_ancestor(fact["valid_from_commit"], parent):
                         continue
                     if any(
-                        closing in ancestors for closing in closures_by_fact[fact_id]
+                        self.dag.is_ancestor(closing, parent)
+                        for closing in closures_by_fact[fact_id]
                     ):
                         continue
                     parents_by_fact[fact_id].add(parent)
@@ -138,12 +137,11 @@ class FactCloser:
         for parent, symbols in changed_by_parent.items():
             if not symbols:
                 continue
-            ancestors = self.dag.ancestors(parent)
             for fact_id, fact in facts_by_id.items():
-                if fact["valid_from_commit"] not in ancestors:
+                if not self.dag.is_ancestor(fact["valid_from_commit"], parent):
                     continue
                 if any(
-                    closing_commit in ancestors
+                    self.dag.is_ancestor(closing_commit, parent)
                     for closing_commit in closures_by_fact[fact_id]
                 ):
                     continue

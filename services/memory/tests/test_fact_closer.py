@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
+import pytest
+
 from services.memory.app.dag import Commit, Dag
 from services.memory.app.fact_closer import FactCloser
 from services.memory.app.store import MemoryStore
@@ -98,7 +100,7 @@ def test_backfill_walks_descendants_and_closes_a_late_fact():
     assert store.ended == [(("fact-late",), changed.committed_at)]
 
 
-def test_advance_main_projects_a_branch_closure_at_the_first_merge():
+def test_advance_main_projects_a_branch_closure_at_the_first_merge(monkeypatch):
     root = _commit("a")
     main = _commit("b", (root.sha,))
     side = _commit("c", (root.sha,), branch="feature")
@@ -111,7 +113,13 @@ def test_advance_main_projects_a_branch_closure_at_the_first_merge():
             },
         )
     )
-    closer = FactCloser(Dag((root, main, side, merge)), store)
+    dag = Dag((root, main, side, merge))
+    monkeypatch.setattr(
+        dag,
+        "ancestors",
+        lambda sha: pytest.fail("advance_main should process ancestry deltas"),
+    )
+    closer = FactCloser(dag, store)
 
     assert closer.advance_main(main.sha) == []
     assert closer.advance_main(merge.sha) == ["fact-side"]
