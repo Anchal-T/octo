@@ -108,9 +108,50 @@ def test_model_outcome_is_a_single_flat_pydantic_model():
         model_pinned="openai/gpt-oss-20b",
         run_id="run-1",
         step="triage",
+        text="completed",
     )
 
     assert outcome.outcome == "completed"
+
+
+def test_model_outcome_requires_status_specific_fields():
+    base = {
+        "request_id": "mc-example",
+        "decided_at": FIXED_NOW,
+        "model_pinned": MODEL,
+        "run_id": "run-1",
+        "step": "triage",
+    }
+    invalid_outcomes = (
+        {"outcome": "completed"},
+        {"outcome": "quota_exhausted", "scope": "day_requests"},
+        {
+            "outcome": "quota_exhausted",
+            "retry_at": FIXED_NOW,
+        },
+        {"outcome": "throttled"},
+        {"outcome": "failed", "error_code": "provider_error"},
+        {"outcome": "ledger_unavailable", "reason": "store is down"},
+    )
+
+    for fields in invalid_outcomes:
+        with pytest.raises(ValidationError):
+            ModelOutcome(**base, **fields)
+
+
+def test_model_outcome_allows_tool_call_only_completion():
+    outcome = ModelOutcome(
+        outcome="completed",
+        request_id="mc-example",
+        decided_at=FIXED_NOW,
+        model_pinned=MODEL,
+        run_id="run-1",
+        step="triage",
+        tool_calls=[{"id": "call-1"}],
+    )
+
+    assert outcome.text is None
+    assert outcome.tool_calls == [{"id": "call-1"}]
 
 
 def test_duplicate_model_call_returns_cached_completion_and_logs_fields(
@@ -498,8 +539,16 @@ def test_taint_and_prompt_caps_refuse_before_provider_call(tmp_path):
         ({"prompt_tokens": float("inf"), "completion_tokens": 1}, "Example"),
         ({"prompt_tokens": 10**30, "completion_tokens": 1}, "Example"),
         ({"prompt_tokens": 1, "completion_tokens": 1}, float("nan")),
+        ({"prompt_tokens": 1, "completion_tokens": 1}, None),
     ],
-    ids=["string-token", "list-usage", "infinite-token", "huge-token", "nan-content"],
+    ids=[
+        "string-token",
+        "list-usage",
+        "infinite-token",
+        "huge-token",
+        "nan-content",
+        "missing-content-and-tools",
+    ],
 )
 def test_malformed_provider_response_settles_reserved_attempt(tmp_path, usage, content):
     def provider(request: httpx.Request) -> httpx.Response:

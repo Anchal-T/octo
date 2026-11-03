@@ -1,6 +1,6 @@
 import math
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -181,6 +181,24 @@ class ModelOutcome(Contract):
     http_status: int | None = None
     error_code: str | None = None
     reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome_fields(self) -> Self:
+        if self.outcome == "completed" and not (
+            (self.text is not None and self.text.strip()) or self.tool_calls
+        ):
+            raise ValueError("completed outcomes require text or tool calls")
+        if self.outcome == "quota_exhausted" and (
+            self.retry_at is None or self.scope is None
+        ):
+            raise ValueError("quota_exhausted outcomes require retry_at and scope")
+        if self.outcome == "throttled" and self.retry_in is None:
+            raise ValueError("throttled outcomes require retry_in")
+        if self.outcome in {"failed", "ledger_unavailable"} and (
+            not self.error_code or not self.reason
+        ):
+            raise ValueError("failed outcomes require error_code and reason")
+        return self
 
 
 class IssueRunRequest(Contract):

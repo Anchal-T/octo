@@ -919,6 +919,8 @@ def _completion_fields(
         not isinstance(tool_call, dict) for tool_call in tool_calls
     ):
         return None
+    if not (content and content.strip()) and not tool_calls:
+        return None
     prompt_tokens = usage.get("prompt_tokens", 0)
     completion_tokens = usage.get("completion_tokens", 0)
     prompt_tokens = 0 if prompt_tokens is None else prompt_tokens
