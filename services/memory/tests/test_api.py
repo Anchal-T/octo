@@ -38,6 +38,52 @@ async def test_event_write_returns_the_stored_record(monkeypatch):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            b'{"idempotency_key":"\\ud800","source":"github_issue",'
+            b'"kind":"issue","taint":0,"payload":{}}'
+        ),
+        (
+            b'{"idempotency_key":"nan","source":"github_issue",'
+            b'"kind":"issue","taint":0,"payload":{"value":NaN}}'
+        ),
+        (
+            b'{"idempotency_key":"nested","source":"github_issue",'
+            b'"kind":"issue","taint":0,"payload":'
+            + b"[" * 100
+            + b"0"
+            + b"]" * 100
+            + b"}"
+        ),
+        (
+            b'{"idempotency_key":"deep","source":"github_issue",'
+            b'"kind":"issue","taint":0,"payload":'
+            + b"[" * 1200
+            + b"0"
+            + b"]" * 1200
+            + b"}"
+        ),
+    ],
+)
+async def test_hostile_event_bodies_return_422_before_storage(monkeypatch, body):
+    monkeypatch.setattr(
+        store, "create_event", lambda _: pytest.fail("invalid body reached storage")
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/events",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
 async def test_invalid_taint_is_rejected():
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"

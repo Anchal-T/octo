@@ -1,11 +1,38 @@
+import math
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+_MAX_CONTRACT_DEPTH = 64
+
+
+def _validate_contract_values(value: Any) -> None:
+    pending = [(value, 0)]
+    while pending:
+        current, depth = pending.pop()
+        if depth > _MAX_CONTRACT_DEPTH:
+            raise ValueError("request data is nested too deeply")
+        if isinstance(current, str):
+            if any(0xD800 <= ord(character) <= 0xDFFF for character in current):
+                raise ValueError("request strings must contain valid Unicode")
+        elif isinstance(current, float) and not math.isfinite(current):
+            raise ValueError("request numbers must be finite")
+        elif isinstance(current, dict):
+            pending.extend((key, depth + 1) for key in current)
+            pending.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, (list, tuple)):
+            pending.extend((item, depth + 1) for item in current)
 
 
 class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_request_values(cls, value: Any) -> Any:
+        _validate_contract_values(value)
+        return value
 
 
 class EventWrite(Contract):

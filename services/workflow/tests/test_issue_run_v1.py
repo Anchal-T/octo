@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
+import httpx
 import pytest
 import restate
 from agentteam_contracts import (
@@ -254,3 +255,34 @@ def test_second_throttle_result_preserves_retry_and_model_metadata():
     assert result.started_at == basis
     assert result.finished_at == basis
     assert result.decided_at == basis
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"issue_id":"issue-17","title":"\\ud800"}',
+        b'{"issue_id":"issue-17","title":NaN}',
+        b'{"issue_id":"issue-17","title":'
+        + b"[" * 100
+        + b'"nested"'
+        + b"]" * 100
+        + b"}",
+        b'{"issue_id":"issue-17","title":'
+        + b"[" * 1200
+        + b'"nested"'
+        + b"]" * 1200
+        + b"}",
+    ],
+)
+async def test_hostile_issue_bodies_return_422(body):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=workflow.app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/issues/issue-17/run",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 422

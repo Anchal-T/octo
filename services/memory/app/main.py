@@ -11,12 +11,42 @@ from agentteam_contracts import (
     RunRecord,
     RunWrite,
 )
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from .store import IdempotencyConflict, MemoryStore, RoundConflict
 
 app = FastAPI(title="Agent Team Memory")
 store = MemoryStore()
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_request_validation_error(
+    request: Request, error: RequestValidationError
+):
+    details = [
+        {"loc": item["loc"], "msg": item["msg"], "type": item["type"]}
+        for item in error.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": details})
+
+
+@app.exception_handler(HTTPException)
+async def handle_http_exception(request: Request, error: HTTPException):
+    if isinstance(error.__cause__, RecursionError):
+        return JSONResponse(
+            status_code=422, content={"detail": "request body is nested too deeply"}
+        )
+    return await http_exception_handler(request, error)
+
+
+@app.exception_handler(RecursionError)
+async def handle_recursion_error(request: Request, error: RecursionError):
+    return JSONResponse(
+        status_code=422, content={"detail": "request body is nested too deeply"}
+    )
 
 
 def _event(row: dict[str, Any]) -> EventRecord:
