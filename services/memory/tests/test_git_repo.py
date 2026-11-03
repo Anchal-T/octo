@@ -1,6 +1,8 @@
 import subprocess
 from datetime import datetime
 
+import pytest
+
 from services.memory.app.git_repo import GitRepo, Hunk
 
 
@@ -111,3 +113,24 @@ def test_changed_py_ignores_non_python_files(tmp_path):
     child = _commit(path, "child")
 
     assert not repo.changed_py(parent, child)
+
+
+def test_git_revision_arguments_reject_options_before_subprocess(monkeypatch):
+    repo = GitRepo(".")
+
+    def unexpected_git_call(*args, **kwargs):
+        pytest.fail("invalid revision reached subprocess.run")
+
+    monkeypatch.setattr(
+        "services.memory.app.git_repo.subprocess.run", unexpected_git_call
+    )
+
+    for call in (
+        lambda: repo.rev_list_parents("--output=/tmp/agent-team-test"),
+        lambda: repo.author("--all"),
+        lambda: repo.committer_date("--output=/tmp/agent-team-test"),
+        lambda: repo.diff_u0("--all", "a" * 40),
+        lambda: repo.changed_py("a" * 40, "--all"),
+    ):
+        with pytest.raises(ValueError, match="commit SHA"):
+            call()

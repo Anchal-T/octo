@@ -16,15 +16,27 @@ class Hunk:
 
 
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
+
+
+def _require_commit_sha(value: str) -> str:
+    if not isinstance(value, str) or _COMMIT_SHA.fullmatch(value) is None:
+        raise ValueError("revision must be a hexadecimal commit SHA")
+    return value
 
 
 class GitRepo:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).resolve()
 
-    def rev_list_parents(self, rev: str = "--all") -> dict[str, tuple[str, ...]]:
+    def rev_list_parents(self, rev: str | None = None) -> dict[str, tuple[str, ...]]:
+        command = ["git", "rev-list", "--parents", "--topo-order", "--reverse"]
+        if rev is None:
+            command.append("--all")
+        else:
+            command.extend(("--end-of-options", _require_commit_sha(rev)))
         result = subprocess.run(
-            ["git", "rev-list", "--parents", "--topo-order", "--reverse", rev],
+            command,
             cwd=self.path,
             check=True,
             capture_output=True,
@@ -37,6 +49,7 @@ class GitRepo:
         }
 
     def committer_date(self, sha: str) -> datetime:
+        sha = _require_commit_sha(sha)
         result = subprocess.run(
             ["git", "show", "-s", "--format=%cI", sha],
             cwd=self.path,
@@ -47,6 +60,7 @@ class GitRepo:
         return datetime.fromisoformat(result.stdout.strip())
 
     def author(self, sha: str) -> str:
+        sha = _require_commit_sha(sha)
         result = subprocess.run(
             ["git", "show", "-s", "--format=%an", sha],
             cwd=self.path,
@@ -57,6 +71,8 @@ class GitRepo:
         return result.stdout.strip()
 
     def diff_u0(self, a: str, b: str) -> list[Hunk]:
+        a = _require_commit_sha(a)
+        b = _require_commit_sha(b)
         result = subprocess.run(
             [
                 "git",
@@ -87,6 +103,8 @@ class GitRepo:
         return self._parse_hunks(result.stdout, files)
 
     def changed_py(self, a: str, b: str) -> bool:
+        a = _require_commit_sha(a)
+        b = _require_commit_sha(b)
         result = subprocess.run(
             ["git", "diff", "--no-renames", "--name-only", "-z", a, b, "--"],
             cwd=self.path,

@@ -30,7 +30,7 @@ class Repo:
         shas = list(dict.fromkeys(shas_topo))
         if not shas:
             return []
-        git_commits = self.git_repo.rev_list_parents("--all")
+        git_commits = self.git_repo.rev_list_parents()
         if main_head not in git_commits:
             raise KeyError(main_head)
 
