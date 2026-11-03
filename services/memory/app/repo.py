@@ -16,6 +16,7 @@ class Repo:
         self.store = store
         self.git_repo = git_repo
         self.scip_indexer = scip_indexer
+        self._dag: Dag | None = None
 
     def on_push(self, shas: Iterable[str], branch: str) -> list[str]:
         shas = list(dict.fromkeys(shas))
@@ -46,8 +47,7 @@ class Repo:
         return self._process(shas, branches, git_commits, main_head)
 
     def advance_main(self, head: str) -> list[str]:
-        dag = Dag.from_commits(self.store.get_commits())
-        return FactCloser(dag, self.store).advance_main(head)
+        return FactCloser(self._get_dag(), self.store).advance_main(head)
 
     def _process(
         self,
@@ -64,7 +64,7 @@ class Repo:
                 if parent in positions and positions[parent] >= index:
                     raise ValueError("commits must be in topological order")
 
-        dag = Dag.from_commits(self.store.get_commits())
+        dag = self._get_dag()
         for sha in shas:
             for parent in git_commits[sha]:
                 if parent not in dag.commits and parent not in positions:
@@ -100,6 +100,11 @@ class Repo:
         if main_head is not None:
             closer.advance_main(main_head)
         return shas
+
+    def _get_dag(self) -> Dag:
+        if self._dag is None:
+            self._dag = Dag.from_commits(self.store.get_commits())
+        return self._dag
 
     def _diff(
         self, sha: str, parents: tuple[str, ...], indexes: dict[str, ScipIndex]

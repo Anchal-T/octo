@@ -82,3 +82,15 @@ def test_dag_rejects_unknown_bases_and_parents():
         dag.ancestors("missing")
     with pytest.raises(KeyError):
         dag.add(_commit("b", ("missing",)))
+
+
+def test_ancestor_cache_stays_bounded_when_querying_a_long_history():
+    commits = [_commit("0")]
+    commits.extend(_commit(str(index), (str(index - 1),)) for index in range(1, 300))
+    dag = Dag(commits)
+
+    for commit in commits:
+        dag.ancestors(commit.sha)
+
+    assert len(dag._ancestors_cache) <= 128
+    assert dag.ancestors("299") == frozenset(str(index) for index in range(300))

@@ -9,11 +9,13 @@ from services.memory.app.scip import ScipDefinition, ScipIndex
 class FakeStore:
     def __init__(self, facts):
         self.commits = {}
+        self.get_commits_calls = 0
         self.facts = facts
         self.closures = []
         self.ended = []
 
     def get_commits(self):
+        self.get_commits_calls += 1
         return list(self.commits.values())
 
     def record_commit(self, commit):
@@ -155,3 +157,4 @@ def test_on_push_records_parent_specific_symbols_and_closes_facts(tmp_path):
     assert indexer.calls == [root, main, side, merge]
     assert docs not in indexer.calls
     assert (main, docs) in indexer.reuses
+    assert store.get_commits_calls == 1

@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -36,10 +37,12 @@ class Commit:
 
 
 class Dag:
+    _ANCESTOR_CACHE_LIMIT = 128
+
     def __init__(self, commits: Iterable[Commit] = ()) -> None:
         self.commits: dict[str, Commit] = {}
         self.children: dict[str, set[str]] = {}
-        self._ancestors_cache: dict[str, frozenset[str]] = {}
+        self._ancestors_cache: OrderedDict[str, frozenset[str]] = OrderedDict()
         self._descendants_cache: dict[str, frozenset[str]] = {}
         for commit in commits:
             self.add(commit)
@@ -105,17 +108,24 @@ class Dag:
     def ancestors(self, base: str) -> frozenset[str]:
         if base not in self.commits:
             raise KeyError(base)
-        if base not in self._ancestors_cache:
-            found = set()
-            pending = [base]
-            while pending:
-                sha = pending.pop()
-                if sha in found:
-                    continue
-                found.add(sha)
-                pending.extend(self.commits[sha].parents)
-            self._ancestors_cache[base] = frozenset(found)
-        return self._ancestors_cache[base]
+        cached = self._ancestors_cache.get(base)
+        if cached is not None:
+            self._ancestors_cache.move_to_end(base)
+            return cached
+
+        found = set()
+        pending = [base]
+        while pending:
+            sha = pending.pop()
+            if sha in found:
+                continue
+            found.add(sha)
+            pending.extend(self.commits[sha].parents)
+        if len(self._ancestors_cache) >= self._ANCESTOR_CACHE_LIMIT:
+            self._ancestors_cache.popitem(last=False)
+        ancestors = frozenset(found)
+        self._ancestors_cache[base] = ancestors
+        return ancestors
 
     def is_ancestor(self, ancestor: str, descendant: str) -> bool:
         return ancestor in self.ancestors(descendant)
