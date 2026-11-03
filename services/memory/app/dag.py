@@ -18,6 +18,10 @@ class Commit:
     changed_symbols: tuple[str, ...]
     merge_side_symbols: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
+    def __post_init__(self) -> None:
+        if self.committed_at.tzinfo is None or self.committed_at.utcoffset() is None:
+            raise ValueError("committed_at must be timezone-aware")
+
     def symbols_vs(self, parent: str) -> tuple[str, ...]:
         if not self.parents or parent not in self.parents:
             raise KeyError(parent)

@@ -63,6 +63,18 @@ def test_dag_can_load_commit_rows_in_any_order():
     assert dag.ancestors(merge.sha) == frozenset({"a", "b", "c", "d"})
 
 
+def test_commit_rejects_naive_committed_at():
+    with pytest.raises(ValueError, match="committed_at must be timezone-aware"):
+        Commit(
+            sha="a",
+            parents=(),
+            committed_at=datetime(2026, 1, 1),
+            branch="main",
+            author=None,
+            changed_symbols=(),
+        )
+
+
 def test_dag_rejects_unknown_bases_and_parents():
     dag = Dag((_commit("a"),))
 
