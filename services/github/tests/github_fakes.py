@@ -223,3 +223,24 @@ class FakeGithub:
         return httpx.Response(
             200, headers=headers, json=items[start : start + per_page]
         )
+
+
+class FakeWorkflow:
+    def __init__(self):
+        self.responses = {}
+        self.calls = []
+
+    @property
+    def transport(self):
+        return httpx.MockTransport(self.handle)
+
+    def set_response(self, method, path, status, payload=None):
+        self.responses[(method, path)] = (status, payload)
+
+    def handle(self, request):
+        payload = json.loads(request.content) if request.content else None
+        self.calls.append((request.method, request.url.path, payload))
+        status, response_payload = self.responses.get(
+            (request.method, request.url.path), (404, {"detail": "not found"})
+        )
+        return httpx.Response(status, json=response_payload)
