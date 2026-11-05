@@ -232,3 +232,14 @@ class IssueRunResult(Contract):
     decided_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+class RunStartAccepted(Contract):
+    issue_id: str = Field(min_length=1, max_length=200)
+    state: Literal["submitted"] = "submitted"
+    invocation_id: str | None = None
+
+
+class RunStatus(Contract):
+    issue_id: str = Field(min_length=1, max_length=200)
+    state: Literal["running"] = "running"

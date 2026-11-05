@@ -9,6 +9,8 @@ from agentteam_contracts import (
     IssueRunResult,
     ModelCallRequest,
     ModelOutcome,
+    RunStartAccepted,
+    RunStatus,
     Sampling,
 )
 from fastapi import FastAPI, HTTPException, Request
@@ -294,3 +296,84 @@ async def start_issue(issue_id: str, request: IssueRunRequest) -> IssueRunResult
         ) from error
     except httpx.HTTPError as error:
         raise HTTPException(status_code=503, detail="Restate is unavailable") from error
+
+
+@app.post(
+    "/v1/issues/{issue_id}/start",
+    response_model=RunStartAccepted,
+    status_code=202,
+)
+async def start_issue_async(
+    issue_id: str, request: IssueRunRequest
+) -> RunStartAccepted:
+    if issue_id != request.issue_id:
+        raise HTTPException(status_code=422, detail="issue_id does not match the path")
+    try:
+        async with restate.create_client(settings.restate_ingress) as client:
+            handle = await client.workflow_send(
+                issue_run_v1,
+                key=issue_id,
+                arg=request,
+                idempotency_key=f"start:{issue_id}",
+            )
+        return RunStartAccepted(
+            issue_id=issue_id,
+            invocation_id=handle.invocation_id,
+        )
+    except RestateHttpError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=error.body or error.message,
+        ) from error
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail="Restate is unavailable") from error
+
+
+@app.get(
+    "/v1/issues/{issue_id}/run",
+    response_model=IssueRunResult | RunStatus,
+)
+async def issue_run_status(issue_id: str) -> IssueRunResult | RunStatus | JSONResponse:
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.restate_ingress, timeout=5
+        ) as client:
+            response = await client.post(
+                "/restate/output",
+                json={
+                    "target": "workflow",
+                    "workflowName": "IssueRunV1",
+                    "workflowKey": issue_id,
+                },
+            )
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail="Restate is unavailable") from error
+
+    try:
+        output = response.json()
+    except ValueError as error:
+        raise HTTPException(status_code=502, detail="Invalid Restate output") from error
+
+    if response.status_code == 470 or (
+        isinstance(output, dict) and output.get("message") == "not ready"
+    ):
+        status = RunStatus(issue_id=issue_id)
+        return JSONResponse(
+            status_code=202,
+            content=status.model_dump(mode="json"),
+        )
+    if response.status_code == 404 or (
+        isinstance(output, dict) and output.get("message") == "not found"
+    ):
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if response.is_error:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=output.get("message", "Restate request failed")
+            if isinstance(output, dict)
+            else "Restate request failed",
+        )
+    try:
+        return IssueRunResult.model_validate(output)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=502, detail="Invalid Restate output") from error
