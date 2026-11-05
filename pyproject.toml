@@ -20,7 +20,15 @@ agentteam-contracts = { workspace = true }
 agentteam-common = { workspace = true }
 
 [dependency-groups]
-dev = ["httpx>=0.27,<1", "pytest>=8,<10", "restate-sdk[harness]>=1.1,<2"]
+dev = [
+    "httpx>=0.27,<1",
+    "pytest>=8,<10",
+    "restate-sdk[harness]>=1.1,<2",
+    "ruff>=0.11,<1",
+]
+
+[tool.ruff]
+target-version = "py311"
 
 [tool.pytest.ini_options]
 testpaths = ["services"]
