@@ -282,3 +282,48 @@ async def test_client_retries_network_errors_and_redacts_log(caplog):
     assert client_logs
     assert all("method=" in record.message for record in client_logs)
     assert all("status=" in record.message for record in client_logs)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("state", "labels"),
+    [("open", ["agent-team"]), ("closed", ["agent-team"]), ("open", ["bug"])],
+)
+async def test_client_looks_up_stored_issue_state(state, labels):
+    fake = FakeGithub()
+    fake.add_issue(7, state=state, labels=labels)
+    client, http = make_client(fake)
+    async with http:
+        issue = await client.get_issue(7)
+
+    assert issue.state == state
+    assert issue.labels == labels
+    assert fake.calls[-1][1] == "/repos/bot/fork/issues/7"
+
+
+@pytest.mark.anyio
+async def test_issue_lookup_404_is_ambiguous_and_not_a_cancellation_signal():
+    fake = FakeGithub()
+    fake.fail_next(404)
+    client, http = make_client(fake)
+    async with http:
+        with pytest.raises(GithubFailure) as caught:
+            await client.get_issue(7)
+
+    assert caught.value.outcome.outcome == "not_found"
+    assert caught.value.outcome.error_code == "issue_lookup_not_found"
+
+
+@pytest.mark.anyio
+async def test_issue_lookup_retries_transient_failure_without_changing_state():
+    sleeps = []
+    fake = FakeGithub()
+    fake.add_issue(7)
+    fake.fail_next(503)
+    client, http = make_client(fake, sleeps)
+    async with http:
+        issue = await client.get_issue(7)
+
+    assert issue.state == "open"
+    assert sleeps == [1]
+    assert len(fake.calls) == 2

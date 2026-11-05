@@ -79,6 +79,14 @@ class GithubClient:
             has_issues=item["has_issues"],
         )
 
+    async def get_issue(self, number: int) -> GithubIssue:
+        response = await self._request(
+            "GET",
+            f"/repos/{self.repo}/issues/{number}",
+            missing="revalidation",
+        )
+        return GithubIssue.from_api(self._json(response))
+
     async def ensure_label(self, name: str) -> None:
         for page in range(1, GITHUB_MAX_PAGES + 1):
             response = await self._request(
@@ -198,7 +206,7 @@ class GithubClient:
         *,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
-        missing: Literal["repo", "issue"] = "repo",
+        missing: Literal["repo", "issue", "revalidation"] = "repo",
     ) -> httpx.Response:
         server_retry = 0
         secondary_retried = False
@@ -334,11 +342,15 @@ class GithubClient:
                     )
                 )
             if status == 404:
-                code, reason = (
-                    ("repo_not_found", "GitHub repository was not found")
-                    if missing == "repo"
-                    else ("issue_not_found", "GitHub issue was not found")
-                )
+                if missing == "repo":
+                    code, reason = "repo_not_found", "GitHub repository was not found"
+                elif missing == "revalidation":
+                    code, reason = (
+                        "issue_lookup_not_found",
+                        "Stored issue lookup returned 404; state is unchanged",
+                    )
+                else:
+                    code, reason = "issue_not_found", "GitHub issue was not found"
                 raise GithubFailure(
                     self._error_outcome("not_found", code, reason, http_status=status)
                 )

@@ -172,6 +172,15 @@ class FakeGithub:
             return self._page(items, query, response_headers)
 
         parts = path.removeprefix(f"{repo_prefix}/").split("/")
+        if len(parts) == 2 and parts[0] == "issues" and request.method == "GET":
+            number = int(parts[1])
+            if number not in self.issues:
+                return httpx.Response(
+                    404, headers=response_headers, json={"message": "not found"}
+                )
+            return httpx.Response(
+                200, headers=response_headers, json=self.issues[number]
+            )
         if len(parts) == 3 and parts[0] == "issues":
             number = int(parts[1])
             if request.method == "GET" and parts[2] == "events":
