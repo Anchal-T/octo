@@ -58,8 +58,42 @@ services:
       - restate
     ports:
       - "8002:8002"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/healthz', timeout=3)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  github:
+    profiles: ["github"]
+    build:
+      context: ..
+      dockerfile: services/github/Dockerfile
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_REPO: ${GITHUB_REPO:-}
+      WORKFLOW_URL: http://workflow:8002
+      GITHUB_SQLITE_PATH: /var/lib/agent-team/github/github.sqlite
+      GITHUB_POLL_INTERVAL_S: ${GITHUB_POLL_INTERVAL_S:-60}
+      GITHUB_MAX_STARTS_PER_CYCLE: ${GITHUB_MAX_STARTS_PER_CYCLE:-1}
+      GITHUB_MAX_STARTS_PER_DAY: ${GITHUB_MAX_STARTS_PER_DAY:-10}
+      GITHUB_BODY_MAX_CHARS: ${GITHUB_BODY_MAX_CHARS:-8000}
+    volumes:
+      - github-data:/var/lib/agent-team/github
+    depends_on:
+      workflow:
+        condition: service_healthy
+    ports:
+      - "8003:8003"
 
 volumes:
   xtdb-data:
   restate-data:
   models-data:
+  github-data:
