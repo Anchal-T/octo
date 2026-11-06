@@ -311,10 +311,9 @@ async def start_issue_async(
     try:
         async with restate.create_client(settings.restate_ingress) as client:
             handle = await client.workflow_send(
-                issue_run_v1,
+                run_issue_v1,
                 key=issue_id,
                 arg=request,
-                idempotency_key=f"start:{issue_id}",
             )
         return RunStartAccepted(
             issue_id=issue_id,

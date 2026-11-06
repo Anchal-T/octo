@@ -32,8 +32,8 @@ class FakeRestateClient:
         self.sends = []
         self.send_error = None
 
-    async def workflow_send(self, handler, *, key, arg, idempotency_key):
-        self.sends.append((handler, key, arg, idempotency_key))
+    async def workflow_send(self, handler, *, key, arg):
+        self.sends.append((handler, key, arg))
         if self.send_error is not None:
             raise self.send_error
         return SimpleNamespace(invocation_id="inv_test")
@@ -52,7 +52,7 @@ async def request(app, method, path, *, json_body=None):
 
 
 @pytest.mark.anyio
-async def test_start_route_sends_idempotently_and_returns_accepted(monkeypatch):
+async def test_start_route_uses_workflow_key_and_returns_accepted(monkeypatch):
     fake = FakeRestateClient()
     monkeypatch.setattr(
         workflow.restate,
@@ -74,9 +74,8 @@ async def test_start_route_sends_idempotently_and_returns_accepted(monkeypatch):
         == RunStartAccepted(issue_id="gh-100-7", invocation_id="inv_test").model_dump()
     )
     assert second.json() == first.json()
-    assert [call[0] for call in fake.sends] == [workflow.issue_run_v1] * 2
+    assert [call[0] for call in fake.sends] == [workflow.run_issue_v1] * 2
     assert [call[1] for call in fake.sends] == ["gh-100-7"] * 2
-    assert [call[3] for call in fake.sends] == ["start:gh-100-7"] * 2
 
 
 @pytest.mark.anyio
@@ -226,7 +225,7 @@ async def test_restate_harness_pins_start_and_output_statuses(monkeypatch):
             status="committed",
         )
 
-    monkeypatch.setattr(workflow, "issue_run_v1", test_workflow)
+    monkeypatch.setattr(workflow, "run_issue_v1", delayed_result)
     async with restate.create_test_harness(
         restate.app(services=[test_workflow])
     ) as env:
