@@ -16,6 +16,7 @@ class FakeGithub:
         self.labels = set()
         self.calls = []
         self.failures = []
+        self.path_failures = {}
 
     @property
     def transport(self):
@@ -86,6 +87,9 @@ class FakeGithub:
     def fail_next(self, status, headers=None):
         self.failures.append((status, dict(headers or {})))
 
+    def fail_path_next(self, path, status, headers=None):
+        self.path_failures.setdefault(path, []).append((status, dict(headers or {})))
+
     def handle(self, request):
         query = parse_qs(request.url.query.decode())
         self.calls.append((request.method, request.url.path, query))
@@ -93,6 +97,14 @@ class FakeGithub:
             "x-ratelimit-remaining": "5000",
             "x-ratelimit-reset": str(int(datetime.now(UTC).timestamp()) + 3600),
         }
+        path_failures = self.path_failures.get(request.url.path, [])
+        if path_failures:
+            status, headers = path_failures.pop(0)
+            return httpx.Response(
+                status,
+                headers={**response_headers, **headers},
+                json={"message": "simulated response"},
+            )
         if self.failures:
             status, headers = self.failures.pop(0)
             return httpx.Response(
@@ -229,6 +241,7 @@ class FakeWorkflow:
     def __init__(self):
         self.responses = {}
         self.calls = []
+        self.accepted_starts = {}
 
     @property
     def transport(self):
@@ -240,7 +253,20 @@ class FakeWorkflow:
     def handle(self, request):
         payload = json.loads(request.content) if request.content else None
         self.calls.append((request.method, request.url.path, payload))
+        path = request.url.path
+        if (
+            request.method == "POST"
+            and path.endswith("/start")
+            and path in self.accepted_starts
+        ):
+            return httpx.Response(200, json=self.accepted_starts[path])
         status, response_payload = self.responses.get(
-            (request.method, request.url.path), (404, {"detail": "not found"})
+            (request.method, path), (404, {"detail": "not found"})
         )
+        if (
+            request.method == "POST"
+            and path.endswith("/start")
+            and status in (200, 202)
+        ):
+            self.accepted_starts[path] = response_payload
         return httpx.Response(status, json=response_payload)
