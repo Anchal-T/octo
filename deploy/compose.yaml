@@ -84,6 +84,7 @@ services:
       GITHUB_MAX_STARTS_PER_CYCLE: ${GITHUB_MAX_STARTS_PER_CYCLE:-1}
       GITHUB_MAX_STARTS_PER_DAY: ${GITHUB_MAX_STARTS_PER_DAY:-10}
       GITHUB_BODY_MAX_CHARS: ${GITHUB_BODY_MAX_CHARS:-8000}
+      GITHUB_PROCESS_OWN_ISSUES: ${GITHUB_PROCESS_OWN_ISSUES:-false}
     volumes:
       - github-data:/var/lib/agent-team/github
     depends_on:

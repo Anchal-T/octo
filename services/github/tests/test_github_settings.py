@@ -79,3 +79,26 @@ def test_validate_for_start_names_missing_and_invalid_values():
             assert expected in str(error)
         else:
             raise AssertionError(f"invalid {expected} was accepted")
+
+
+def test_process_own_issues_defaults_to_false_and_parses_env():
+    assert GithubSettings().process_own_issues is False
+    assert GithubSettings.from_env({}).process_own_issues is False
+
+    for raw in ("true", "TRUE", " 1 ", "yes"):
+        assert (
+            GithubSettings.from_env({"GITHUB_PROCESS_OWN_ISSUES": raw})
+        ).process_own_issues is True
+    for raw in ("false", "0", "no", ""):
+        assert (
+            GithubSettings.from_env({"GITHUB_PROCESS_OWN_ISSUES": raw})
+        ).process_own_issues is False
+
+
+def test_process_own_issues_rejects_unrecognised_values():
+    try:
+        GithubSettings.from_env({"GITHUB_PROCESS_OWN_ISSUES": "maybe"})
+    except SettingsError as error:
+        assert "GITHUB_PROCESS_OWN_ISSUES" in str(error)
+    else:
+        raise AssertionError("unrecognised value was accepted")

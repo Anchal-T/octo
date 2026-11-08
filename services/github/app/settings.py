@@ -17,6 +17,16 @@ GITHUB_CONNECT_TIMEOUT_S = 5
 GITHUB_READ_TIMEOUT_S = 20
 WORKFLOW_START_TIMEOUT_S = 10
 
+_TRUTHY_FALSY = {
+    "true": True,
+    "1": True,
+    "yes": True,
+    "false": False,
+    "0": False,
+    "no": False,
+    "": False,
+}
+
 
 class SettingsError(ValueError):
     pass
@@ -32,6 +42,7 @@ class GithubSettings:
     max_starts_per_cycle: int = 1
     max_starts_per_day: int = 10
     body_max_chars: int = 8000
+    process_own_issues: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "GithubSettings":
@@ -56,6 +67,10 @@ class GithubSettings:
             body_max_chars = int(source.get("GITHUB_BODY_MAX_CHARS", "8000"))
         except ValueError as error:
             raise SettingsError("GITHUB_BODY_MAX_CHARS must be an integer") from error
+        raw_own_issues = source.get("GITHUB_PROCESS_OWN_ISSUES", "false")
+        process_own_issues = _TRUTHY_FALSY.get(raw_own_issues.strip().lower())
+        if process_own_issues is None:
+            raise SettingsError("GITHUB_PROCESS_OWN_ISSUES must be true or false")
 
         return cls(
             token=source.get("GITHUB_TOKEN", ""),
@@ -68,6 +83,7 @@ class GithubSettings:
             max_starts_per_cycle=max_starts_per_cycle,
             max_starts_per_day=max_starts_per_day,
             body_max_chars=body_max_chars,
+            process_own_issues=process_own_issues,
         )
 
     def validate_for_start(self) -> None:

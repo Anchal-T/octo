@@ -46,6 +46,7 @@ def make_poller(
     max_starts_per_day=10,
     holder="test-poller",
     clock_start=NOW,
+    process_own_issues=False,
 ):
     now = [clock_start]
     sleeps = []
@@ -60,6 +61,7 @@ def make_poller(
         sqlite_path=str(tmp_path / "github.sqlite"),
         max_starts_per_cycle=max_starts_per_cycle,
         max_starts_per_day=max_starts_per_day,
+        process_own_issues=process_own_issues,
     )
     store = Store(settings.sqlite_path)
     github_http = httpx.AsyncClient(transport=fake_github.transport)
@@ -779,3 +781,36 @@ async def test_editing_a_skipped_issue_starts_it_with_one_new_version_comment(
     assert len(fake_github.comments[7]) == 2
     assert "skipped this issue" in fake_github.comments[7][0]["body"]
     assert "started a triage run" in fake_github.comments[7][1]["body"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("process_own_issues", "expected_state", "expected_starts"),
+    [(False, "skipped", 0), (True, "submitted", 1)],
+)
+async def test_issue_opened_by_the_token_owner_is_processed_only_when_enabled(
+    tmp_path, process_own_issues, expected_state, expected_starts
+):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    fake_github.add_issue(7, author="agent-bot", created_at=NOW, updated_at=NOW)
+    fake_workflow = FakeWorkflow()
+    fake_workflow.set_response(
+        "POST", f"/v1/issues/{ISSUE_KEY}/start", 202, {"issue_id": ISSUE_KEY}
+    )
+    poller, store, github_http, workflow_http, *_ = make_poller(
+        tmp_path,
+        fake_github,
+        fake_workflow,
+        process_own_issues=process_own_issues,
+    )
+
+    try:
+        await poller.prepare()
+        summary = await poller.run_cycle()
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    assert summary.started == expected_starts
+    assert len(fake_workflow.accepted_starts) == expected_starts
+    assert store.get_issue(ISSUE_KEY).state == expected_state

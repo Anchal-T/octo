@@ -254,6 +254,7 @@ class Poller:
             self_login=self.self_login,
             baseline_at=baseline,
             opted_in_after_baseline=None,
+            process_own_issues=self.settings.process_own_issues,
         )
         if decision.needs_label_events:
             try:
@@ -277,6 +278,7 @@ class Poller:
                 self_login=self.self_login,
                 baseline_at=baseline,
                 opted_in_after_baseline=opted_in,
+                process_own_issues=self.settings.process_own_issues,
             )
 
         if decision.state is None:

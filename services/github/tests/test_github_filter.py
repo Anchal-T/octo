@@ -98,6 +98,41 @@ def test_own_issues_are_silently_skipped():
     assert decision.comment_kind is None
 
 
+def test_own_issues_are_processed_when_enabled():
+    decision = decide(
+        make_issue(author_login="AGENT-BOT"),
+        self_login="agent-bot",
+        baseline_at=BASELINE,
+        opted_in_after_baseline=None,
+        process_own_issues=True,
+    )
+
+    assert decision.state == "pending_start"
+    assert decision.comment_kind == "ack"
+
+
+def test_enabling_own_issues_keeps_the_other_gates():
+    for issue, state in (
+        (make_issue(author_login="agent-bot", locked=True), "skipped"),
+        (make_issue(author_login="agent-bot", labels=["bug"]), "cancelled"),
+        (make_issue(author_login="agent-bot", is_pull_request=True), "ignored"),
+        (
+            make_issue(
+                author_login="agent-bot", created_at=BASELINE - timedelta(seconds=1)
+            ),
+            None,
+        ),
+    ):
+        decision = decide(
+            issue,
+            self_login="agent-bot",
+            baseline_at=BASELINE,
+            opted_in_after_baseline=None,
+            process_own_issues=True,
+        )
+        assert decision.state == state
+
+
 def test_locked_issues_are_silently_skipped():
     decision = decide(
         make_issue(locked=True),
@@ -263,3 +298,34 @@ def test_comment_templates_cover_queued_skip_failure_and_result():
     assert "unavailable" in failed
     assert "quota is exhausted" in result
     assert "2026-11-07T00:00:00Z" in result
+
+
+def test_ack_comment_puts_the_time_in_its_own_sentence():
+    plain = render_comment(
+        "ack",
+        key="gh-100-7",
+        fp="a" * 64,
+        detail={"at": "2026-11-06T12:00:00Z"},
+    )
+    truncated = render_comment(
+        "ack",
+        key="gh-100-7",
+        fp="a" * 64,
+        detail={
+            "at": "2026-11-06T12:00:00Z",
+            "truncated": "true",
+            "body_max_chars": "8000",
+        },
+    )
+    untimed = render_comment("ack", key="gh-100-7", fp="a" * 64, detail={})
+
+    assert plain.endswith(
+        "I will post the result here. Started at 2026-11-06T12:00:00Z."
+    )
+    assert truncated.endswith(
+        "truncated to 8000 characters. Started at 2026-11-06T12:00:00Z."
+    )
+    assert untimed.endswith("I will post the result here.")
+    for text in (plain, truncated, untimed):
+        assert ". at " not in text
+        assert ".." not in text

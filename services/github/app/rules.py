@@ -53,12 +53,16 @@ def decide(
     self_login: str,
     baseline_at: datetime,
     opted_in_after_baseline: bool | None,
+    process_own_issues: bool = False,
 ) -> Decision:
     if issue.is_pull_request:
         return Decision("ignored", "pull_request", None)
     if issue.state == "closed" or GITHUB_LABEL not in issue.labels:
         return Decision("cancelled", "closed_or_unlabelled", None)
-    if issue.author_login.casefold() == self_login.casefold():
+    if (
+        not process_own_issues
+        and issue.author_login.casefold() == self_login.casefold()
+    ):
         return Decision("skipped", "own_issue", None)
     if issue.locked:
         return Decision("skipped", "locked", None)
@@ -137,15 +141,16 @@ def render_comment(
     detail: Mapping[str, str],
 ) -> str:
     stamp = detail.get("at")
-    time_suffix = f" at {stamp}" if stamp else ""
     if kind == "ack":
         message = (
             f"Agent Team has started a triage run for this issue (run `{key}`). "
-            f"I will post the result here.{time_suffix}."
+            "I will post the result here."
         )
         if detail.get("truncated") == "true":
             limit = detail.get("body_max_chars", "the configured limit")
             message += f" The original issue body was truncated to {limit} characters."
+        if stamp:
+            message += f" Started at {stamp}."
     elif kind == "queued":
         if detail.get("reason") == "daily_limit":
             limit = detail.get("limit", "10")
