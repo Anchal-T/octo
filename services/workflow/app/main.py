@@ -3,7 +3,7 @@ from typing import Any
 
 import httpx
 import restate
-from agentteam_common import Settings, load_agentteam_config
+from agentteam_common import Settings, load_agentteam_config, workflow_key
 from agentteam_contracts import (
     IssueRunRequest,
     IssueRunResult,
@@ -13,7 +13,7 @@ from agentteam_contracts import (
     RunStatus,
     Sampling,
 )
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -288,9 +288,10 @@ def health() -> dict[str, str]:
 async def start_issue(issue_id: str, request: IssueRunRequest) -> IssueRunResult:
     if issue_id != request.issue_id:
         raise HTTPException(status_code=422, detail="issue_id does not match the path")
+    key = workflow_key(issue_id, request.attempt)
     try:
         async with restate.create_client(settings.restate_ingress) as client:
-            return await client.workflow_call(run_issue_v1, key=issue_id, arg=request)
+            return await client.workflow_call(run_issue_v1, key=key, arg=request)
     except RestateHttpError as error:
         raise HTTPException(
             status_code=error.status_code,
@@ -310,16 +311,18 @@ async def start_issue_async(
 ) -> RunStartAccepted:
     if issue_id != request.issue_id:
         raise HTTPException(status_code=422, detail="issue_id does not match the path")
+    key = workflow_key(issue_id, request.attempt)
     try:
         async with restate.create_client(settings.restate_ingress) as client:
             handle = await client.workflow_send(
                 run_issue_v1,
-                key=issue_id,
+                key=key,
                 arg=request,
             )
         return RunStartAccepted(
             issue_id=issue_id,
             invocation_id=handle.invocation_id,
+            attempt=request.attempt,
         )
     except RestateHttpError as error:
         raise HTTPException(
@@ -334,7 +337,11 @@ async def start_issue_async(
     "/v1/issues/{issue_id}/run",
     response_model=IssueRunResult | RunStatus,
 )
-async def issue_run_status(issue_id: str) -> IssueRunResult | RunStatus | JSONResponse:
+async def issue_run_status(
+    issue_id: str,
+    attempt: int = Query(default=1, ge=1, le=99),
+) -> IssueRunResult | RunStatus | JSONResponse:
+    key = workflow_key(issue_id, attempt)
     try:
         async with httpx.AsyncClient(
             base_url=settings.restate_ingress, timeout=5
@@ -344,7 +351,7 @@ async def issue_run_status(issue_id: str) -> IssueRunResult | RunStatus | JSONRe
                 json={
                     "target": "workflow",
                     "workflowName": "IssueRunV1",
-                    "workflowKey": issue_id,
+                    "workflowKey": key,
                 },
             )
     except httpx.HTTPError as error:
@@ -358,7 +365,7 @@ async def issue_run_status(issue_id: str) -> IssueRunResult | RunStatus | JSONRe
     if response.status_code == 470 or (
         isinstance(output, dict) and output.get("message") == "not ready"
     ):
-        status = RunStatus(issue_id=issue_id)
+        status = RunStatus(issue_id=issue_id, attempt=attempt)
         return JSONResponse(
             status_code=202,
             content=status.model_dump(mode="json"),

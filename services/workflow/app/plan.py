@@ -30,6 +30,7 @@ class IssuePlanV1:
     round: RoundWrite
     event: EventWrite
     issue_id: str
+    attempt: int
     round_id: str
     event_id: str
     run_id: str
@@ -102,14 +103,21 @@ def build_issue_plan(request: IssueRunRequest) -> IssuePlan:
     )
 
 
+def _memory_key_prefix(issue_id: str, attempt: int) -> str:
+    if attempt == 1:
+        return f"{issue_id}:v1"
+    return f"{issue_id}:v1:r{attempt}"
+
+
 def build_issue_plan_v1(request: IssueRunRequest) -> IssuePlanV1:
     if request.read_basis is None:
         raise ValueError("read_basis must be resolved in the durable workflow first")
 
-    round_key = f"{request.issue_id}:v1:round:1"
-    event_key = f"{request.issue_id}:v1:issue"
-    run_key = f"{request.issue_id}:v1:triage:1"
-    proposal_key = f"{request.issue_id}:v1:triage-proposal:1"
+    prefix = _memory_key_prefix(request.issue_id, request.attempt)
+    round_key = f"{prefix}:round:1"
+    event_key = f"{prefix}:issue"
+    run_key = f"{prefix}:triage:1"
+    proposal_key = f"{prefix}:triage-proposal:1"
 
     round_id = stable_id("round", round_key)
     event_id = stable_id("ev", event_key)
@@ -135,6 +143,7 @@ def build_issue_plan_v1(request: IssueRunRequest) -> IssuePlanV1:
             },
         ),
         issue_id=request.issue_id,
+        attempt=request.attempt,
         round_id=round_id,
         event_id=event_id,
         run_id=run_id,
@@ -183,6 +192,7 @@ def map_triage_return_v1(
         run_id=plan.run_id,
         proposal_id=plan.proposal_id,
         status=outcome.outcome,
+        attempt=plan.attempt,
         area="unknown",
         **_model_metadata(outcome, provider),
         retry_at=outcome.retry_at,
@@ -210,6 +220,7 @@ def map_triage_commit_v1(
         run_id=plan.run_id,
         proposal_id=plan.proposal_id,
         status="committed",
+        attempt=plan.attempt,
         area=triage.area if triage is not None else "unknown",
         **_model_metadata(outcome, provider),
         decided_at=outcome.decided_at,
@@ -234,6 +245,7 @@ def build_triage_proposal_v1(
         evidence_event_ids=[plan.event_id],
         payload={
             "issue_id": plan.issue_id,
+            "attempt": plan.attempt,
             "triage": None if triage is None else triage.model_dump(mode="json"),
             "triage_error": None if triage is not None else "unparseable",
             "model": outcome.model_reported or outcome.model_pinned,

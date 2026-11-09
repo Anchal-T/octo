@@ -63,6 +63,7 @@ def test_v1_plan_uses_separate_memory_keys_and_maps_model_completion():
     assert run.tokens_out == 3
     assert proposal.payload == {
         "issue_id": "issue-17",
+        "attempt": 1,
         "triage": None,
         "triage_error": "unparseable",
         "model": "openai/gpt-oss-20b",
