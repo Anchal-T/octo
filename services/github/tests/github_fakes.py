@@ -60,15 +60,22 @@ class FakeGithub:
         return item
 
     def add_event(
-        self, number, *, event="labeled", label="agent-team", created_at=None
+        self,
+        number,
+        *,
+        event="labeled",
+        label="agent-team",
+        created_at=None,
+        actor="maintainer",
     ):
-        self.events.setdefault(number, []).append(
-            {
-                "event": event,
-                "label": {"name": label},
-                "created_at": (created_at or datetime.now(UTC)).isoformat(),
-            }
-        )
+        item = {
+            "event": event,
+            "label": {"name": label},
+            "created_at": (created_at or datetime.now(UTC)).isoformat(),
+        }
+        if actor is not None:
+            item["actor"] = {"login": actor}
+        self.events.setdefault(number, []).append(item)
 
     def add_comment(self, number, *, body, author="agent-bot", comment_id=None):
         comments = self.comments.setdefault(number, [])

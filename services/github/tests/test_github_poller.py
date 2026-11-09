@@ -981,3 +981,373 @@ async def test_attempt_2_pending_row_starts_with_attempt_and_r2_ack(tmp_path):
     assert "key=gh-100-7-r2" in body
     assert "will triage this issue again" in body
     assert "attempt 2" in body
+
+
+def _finished_row(issue, *, finished_at=NOW, attempt=1):
+    return IssueRow(
+        issue_key=ISSUE_KEY,
+        number=7,
+        state="finished",
+        reason=None,
+        deferred_reason=None,
+        fingerprint=fingerprint(issue),
+        github_updated_at=finished_at.isoformat(),
+        created_at=(finished_at - timedelta(days=1)).isoformat(),
+        start_attempts=1,
+        admitted_at=(finished_at - timedelta(minutes=5)).isoformat(),
+        submitted_at=(finished_at - timedelta(minutes=4)).isoformat(),
+        finished_at=finished_at.isoformat(),
+        result_status="committed",
+        attempt=attempt,
+        label_seen_at=None,
+    )
+
+
+@pytest.mark.anyio
+async def test_relabel_after_finish_starts_attempt_2_with_r2_comments(tmp_path):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    issue_data = fake_github.add_issue(
+        7, created_at=NOW - timedelta(days=1), updated_at=NOW
+    )
+    issue = GithubIssue.from_api(issue_data)
+    fp1 = fingerprint(issue)
+    attempt1_result = marker("result", ISSUE_KEY, fp1) + "\nattempt-1 result"
+    fake_github.add_comment(7, body=attempt1_result, comment_id=101)
+    finished_at = NOW
+    relabel_at = NOW + timedelta(minutes=1)
+    fake_github.add_event(7, created_at=relabel_at, actor="maintainer")
+    fake_github.issues[7]["updated_at"] = (
+        relabel_at + timedelta(seconds=1)
+    ).isoformat()
+    fake_workflow = FakeWorkflow()
+    fake_workflow.set_response(
+        "POST", f"/v1/issues/{ISSUE_KEY}/start", 202, {"issue_id": ISSUE_KEY}
+    )
+    poller, store, github_http, workflow_http, *_ = make_poller(
+        tmp_path, fake_github, fake_workflow
+    )
+    row = _finished_row(issue, finished_at=finished_at)
+    store.upsert_issue(row)
+    store.record_admission(ISSUE_KEY, 1, row.admitted_at)
+    store.record_comment(ISSUE_KEY, 1, "result", fp1, 101, finished_at)
+
+    try:
+        await poller.prepare()
+        first = await poller.run_cycle()
+        row2 = store.get_issue(ISSUE_KEY)
+        assert row2 is not None
+        assert row2.attempt == 2
+        assert row2.state == "submitted"
+        assert first.started == 1
+        start = next(
+            payload
+            for method, path, payload in fake_workflow.calls
+            if method == "POST" and path.endswith("/start")
+        )
+        assert start["attempt"] == 2
+        assert any(
+            "key=gh-100-7-r2" in c["body"] and "kind=ack" in c["body"]
+            for c in fake_github.comments[7]
+        )
+        assert any(
+            c["id"] == 101 and "attempt-1 result" in c["body"]
+            for c in fake_github.comments[7]
+        )
+
+        fake_workflow.set_response(
+            "GET",
+            f"/v1/issues/{ISSUE_KEY}/run",
+            200,
+            _committed_result(
+                triage={
+                    "kind": "bug",
+                    "priority": "medium",
+                    "summary": "Re-triage summary.",
+                    "area": "parser",
+                },
+                area="parser",
+            ),
+        )
+        fake_github.issues[7]["updated_at"] = (
+            relabel_at + timedelta(minutes=2)
+        ).isoformat()
+        second = await poller.run_cycle()
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    assert second.finished == 1
+    final = store.get_issue(ISSUE_KEY)
+    assert final.state == "finished"
+    assert final.attempt == 2
+    assert store.comment_exists(ISSUE_KEY, 1, "result", fp1)
+    assert store.comment_exists(ISSUE_KEY, 2, "result", final.fingerprint)
+    result_bodies = [
+        c["body"] for c in fake_github.comments[7] if "kind=result" in c["body"]
+    ]
+    assert len(result_bodies) == 2
+    assert any("key=gh-100-7-r2" in body for body in result_bodies)
+    assert any("attempt-1 result" in body for body in result_bodies)
+    status_queries = [
+        query
+        for (method, path, _), query in zip(
+            fake_workflow.calls, fake_workflow.queries, strict=True
+        )
+        if method == "GET" and path.endswith("/run")
+    ]
+    assert status_queries[-1] == {"attempt": ["2"]}
+
+
+@pytest.mark.anyio
+async def test_relabel_while_submitted_is_ignored_after_finish(tmp_path):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    issue_data = fake_github.add_issue(
+        7, created_at=NOW - timedelta(days=1), updated_at=NOW
+    )
+    issue = GithubIssue.from_api(issue_data)
+    fp = fingerprint(issue)
+    mid_flight_label = NOW + timedelta(minutes=1)
+    fake_github.add_event(7, created_at=mid_flight_label, actor="maintainer")
+    fake_github.issues[7]["updated_at"] = (
+        mid_flight_label + timedelta(seconds=1)
+    ).isoformat()
+    fake_workflow = FakeWorkflow()
+    fake_workflow.set_response(
+        "GET",
+        f"/v1/issues/{ISSUE_KEY}/run",
+        202,
+        {"issue_id": ISSUE_KEY, "state": "running"},
+    )
+    poller, store, github_http, workflow_http, _, _, now, _ = make_poller(
+        tmp_path, fake_github, fake_workflow
+    )
+    store.upsert_issue(
+        replace(
+            make_row("submitted"),
+            fingerprint=fp,
+            github_updated_at=NOW.isoformat(),
+            created_at=(NOW - timedelta(days=1)).isoformat(),
+            admitted_at=(NOW - timedelta(minutes=5)).isoformat(),
+            submitted_at=NOW.isoformat(),
+        )
+    )
+
+    try:
+        await poller.prepare()
+        await poller.run_cycle()
+        assert store.get_issue(ISSUE_KEY).state == "submitted"
+        assert store.get_issue(ISSUE_KEY).attempt == 1
+
+        fake_workflow.set_response(
+            "GET",
+            f"/v1/issues/{ISSUE_KEY}/run",
+            200,
+            _committed_result(
+                triage={
+                    "kind": "bug",
+                    "priority": "low",
+                    "summary": "Done.",
+                    "area": "parser",
+                },
+                area="parser",
+            ),
+        )
+        now[0] = NOW + timedelta(minutes=2)
+        fake_github.issues[7]["updated_at"] = now[0].isoformat()
+        await poller.run_cycle()
+        assert store.get_issue(ISSUE_KEY).state == "finished"
+        assert store.get_issue(ISSUE_KEY).attempt == 1
+
+        # Later update after finish (for example the bot result comment).
+        now[0] = NOW + timedelta(minutes=3)
+        fake_github.issues[7]["updated_at"] = now[0].isoformat()
+        await poller.run_cycle()
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    row = store.get_issue(ISSUE_KEY)
+    assert row.state == "finished"
+    assert row.attempt == 1
+    assert not any(
+        method == "POST" and path.endswith("/start")
+        for method, path, _ in fake_workflow.calls
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("actor", [None, "agent-bot", "AGENT-BOT"])
+async def test_bot_and_actorless_label_events_do_not_retriage(tmp_path, actor):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    issue_data = fake_github.add_issue(
+        7, created_at=NOW - timedelta(days=1), updated_at=NOW
+    )
+    issue = GithubIssue.from_api(issue_data)
+    finished_at = NOW
+    fake_github.add_event(7, created_at=finished_at + timedelta(minutes=1), actor=actor)
+    fake_github.issues[7]["updated_at"] = (
+        finished_at + timedelta(minutes=1, seconds=1)
+    ).isoformat()
+    fake_workflow = FakeWorkflow()
+    poller, store, github_http, workflow_http, *_ = make_poller(
+        tmp_path, fake_github, fake_workflow
+    )
+    store.upsert_issue(_finished_row(issue, finished_at=finished_at))
+
+    try:
+        await poller.prepare()
+        await poller.run_cycle()
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    row = store.get_issue(ISSUE_KEY)
+    assert row.state == "finished"
+    assert row.attempt == 1
+    assert not any(
+        method == "POST" and path.endswith("/start")
+        for method, path, _ in fake_workflow.calls
+    )
+
+
+@pytest.mark.anyio
+async def test_finished_update_without_new_labeled_event_starts_nothing(tmp_path):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    issue_data = fake_github.add_issue(
+        7, created_at=NOW - timedelta(days=1), updated_at=NOW
+    )
+    issue = GithubIssue.from_api(issue_data)
+    finished_at = NOW
+    fake_github.add_event(
+        7, created_at=finished_at - timedelta(hours=1), actor="maintainer"
+    )
+    fake_github.issues[7]["updated_at"] = (
+        finished_at + timedelta(minutes=1)
+    ).isoformat()
+    fake_workflow = FakeWorkflow()
+    poller, store, github_http, workflow_http, *_ = make_poller(
+        tmp_path, fake_github, fake_workflow
+    )
+    store.upsert_issue(_finished_row(issue, finished_at=finished_at))
+
+    try:
+        await poller.prepare()
+        await poller.run_cycle()
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    row = store.get_issue(ISSUE_KEY)
+    assert row.state == "finished"
+    assert row.attempt == 1
+    assert fake_workflow.accepted_starts == {}
+
+
+@pytest.mark.anyio
+async def test_failed_row_relabel_starts_attempt_2(tmp_path):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    issue_data = fake_github.add_issue(
+        7, created_at=NOW - timedelta(days=1), updated_at=NOW
+    )
+    issue = GithubIssue.from_api(issue_data)
+    fp = fingerprint(issue)
+    admitted_at = NOW - timedelta(minutes=5)
+    relabel_at = NOW + timedelta(minutes=1)
+    fake_github.add_event(7, created_at=relabel_at, actor="maintainer")
+    fake_github.issues[7]["updated_at"] = (
+        relabel_at + timedelta(seconds=1)
+    ).isoformat()
+    fake_workflow = FakeWorkflow()
+    fake_workflow.set_response(
+        "POST", f"/v1/issues/{ISSUE_KEY}/start", 202, {"issue_id": ISSUE_KEY}
+    )
+    poller, store, github_http, workflow_http, *_ = make_poller(
+        tmp_path, fake_github, fake_workflow
+    )
+    store.upsert_issue(
+        IssueRow(
+            issue_key=ISSUE_KEY,
+            number=7,
+            state="failed",
+            reason="workflow_unavailable",
+            deferred_reason=None,
+            fingerprint=fp,
+            github_updated_at=NOW.isoformat(),
+            created_at=(NOW - timedelta(days=1)).isoformat(),
+            start_attempts=5,
+            admitted_at=admitted_at.isoformat(),
+            submitted_at=None,
+            finished_at=None,
+            result_status=None,
+            attempt=1,
+            label_seen_at=None,
+        )
+    )
+    store.record_admission(ISSUE_KEY, 1, admitted_at)
+
+    try:
+        await poller.prepare()
+        summary = await poller.run_cycle()
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    row = store.get_issue(ISSUE_KEY)
+    assert summary.started == 1
+    assert row.state == "submitted"
+    assert row.attempt == 2
+    assert row.finished_at is None or row.state == "submitted"
+    start = next(
+        payload
+        for method, path, payload in fake_workflow.calls
+        if method == "POST" and path.endswith("/start")
+    )
+    assert start["attempt"] == 2
+
+
+@pytest.mark.anyio
+async def test_daily_cap_defers_attempt_2_with_one_queued_comment(tmp_path):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    issue_data = fake_github.add_issue(
+        7, created_at=NOW - timedelta(days=1), updated_at=NOW
+    )
+    issue = GithubIssue.from_api(issue_data)
+    finished_at = NOW
+    relabel_at = NOW + timedelta(minutes=1)
+    fake_github.add_event(7, created_at=relabel_at, actor="maintainer")
+    fake_github.issues[7]["updated_at"] = (
+        relabel_at + timedelta(seconds=1)
+    ).isoformat()
+    fake_workflow = FakeWorkflow()
+    poller, store, github_http, workflow_http, *_ = make_poller(
+        tmp_path, fake_github, fake_workflow, max_starts_per_day=1
+    )
+    row = _finished_row(issue, finished_at=finished_at)
+    store.upsert_issue(row)
+    store.record_admission(ISSUE_KEY, 1, row.admitted_at)
+
+    try:
+        await poller.prepare()
+        first = await poller.run_cycle()
+        deferred = store.get_issue(ISSUE_KEY)
+        assert deferred.attempt == 2
+        assert deferred.state == "pending_start"
+        assert deferred.deferred_reason == "daily_limit"
+        assert first.started == 0
+        assert first.deferred == 1
+        queued = [c for c in fake_github.comments[7] if "kind=queued" in c["body"]]
+        assert len(queued) == 1
+
+        fake_github.issues[7]["updated_at"] = (
+            relabel_at + timedelta(minutes=2)
+        ).isoformat()
+        second = await poller.run_cycle()
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    assert second.started == 0
+    assert len([c for c in fake_github.comments[7] if "kind=queued" in c["body"]]) == 1
+    assert fake_workflow.accepted_starts == {}
+    assert store.get_issue(ISSUE_KEY).attempt == 2
+    assert store.get_issue(ISSUE_KEY).state == "pending_start"

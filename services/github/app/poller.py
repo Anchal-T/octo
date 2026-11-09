@@ -231,17 +231,19 @@ class Poller:
         existing = self.store.get_issue(key)
 
         if existing is not None:
-            if existing.state in {"submitted", "finished"}:
+            if existing.state == "submitted":
                 if existing.github_updated_at != updated_at:
                     self.store.upsert_issue(
                         replace(existing, github_updated_at=updated_at)
                     )
                 return
-            if existing.state == "failed" and existing.fingerprint == fp:
-                if existing.github_updated_at != updated_at:
-                    self.store.upsert_issue(
-                        replace(existing, github_updated_at=updated_at)
-                    )
+            if existing.state == "finished" or (
+                existing.state == "failed" and existing.fingerprint == fp
+            ):
+                if existing.github_updated_at == updated_at:
+                    return
+                self.store.upsert_issue(replace(existing, github_updated_at=updated_at))
+                await self._maybe_retriage(existing, issue)
                 return
             if (
                 existing.state != "cancelled"
@@ -575,6 +577,63 @@ class Poller:
             )
             posted += 1
             summary.comments_posted += 1
+
+    async def _maybe_retriage(self, row: IssueRow, issue: GithubIssue) -> None:
+        if issue.state != "open" or GITHUB_LABEL not in issue.labels:
+            return
+        if row.attempt >= 99:
+            return
+        try:
+            events = await self.github.list_label_events(issue.number)
+        except GithubFailure as error:
+            self._record_auth_failure(error)
+            if self._should_abort(error):
+                raise
+            return
+        self._check_rate_limit()
+
+        timestamps = [
+            value
+            for value in (
+                row.label_seen_at,
+                row.finished_at,
+                row.submitted_at,
+                row.admitted_at,
+            )
+            if value is not None
+        ]
+        if not timestamps:
+            return
+        threshold = max(self._datetime(value) for value in timestamps)
+        matching = [
+            event
+            for event in events
+            if event.event == "labeled"
+            and event.label_name.casefold() == GITHUB_LABEL.casefold()
+            and event.actor_login is not None
+            and event.actor_login.casefold() != self.self_login.casefold()
+            and event.created_at > threshold
+        ]
+        if not matching:
+            return
+        newest = max(matching, key=lambda event: event.created_at)
+        self.store.upsert_issue(
+            replace(
+                row,
+                attempt=row.attempt + 1,
+                state="pending_start",
+                reason=None,
+                deferred_reason=None,
+                fingerprint=fingerprint(issue),
+                github_updated_at=self._iso(issue.updated_at),
+                label_seen_at=self._iso(newest.created_at),
+                start_attempts=0,
+                admitted_at=None,
+                submitted_at=None,
+                finished_at=None,
+                result_status=None,
+            )
+        )
 
     def _result_detail(self, result: IssueRunResult, at: str) -> dict[str, str]:
         detail = {"at": at, "status": result.status}
