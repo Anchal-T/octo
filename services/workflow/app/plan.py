@@ -164,7 +164,16 @@ def map_triage_run_v1(plan: IssuePlanV1, outcome: ModelOutcome) -> RunWrite:
     )
 
 
-def map_triage_return_v1(plan: IssuePlanV1, outcome: ModelOutcome) -> IssueRunResult:
+def _model_metadata(outcome: ModelOutcome, provider: str) -> dict[str, str]:
+    return {
+        "model": outcome.model_reported or outcome.model_pinned,
+        "provider": provider,
+    }
+
+
+def map_triage_return_v1(
+    plan: IssuePlanV1, outcome: ModelOutcome, *, provider: str
+) -> IssueRunResult:
     if outcome.outcome not in ("quota_exhausted", "throttled"):
         raise ValueError("only retryable triage outcomes can be returned")
     return IssueRunResult(
@@ -174,8 +183,7 @@ def map_triage_return_v1(plan: IssuePlanV1, outcome: ModelOutcome) -> IssueRunRe
         run_id=plan.run_id,
         proposal_id=plan.proposal_id,
         status=outcome.outcome,
-        model=outcome.model_reported or outcome.model_pinned,
-        provider="groq",
+        **_model_metadata(outcome, provider),
         retry_at=outcome.retry_at,
         retry_in=outcome.retry_in,
         scope=outcome.scope,
@@ -186,7 +194,11 @@ def map_triage_return_v1(plan: IssuePlanV1, outcome: ModelOutcome) -> IssueRunRe
 
 
 def map_triage_commit_v1(
-    plan: IssuePlanV1, outcome: ModelOutcome, triage: TriageResult | None
+    plan: IssuePlanV1,
+    outcome: ModelOutcome,
+    triage: TriageResult | None,
+    *,
+    provider: str,
 ) -> IssueRunResult:
     if outcome.outcome != "completed":
         raise ValueError("only completed triage outcomes can be committed")
@@ -197,8 +209,7 @@ def map_triage_commit_v1(
         run_id=plan.run_id,
         proposal_id=plan.proposal_id,
         status="committed",
-        model=outcome.model_reported or outcome.model_pinned,
-        provider="groq",
+        **_model_metadata(outcome, provider),
         decided_at=outcome.decided_at,
         started_at=outcome.started_at,
         finished_at=outcome.finished_at,

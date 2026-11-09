@@ -222,7 +222,7 @@ class IssueRunResult(Contract):
     proposal_id: str
     status: Literal["committed", "quota_exhausted", "throttled"]
     model: str | None = None
-    provider: Literal["groq"] | None = None
+    provider: str | None = None
     retry_at: datetime | None = None
     retry_in: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     scope: (

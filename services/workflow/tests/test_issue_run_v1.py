@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import cast
 
 import httpx
@@ -95,8 +96,9 @@ def test_parsed_triage_is_carried_in_proposal_and_committed_result():
     outcome = _completed_outcome("example")
     triage = TriageResult(kind="bug", priority="high", summary="Example summary.")
 
+    provider = "configured-provider"
     proposal = build_triage_proposal_v1(plan, outcome, triage)
-    result = map_triage_commit_v1(plan, outcome, triage)
+    result = map_triage_commit_v1(plan, outcome, triage, provider=provider)
 
     assert "stub" not in proposal.payload
     assert "routing" not in proposal.payload
@@ -108,7 +110,7 @@ def test_parsed_triage_is_carried_in_proposal_and_committed_result():
     assert proposal.payload["triage_error"] is None
     assert result.status == "committed"
     assert result.model == "openai/gpt-oss-20b"
-    assert result.provider == "groq"
+    assert result.provider == provider
     assert result.started_at == outcome.started_at
     assert result.finished_at == outcome.finished_at
     assert result.triage == triage
@@ -123,7 +125,9 @@ def test_unparseable_triage_still_commits_with_model_metadata():
     )
     plan = build_issue_plan_v1(request)
 
-    result = map_triage_commit_v1(plan, _completed_outcome("not json"), None)
+    result = map_triage_commit_v1(
+        plan, _completed_outcome("not json"), None, provider="groq"
+    )
 
     assert result.status == "committed"
     assert result.model == "openai/gpt-oss-20b"
@@ -166,6 +170,34 @@ def test_deeply_nested_triage_reply_still_commits_as_unparseable():
     assert result.triage is None
     assert result.triage_error == "unparseable"
     assert "commit-round" in context.steps
+
+
+def test_workflow_result_uses_provider_from_triager_pin(monkeypatch):
+    provider = "configured-provider"
+    monkeypatch.setattr(
+        workflow,
+        "pin_for",
+        lambda *_: SimpleNamespace(pool=provider),
+        raising=False,
+    )
+    outcome = _completed_outcome('{"kind":"bug","priority":"low","summary":"Example."}')
+    request = IssueRunRequest(
+        issue_id="issue-17",
+        title="Example title",
+        read_basis=datetime(2026, 10, 31, 12, tzinfo=UTC),
+    )
+
+    class Context:
+        async def run_typed(self, name, *args, **kwargs):
+            if name == "triage-call:1":
+                return outcome
+            return {}
+
+    result = asyncio.run(
+        workflow.run_issue_v1(cast(restate.WorkflowContext, Context()), request)
+    )
+
+    assert result.provider == provider
 
 
 def test_decide_wait_includes_exact_two_hour_cap():
@@ -347,12 +379,13 @@ def test_second_throttle_result_preserves_retry_and_model_metadata():
         finished_at=basis,
     )
 
-    result = map_triage_return_v1(plan, outcome)
+    provider = "configured-provider"
+    result = map_triage_return_v1(plan, outcome, provider=provider)
 
     assert result.status == "throttled"
     assert result.retry_in == 30
     assert result.model == "openai/gpt-oss-20b"
-    assert result.provider == "groq"
+    assert result.provider == provider
     assert result.started_at == basis
     assert result.finished_at == basis
     assert result.decided_at == basis

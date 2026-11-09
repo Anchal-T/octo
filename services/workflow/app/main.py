@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from restate.client_types import HttpError as RestateHttpError
 
 from .models import Ledger, ModelClient, Store
+from .models.pools import pin_for
 from .plan import (
     build_issue_plan,
     build_issue_plan_v1,
@@ -170,6 +171,7 @@ async def run_issue_v1(
         payload=plan.event.model_dump(mode="json"),
     )
 
+    triager_provider = pin_for("triager", settings).pool
     model_request = ModelCallRequest(
         run_id=plan.run_id,
         step="triage",
@@ -196,7 +198,7 @@ async def run_issue_v1(
             if outcome.retry_in is None:
                 raise restate.TerminalError("triager throttle is missing retry_in")
             if call_number == 2:
-                return map_triage_return_v1(plan, outcome)
+                return map_triage_return_v1(plan, outcome, provider=triager_provider)
             wait = await ctx.run_typed(
                 f"triage-throttle-wait:{call_number}",
                 decide_delay,
@@ -205,7 +207,7 @@ async def run_issue_v1(
                 cap_s=settings.triager_wait_cap_s,
             )
             if wait["action"] == "return":
-                return map_triage_return_v1(plan, outcome)
+                return map_triage_return_v1(plan, outcome, provider=triager_provider)
             wait_s = wait["wait_s"]
             if wait_s is None:
                 raise restate.TerminalError("triager wait decision is missing wait_s")
@@ -226,7 +228,7 @@ async def run_issue_v1(
             cap_s=settings.triager_wait_cap_s,
         )
         if wait["action"] == "return" or call_number == 2:
-            return map_triage_return_v1(plan, outcome)
+            return map_triage_return_v1(plan, outcome, provider=triager_provider)
         wait_s = wait["wait_s"]
         if wait_s is None:
             raise restate.TerminalError("triager wait decision is missing wait_s")
@@ -242,7 +244,7 @@ async def run_issue_v1(
     try:
         run = map_triage_run_v1(plan, outcome)
         proposal = build_triage_proposal_v1(plan, outcome, triage)
-        result = map_triage_commit_v1(plan, outcome, triage)
+        result = map_triage_commit_v1(plan, outcome, triage, provider=triager_provider)
     except (ValidationError, ValueError) as error:
         raise restate.TerminalError("invalid triage result") from error
     await ctx.run_typed(
