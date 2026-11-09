@@ -223,6 +223,39 @@ def test_workflow_builds_prompt_and_result_area_from_repo_config():
     assert proposals[0]["payload"]["triage"]["area"] == "fields"
 
 
+def test_run_for_fork_alias_gets_the_configured_repo_areas():
+    basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
+    outcome = _completed_outcome(
+        '{"kind":"bug","priority":"low",'
+        '"summary":"Grouping drops the alias.","area":"parser-tree"}'
+    )
+    request = IssueRunRequest(
+        issue_id="issue-fork",
+        repo="Anchal-T/sqlparse",
+        title="Example title",
+        read_basis=basis,
+    )
+    model_requests = []
+
+    class Context:
+        async def run_typed(self, name, *args, **kwargs):
+            if name == "triage-call:1":
+                model_requests.append(kwargs["request"])
+                return outcome
+            return {}
+
+    result = asyncio.run(
+        workflow.run_issue_v1(cast(restate.WorkflowContext, Context()), request)
+    )
+
+    assert len(model_requests) == 1
+    assert (
+        '"area": "lexer-keywords|parser-tree|splitting|formatting|'
+        'cli-api|docs-build|unknown"' in model_requests[0].messages[0]["content"]
+    )
+    assert result.area == "parser-tree"
+
+
 def test_workflow_result_uses_provider_from_triager_pin(monkeypatch):
     provider = "configured-provider"
     monkeypatch.setattr(

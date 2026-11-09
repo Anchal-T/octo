@@ -99,6 +99,56 @@ def test_agentteam_config_rejects_duplicate_area_names_in_yaml(tmp_path):
         load_agentteam_config(path)
 
 
+def test_repo_lookup_matches_name_or_alias_case_insensitively():
+    config = load_agentteam_config()
+    canonical = config.repo("andialbrecht/sqlparse")
+
+    assert config.repo("ANDIALBRECHT/SQLPARSE").areas == canonical.areas
+    assert config.repo("anchal-t/sqlparse").areas == canonical.areas
+    assert config.repo("Anchal-T/sqlparse").areas == canonical.areas
+
+
+def test_agentteam_config_rejects_alias_that_is_not_a_list(tmp_path):
+    path = _write_config(
+        tmp_path,
+        "repos:\n"
+        "  - name: example/repo\n"
+        "    aliases: example/fork\n"
+        "    areas: {parser: [src/parser.py]}\n",
+    )
+
+    with pytest.raises(TypeError, match="aliases must be a list"):
+        load_agentteam_config(path)
+
+
+def test_agentteam_config_rejects_blank_alias(tmp_path):
+    path = _write_config(
+        tmp_path,
+        "repos:\n"
+        "  - name: example/repo\n"
+        "    aliases: ['   ']\n"
+        "    areas: {parser: [src/parser.py]}\n",
+    )
+
+    with pytest.raises(ValueError, match="repository alias must be non-empty"):
+        load_agentteam_config(path)
+
+
+def test_agentteam_config_rejects_alias_that_repeats_a_repository_name(tmp_path):
+    path = _write_config(
+        tmp_path,
+        "repos:\n"
+        "  - name: example/repo\n"
+        "    aliases: [Example/Fork]\n"
+        "    areas: {parser: [src/parser.py]}\n"
+        "  - name: example/fork\n"
+        "    areas: {docs: [docs/**]}\n",
+    )
+
+    with pytest.raises(ValueError, match="duplicate repository"):
+        load_agentteam_config(path)
+
+
 def test_agentteam_config_rejects_duplicate_repository_names(tmp_path):
     path = _write_config(
         tmp_path,

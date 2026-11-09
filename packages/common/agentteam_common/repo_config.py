@@ -34,6 +34,7 @@ _UniqueKeyLoader.add_constructor(
 class RepoConfig:
     name: str
     areas: dict[str, tuple[str, ...]]
+    aliases: tuple[str, ...] = ()
 
     @property
     def allowed_area_names(self) -> tuple[str, ...]:
@@ -45,10 +46,14 @@ class AgentTeamConfig:
     repos: dict[str, RepoConfig]
 
     def repo(self, name: str) -> RepoConfig:
-        try:
-            return self.repos[name]
-        except KeyError as error:
-            raise ValueError(f"unknown repository: {name}") from error
+        folded = name.strip().lower()
+        for configured in self.repos.values():
+            if any(
+                folded == item.lower()
+                for item in (configured.name, *configured.aliases)
+            ):
+                return configured
+        raise ValueError(f"unknown repository: {name}")
 
 
 def load_agentteam_config(path: str | Path = "agentteam.yaml") -> AgentTeamConfig:
@@ -65,6 +70,7 @@ def load_agentteam_config(path: str | Path = "agentteam.yaml") -> AgentTeamConfi
         raise ValueError("agentteam.yaml repos must be a non-empty list")
 
     repos = {}
+    claimed: set[str] = set()
     for entry in repo_entries:
         if not isinstance(entry, dict):
             raise TypeError("each repository entry must be a mapping")
@@ -72,8 +78,8 @@ def load_agentteam_config(path: str | Path = "agentteam.yaml") -> AgentTeamConfi
         if not isinstance(name, str) or not name.strip():
             raise ValueError("repository name must be non-empty")
         name = name.strip()
-        if name in repos:
-            raise ValueError(f"duplicate repository name: {name}")
+        _claim(claimed, name)
+        aliases = _aliases(entry.get("aliases", []), claimed, name)
 
         area_entries = entry.get("areas")
         if not isinstance(area_entries, dict) or not area_entries:
@@ -94,6 +100,26 @@ def load_agentteam_config(path: str | Path = "agentteam.yaml") -> AgentTeamConfi
             ):
                 raise ValueError(f"area {area_name} has an empty path glob")
             areas[area_name] = tuple(glob.strip() for glob in path_globs)
-        repos[name] = RepoConfig(name=name, areas=areas)
+        repos[name] = RepoConfig(name=name, areas=areas, aliases=aliases)
 
     return AgentTeamConfig(repos=repos)
+
+
+def _claim(claimed: set[str], value: str) -> None:
+    folded = value.lower()
+    if folded in claimed:
+        raise ValueError(f"duplicate repository name: {value}")
+    claimed.add(folded)
+
+
+def _aliases(raw: Any, claimed: set[str], name: str) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        raise TypeError(f"repository {name} aliases must be a list")
+    aliases: list[str] = []
+    for alias in raw:
+        if not isinstance(alias, str) or not alias.strip():
+            raise ValueError("repository alias must be non-empty")
+        alias = alias.strip()
+        _claim(claimed, alias)
+        aliases.append(alias)
+    return tuple(aliases)

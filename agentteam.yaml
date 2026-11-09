@@ -1,5 +1,7 @@
 repos:
   - name: andialbrecht/sqlparse
+    aliases:
+      - Anchal-T/sqlparse
     areas:
       lexer-keywords:
         - sqlparse/lexer.py
