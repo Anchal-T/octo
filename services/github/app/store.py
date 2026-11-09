@@ -303,6 +303,7 @@ class Store:
         try:
             for statement in self._MIGRATE_V1_TO_V2:
                 connection.execute(statement)
+            connection.commit()
         except Exception:
             connection.rollback()
             raise

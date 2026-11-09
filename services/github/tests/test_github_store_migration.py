@@ -112,6 +112,32 @@ def test_v1_fixture_migrates_to_v2_with_admission_and_attempted_comments(tmp_pat
     ]
 
 
+def test_migrate_v1_to_v2_commits_before_returning(tmp_path):
+    path = str(tmp_path / "github.sqlite")
+    _seed_v1(path)
+    store = Store.__new__(Store)
+    store.path = path
+    store.busy_timeout_ms = 5000
+
+    connection = store.connect()
+    try:
+        assert Store._schema_version(connection) == 1
+        store._migrate_v1_to_v2(connection)
+    finally:
+        connection.close()
+
+    with sqlite3.connect(path) as other:
+        version = other.execute("SELECT version FROM schema_version").fetchone()[0]
+        columns = {
+            row[1] for row in other.execute("PRAGMA table_info(issue)").fetchall()
+        }
+        admission = other.execute("SELECT COUNT(*) FROM admission").fetchone()[0]
+    assert version == 2
+    assert "attempt" in columns
+    assert "label_seen_at" in columns
+    assert admission == 1
+
+
 def test_migration_failure_leaves_version_1(tmp_path, monkeypatch):
     path = str(tmp_path / "github.sqlite")
     _seed_v1(path)
