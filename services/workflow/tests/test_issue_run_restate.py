@@ -196,6 +196,10 @@ def test_restate_replay_and_triager_retry_paths(monkeypatch, tmp_path):
             assert provider_calls["replay-case"] == 1
             assert len(outcomes_for("replay-case")) == 1
             assert replay_result.run_id == replay_run_id
+            assert replay_result.model == MODEL
+            assert replay_result.provider == "groq"
+            assert replay_result.triage is None
+            assert replay_result.triage_error == "unparseable"
 
             transient_result = await invoke(env, "transient-5xx-case")
             assert transient_result.status == "committed"

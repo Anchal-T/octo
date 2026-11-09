@@ -10,12 +10,14 @@ from agentteam_contracts import (
     IssueRunRequest,
     IssueRunResult,
     ModelOutcome,
+    TriageResult,
 )
 
 from services.workflow.app import main as workflow
 from services.workflow.app.plan import (
     build_issue_plan_v1,
     build_triage_proposal_v1,
+    map_triage_commit_v1,
     map_triage_return_v1,
     map_triage_run_v1,
 )
@@ -47,7 +49,7 @@ def test_v1_plan_uses_separate_memory_keys_and_maps_model_completion():
 
     plan = build_issue_plan_v1(request)
     run = map_triage_run_v1(plan, outcome)
-    proposal = build_triage_proposal_v1(plan, outcome)
+    proposal = build_triage_proposal_v1(plan, outcome, None)
 
     assert plan.round.idempotency_key == "issue-17:v1:round:1"
     assert plan.event.idempotency_key == "issue-17:v1:issue"
@@ -58,13 +60,76 @@ def test_v1_plan_uses_separate_memory_keys_and_maps_model_completion():
     assert run.tokens_in == 12
     assert run.tokens_out == 3
     assert proposal.payload == {
-        "stub": True,
         "issue_id": "issue-17",
-        "routing": "not_implemented",
+        "triage": None,
+        "triage_error": "unparseable",
         "model": "openai/gpt-oss-20b",
         "request_id": "mc-example",
     }
     assert "Private triage result" not in str(proposal.payload)
+
+
+def _completed_outcome(text: str) -> ModelOutcome:
+    basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
+    return ModelOutcome(
+        outcome="completed",
+        request_id="mc-example",
+        decided_at=basis,
+        model_pinned="openai/gpt-oss-20b",
+        model_reported="openai/gpt-oss-20b",
+        run_id="run-example",
+        step="triage",
+        text=text,
+        started_at=basis,
+        finished_at=basis + timedelta(seconds=1),
+    )
+
+
+def test_parsed_triage_is_carried_in_proposal_and_committed_result():
+    request = IssueRunRequest(
+        issue_id="issue-17",
+        title="Example title",
+        read_basis=datetime(2026, 10, 31, 12, tzinfo=UTC),
+    )
+    plan = build_issue_plan_v1(request)
+    outcome = _completed_outcome("example")
+    triage = TriageResult(kind="bug", priority="high", summary="Example summary.")
+
+    proposal = build_triage_proposal_v1(plan, outcome, triage)
+    result = map_triage_commit_v1(plan, outcome, triage)
+
+    assert "stub" not in proposal.payload
+    assert "routing" not in proposal.payload
+    assert proposal.payload["triage"] == {
+        "kind": "bug",
+        "priority": "high",
+        "summary": "Example summary.",
+    }
+    assert proposal.payload["triage_error"] is None
+    assert result.status == "committed"
+    assert result.model == "openai/gpt-oss-20b"
+    assert result.provider == "groq"
+    assert result.started_at == outcome.started_at
+    assert result.finished_at == outcome.finished_at
+    assert result.triage == triage
+    assert result.triage_error is None
+
+
+def test_unparseable_triage_still_commits_with_model_metadata():
+    request = IssueRunRequest(
+        issue_id="issue-17",
+        title="Example title",
+        read_basis=datetime(2026, 10, 31, 12, tzinfo=UTC),
+    )
+    plan = build_issue_plan_v1(request)
+
+    result = map_triage_commit_v1(plan, _completed_outcome("not json"), None)
+
+    assert result.status == "committed"
+    assert result.model == "openai/gpt-oss-20b"
+    assert result.provider == "groq"
+    assert result.triage is None
+    assert result.triage_error == "unparseable"
 
 
 def test_decide_wait_includes_exact_two_hour_cap():

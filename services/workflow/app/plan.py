@@ -9,6 +9,7 @@ from agentteam_contracts import (
     ProposalWrite,
     RoundWrite,
     RunWrite,
+    TriageResult,
 )
 
 
@@ -184,7 +185,31 @@ def map_triage_return_v1(plan: IssuePlanV1, outcome: ModelOutcome) -> IssueRunRe
     )
 
 
-def build_triage_proposal_v1(plan: IssuePlanV1, outcome: ModelOutcome) -> ProposalWrite:
+def map_triage_commit_v1(
+    plan: IssuePlanV1, outcome: ModelOutcome, triage: TriageResult | None
+) -> IssueRunResult:
+    if outcome.outcome != "completed":
+        raise ValueError("only completed triage outcomes can be committed")
+    return IssueRunResult(
+        issue_id=plan.issue_id,
+        round_id=plan.round_id,
+        event_id=plan.event_id,
+        run_id=plan.run_id,
+        proposal_id=plan.proposal_id,
+        status="committed",
+        model=outcome.model_reported or outcome.model_pinned,
+        provider="groq",
+        decided_at=outcome.decided_at,
+        started_at=outcome.started_at,
+        finished_at=outcome.finished_at,
+        triage=triage,
+        triage_error=None if triage is not None else "unparseable",
+    )
+
+
+def build_triage_proposal_v1(
+    plan: IssuePlanV1, outcome: ModelOutcome, triage: TriageResult | None
+) -> ProposalWrite:
     if outcome.outcome != "completed":
         raise ValueError("only completed triage outcomes can be proposed")
     return ProposalWrite(
@@ -195,9 +220,9 @@ def build_triage_proposal_v1(plan: IssuePlanV1, outcome: ModelOutcome) -> Propos
         op="route_issue",
         evidence_event_ids=[plan.event_id],
         payload={
-            "stub": True,
             "issue_id": plan.issue_id,
-            "routing": "not_implemented",
+            "triage": None if triage is None else triage.model_dump(mode="json"),
+            "triage_error": None if triage is not None else "unparseable",
             "model": outcome.model_reported or outcome.model_pinned,
             "request_id": outcome.request_id,
         },

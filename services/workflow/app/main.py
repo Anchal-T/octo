@@ -25,10 +25,12 @@ from .plan import (
     build_issue_plan,
     build_issue_plan_v1,
     build_triage_proposal_v1,
+    map_triage_commit_v1,
     map_triage_return_v1,
     map_triage_run_v1,
 )
 from .retries import WaitDecision, decide_delay, decide_wait
+from .triage import parse_triage, triage_messages
 
 settings = Settings.from_env()
 issue_run = restate.Workflow("IssueRun")
@@ -172,12 +174,7 @@ async def run_issue_v1(
         run_id=plan.run_id,
         step="triage",
         role="triager",
-        messages=[
-            {
-                "role": "user",
-                "content": f"GitHub issue title: {request.title}\n\n{request.body}",
-            }
-        ],
+        messages=triage_messages(request.title, request.body),
         sampling=Sampling(),
         taint=2,
         source="github_issue",
@@ -241,9 +238,11 @@ async def run_issue_v1(
     else:
         raise restate.TerminalError("triager did not complete within two calls")
 
+    triage = parse_triage(outcome.text)
     try:
         run = map_triage_run_v1(plan, outcome)
-        proposal = build_triage_proposal_v1(plan, outcome)
+        proposal = build_triage_proposal_v1(plan, outcome, triage)
+        result = map_triage_commit_v1(plan, outcome, triage)
     except (ValidationError, ValueError) as error:
         raise restate.TerminalError("invalid triage result") from error
     await ctx.run_typed(
@@ -264,14 +263,7 @@ async def run_issue_v1(
         path=f"/v1/rounds/{plan.round_id}/commit",
         payload={},
     )
-    return IssueRunResult(
-        issue_id=request.issue_id,
-        round_id=plan.round_id,
-        event_id=plan.event_id,
-        run_id=plan.run_id,
-        proposal_id=plan.proposal_id,
-        status="committed",
-    )
+    return result
 
 
 app.mount("/restate/v1", restate.app(services=[issue_run, issue_run_v1]))
