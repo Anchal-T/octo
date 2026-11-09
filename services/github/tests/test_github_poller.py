@@ -1222,6 +1222,41 @@ async def test_bot_and_actorless_label_events_do_not_retriage(tmp_path, actor):
 
 
 @pytest.mark.anyio
+async def test_self_relabel_retriages_when_process_own_issues(tmp_path):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    issue_data = fake_github.add_issue(
+        7, created_at=NOW - timedelta(days=1), updated_at=NOW
+    )
+    issue = GithubIssue.from_api(issue_data)
+    finished_at = NOW
+    relabel_at = finished_at + timedelta(minutes=1)
+    fake_github.add_event(7, created_at=relabel_at, actor="agent-bot")
+    fake_github.issues[7]["updated_at"] = (
+        relabel_at + timedelta(seconds=1)
+    ).isoformat()
+    fake_workflow = FakeWorkflow()
+    fake_workflow.set_response(
+        "POST", f"/v1/issues/{ISSUE_KEY}/start", 202, {"issue_id": ISSUE_KEY}
+    )
+    poller, store, github_http, workflow_http, *_ = make_poller(
+        tmp_path, fake_github, fake_workflow, process_own_issues=True
+    )
+    store.upsert_issue(_finished_row(issue, finished_at=finished_at))
+
+    try:
+        await poller.prepare()
+        summary = await poller.run_cycle()
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    row = store.get_issue(ISSUE_KEY)
+    assert row.attempt == 2
+    assert row.state == "submitted"
+    assert summary.started == 1
+
+
+@pytest.mark.anyio
 async def test_finished_update_without_new_labeled_event_starts_nothing(tmp_path):
     fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
     issue_data = fake_github.add_issue(

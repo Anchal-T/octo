@@ -605,13 +605,16 @@ class Poller:
         if not timestamps:
             return
         threshold = max(self._datetime(value) for value in timestamps)
+        allow_self = self.settings.process_own_issues
         matching = [
             event
             for event in events
             if event.event == "labeled"
             and event.label_name.casefold() == GITHUB_LABEL.casefold()
             and event.actor_login is not None
-            and event.actor_login.casefold() != self.self_login.casefold()
+            and (
+                allow_self or event.actor_login.casefold() != self.self_login.casefold()
+            )
             and event.created_at > threshold
         ]
         if not matching:
