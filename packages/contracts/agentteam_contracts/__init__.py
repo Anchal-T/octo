@@ -15,6 +15,7 @@ from .models import (
     RunStatus,
     RunWrite,
     Sampling,
+    TriageResult,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "RunStatus",
     "RunWrite",
     "Sampling",
+    "TriageResult",
 ]

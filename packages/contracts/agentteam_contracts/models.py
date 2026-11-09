@@ -208,6 +208,12 @@ class IssueRunRequest(Contract):
     read_basis: datetime | None = None
 
 
+class TriageResult(Contract):
+    kind: Literal["bug", "feature", "question", "docs", "other"]
+    priority: Literal["low", "medium", "high"]
+    summary: str = Field(min_length=1, max_length=300)
+
+
 class IssueRunResult(Contract):
     issue_id: str
     round_id: str
@@ -232,6 +238,18 @@ class IssueRunResult(Contract):
     decided_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    triage: TriageResult | None = None
+    triage_error: Literal["unparseable"] | None = None
+
+    @model_validator(mode="after")
+    def validate_triage_fields(self) -> Self:
+        if self.triage is not None and self.triage_error is not None:
+            raise ValueError("triage and triage_error cannot both be set")
+        if self.status != "committed" and (
+            self.triage is not None or self.triage_error is not None
+        ):
+            raise ValueError("only committed results carry triage fields")
+        return self
 
 
 class RunStartAccepted(Contract):
