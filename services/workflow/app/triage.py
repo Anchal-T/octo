@@ -36,11 +36,10 @@ def parse_triage(text: str | None) -> TriageResult | None:
     if fenced:
         candidate = fenced.group(1)
     start = candidate.find("{")
-    end = candidate.rfind("}")
-    if start == -1 or end <= start:
+    if start == -1:
         return None
     try:
-        data = json.loads(candidate[start : end + 1])
+        data, _ = json.JSONDecoder().raw_decode(candidate, start)
     except ValueError:
         return None
     if not isinstance(data, dict):

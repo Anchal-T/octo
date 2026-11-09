@@ -15,6 +15,7 @@ VALID = '{"kind": "bug", "priority": "medium", "summary": "Example summary."}'
         VALID,
         f"```json\n{VALID}\n```",
         f"Here is the triage:\n{VALID}\nThanks.",
+        f"{VALID}\nNote: braces {{like this}} after the object.",
         '{"kind": "BUG", "priority": " Medium ", "summary": "Example summary."}',
         (
             '{"kind": "bug", "priority": "medium", "summary": "Example summary.",'
@@ -78,3 +79,12 @@ def test_triage_messages_state_facts_and_ask_for_json_only():
     assert "JSON" in TRIAGER_SYSTEM_PROMPT
     assert messages[1]["content"] == "GitHub issue title: Example title\n\nExample body"
     assert len(TRIAGER_SYSTEM_PROMPT) / 4 < 150
+
+
+def test_parse_triage_keeps_braces_inside_the_summary():
+    result = parse_triage(
+        '{"kind": "bug", "priority": "low", "summary": "Fails on {a} and {b}."}'
+    )
+
+    assert result is not None
+    assert result.summary == "Fails on {a} and {b}."
