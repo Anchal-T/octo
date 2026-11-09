@@ -1,0 +1,53 @@
+repos:
+  - name: andialbrecht/sqlparse
+    areas:
+      lexer-keywords:
+        - sqlparse/lexer.py
+        - sqlparse/keywords.py
+        - sqlparse/tokens.py
+      parser-tree:
+        - sqlparse/engine/grouping.py
+        - sqlparse/sql.py
+      splitting:
+        - sqlparse/engine/statement_splitter.py
+        - sqlparse/engine/filter_stack.py
+        - sqlparse/engine/__init__.py
+      formatting:
+        - sqlparse/formatter.py
+        - sqlparse/filters/**
+      cli-api:
+        - sqlparse/cli.py
+        - sqlparse/__main__.py
+        - sqlparse/__init__.py
+        - sqlparse/exceptions.py
+        - sqlparse/utils.py
+      docs-build:
+        - docs/**
+        - CHANGELOG
+        - pyproject.toml
+        - .github/workflows/**
+  - name: marshmallow-code/marshmallow
+    areas:
+      fields:
+        - src/marshmallow/fields.py
+      schema:
+        - src/marshmallow/schema.py
+      validate:
+        - src/marshmallow/validate.py
+      hooks:
+        - src/marshmallow/decorators.py
+      errors:
+        - src/marshmallow/exceptions.py
+        - src/marshmallow/error_store.py
+      utils-registry:
+        - src/marshmallow/utils.py
+        - src/marshmallow/class_registry.py
+        - src/marshmallow/orderedset.py
+        - src/marshmallow/types.py
+        - src/marshmallow/constants.py
+        - src/marshmallow/experimental/**
+      docs-build:
+        - docs/**
+        - CHANGELOG.rst
+        - pyproject.toml
+        - .github/workflows/**
