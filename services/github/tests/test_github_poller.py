@@ -354,9 +354,8 @@ async def test_retry_after_crash_between_comment_post_and_record_avoids_duplicat
         )
         == 1
     )
-    assert store.comment_exists(
-        ISSUE_KEY, "ack", store.get_issue(ISSUE_KEY).fingerprint
-    )
+    row = store.get_issue(ISSUE_KEY)
+    assert store.comment_exists(ISSUE_KEY, row.attempt, "ack", row.fingerprint)
 
 
 @pytest.mark.anyio
@@ -933,4 +932,4 @@ async def test_later_cycle_result_comment_waits_while_workflow_is_down(tmp_path)
 
     assert results == []
     row = store.get_issue(ISSUE_KEY)
-    assert not store.comment_exists(ISSUE_KEY, "result", row.fingerprint)
+    assert not store.comment_exists(ISSUE_KEY, row.attempt, "result", row.fingerprint)

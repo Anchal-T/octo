@@ -32,6 +32,7 @@ def test_store_initializes_schema_version_and_round_trips_issue(tmp_path):
     store = Store(str(tmp_path / "github.sqlite"))
     row = make_row(admitted_at=NOW.isoformat())
     store.upsert_issue(row)
+    store.record_admission(row.issue_key, row.attempt, NOW.isoformat())
 
     assert store.get_meta("repo_id") is None
     assert store.get_issue(row.issue_key) == row
@@ -40,7 +41,7 @@ def test_store_initializes_schema_version_and_round_trips_issue(tmp_path):
     assert store.count_admitted_since(NOW - timedelta(hours=12)) == 1
     with store.connection() as connection:
         assert (
-            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 2
         )
 
     store.set_meta("repo_id", "100")
@@ -51,9 +52,9 @@ def test_store_refuses_an_unknown_schema_version(tmp_path):
     path = str(tmp_path / "github.sqlite")
     Store(path)
     with sqlite3.connect(path) as connection:
-        connection.execute("UPDATE schema_version SET version = 2")
+        connection.execute("UPDATE schema_version SET version = 3")
 
-    with pytest.raises(SchemaVersionError, match="2"):
+    with pytest.raises(SchemaVersionError, match="3"):
         Store(path)
 
 
@@ -78,10 +79,10 @@ def test_store_comment_deduplication_and_submitted_issues(tmp_path):
     store = Store(str(tmp_path / "github.sqlite"))
     row = make_row(state="submitted")
     store.upsert_issue(row)
-    store.record_comment(row.issue_key, "ack", row.fingerprint, 42, NOW)
-    store.record_comment(row.issue_key, "ack", row.fingerprint, 99, NOW)
+    store.record_comment(row.issue_key, row.attempt, "ack", row.fingerprint, 42, NOW)
+    store.record_comment(row.issue_key, row.attempt, "ack", row.fingerprint, 99, NOW)
 
-    assert store.comment_exists(row.issue_key, "ack", row.fingerprint)
+    assert store.comment_exists(row.issue_key, row.attempt, "ack", row.fingerprint)
     assert store.submitted_issues() == [row]
     with store.connection() as connection:
         comment = connection.execute("SELECT github_comment_id FROM comment").fetchone()

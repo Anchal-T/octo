@@ -315,6 +315,8 @@ class Poller:
             submitted_at=submitted_at,
             finished_at=finished_at,
             result_status=result_status,
+            attempt=1 if existing is None else existing.attempt,
+            label_seen_at=None if existing is None else existing.label_seen_at,
         )
         self.store.upsert_issue(row)
         if decision.state == "skipped":
@@ -391,12 +393,16 @@ class Poller:
 
         for row in admission.starts:
             issue = current[row.number]
+            admitted_at = row.admitted_at or self._iso(now)
             admitted = replace(
                 row,
                 deferred_reason=None,
-                admitted_at=row.admitted_at or self._iso(now),
+                admitted_at=admitted_at,
             )
             self.store.upsert_issue(admitted)
+            self.store.record_admission(
+                admitted.issue_key, admitted.attempt, admitted_at
+            )
             try:
                 result = await self.workflow.start(
                     to_run_request(
@@ -499,7 +505,9 @@ class Poller:
 
         posted = 0
         for row, kind, detail in due:
-            if self.store.comment_exists(row.issue_key, kind, row.fingerprint):
+            if self.store.comment_exists(
+                row.issue_key, row.attempt, kind, row.fingerprint
+            ):
                 continue
             try:
                 comments = await self.github.list_comments(row.number)
@@ -523,6 +531,7 @@ class Poller:
             if existing is not None:
                 self.store.record_comment(
                     row.issue_key,
+                    row.attempt,
                     kind,
                     row.fingerprint,
                     existing.id,
@@ -555,6 +564,7 @@ class Poller:
             self._check_rate_limit()
             self.store.record_comment(
                 row.issue_key,
+                row.attempt,
                 kind,
                 row.fingerprint,
                 comment_id,

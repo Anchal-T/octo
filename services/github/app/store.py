@@ -18,6 +18,44 @@ IssueState = Literal[
 CommentKind = Literal["ack", "queued", "skip", "failure", "result"]
 ResultStatus = Literal["committed", "quota_exhausted", "throttled"]
 
+_MIGRATE_V1_TO_V2 = (
+    (
+        "ALTER TABLE issue ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1 "
+        "CHECK (attempt BETWEEN 1 AND 99)"
+    ),
+    "ALTER TABLE issue ADD COLUMN label_seen_at TEXT",
+    (
+        "CREATE TABLE admission ("
+        "issue_key TEXT NOT NULL REFERENCES issue(issue_key), "
+        "attempt INTEGER NOT NULL, "
+        "admitted_at TEXT NOT NULL, "
+        "PRIMARY KEY (issue_key, attempt))"
+    ),
+    "CREATE INDEX admission_admitted_at ON admission(admitted_at)",
+    (
+        "INSERT INTO admission SELECT issue_key, 1, admitted_at FROM issue "
+        "WHERE admitted_at IS NOT NULL"
+    ),
+    (
+        "CREATE TABLE comment_v2 ("
+        "issue_key TEXT NOT NULL REFERENCES issue(issue_key), "
+        "attempt INTEGER NOT NULL DEFAULT 1, "
+        "kind TEXT NOT NULL CHECK (kind IN "
+        "('ack','queued','skip','failure','result')), "
+        "fingerprint TEXT NOT NULL, "
+        "github_comment_id INTEGER NOT NULL, "
+        "posted_at TEXT NOT NULL, "
+        "PRIMARY KEY (issue_key, attempt, kind, fingerprint))"
+    ),
+    (
+        "INSERT INTO comment_v2 SELECT issue_key, 1, kind, fingerprint, "
+        "github_comment_id, posted_at FROM comment"
+    ),
+    "DROP TABLE comment",
+    "ALTER TABLE comment_v2 RENAME TO comment",
+    "UPDATE schema_version SET version = 2",
+)
+
 
 class SchemaVersionError(RuntimeError):
     pass
@@ -38,22 +76,33 @@ class IssueRow:
     submitted_at: str | None
     finished_at: str | None
     result_status: ResultStatus | None
+    attempt: int = 1
+    label_seen_at: str | None = None
 
 
 class Store:
+    _MIGRATE_V1_TO_V2 = _MIGRATE_V1_TO_V2
+
     def __init__(self, path: str, busy_timeout_ms: int = 5000) -> None:
         self.path = path
         self.busy_timeout_ms = busy_timeout_ms
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         schema = Path(__file__).with_name("schema.sql").read_text()
         with self.connection() as connection:
+            version = self._schema_version(connection)
+            if version == 1:
+                self._migrate_v1_to_v2(connection)
+            elif version is not None and version != 2:
+                raise SchemaVersionError(
+                    f"unsupported GitHub schema version: {[version]}"
+                )
             connection.executescript(schema)
             versions = connection.execute(
                 "SELECT version FROM schema_version"
             ).fetchall()
             if not versions:
-                connection.execute("INSERT INTO schema_version(version) VALUES (1)")
-            elif len(versions) != 1 or versions[0]["version"] != 1:
+                connection.execute("INSERT INTO schema_version(version) VALUES (2)")
+            elif len(versions) != 1 or versions[0]["version"] != 2:
                 value = [row["version"] for row in versions]
                 raise SchemaVersionError(f"unsupported GitHub schema version: {value}")
 
@@ -100,9 +149,9 @@ class Store:
         columns = (
             "issue_key, number, state, reason, deferred_reason, fingerprint, "
             "github_updated_at, created_at, start_attempts, admitted_at, "
-            "submitted_at, finished_at, result_status"
+            "submitted_at, finished_at, result_status, attempt, label_seen_at"
         )
-        placeholders = ", ".join("?" for _ in range(13))
+        placeholders = ", ".join("?" for _ in range(15))
         values = tuple(issue.__dict__.values())
         with self.connection() as connection:
             connection.execute(
@@ -117,7 +166,9 @@ class Store:
                 "admitted_at=excluded.admitted_at, "
                 "submitted_at=excluded.submitted_at, "
                 "finished_at=excluded.finished_at, "
-                "result_status=excluded.result_status",
+                "result_status=excluded.result_status, "
+                "attempt=excluded.attempt, "
+                "label_seen_at=excluded.label_seen_at",
                 values,
             )
 
@@ -159,14 +210,31 @@ class Store:
     def count_admitted_since(self, day_start: datetime) -> int:
         with self.connection() as connection:
             row = connection.execute(
-                "SELECT COUNT(*) AS count FROM issue WHERE admitted_at >= ?",
+                "SELECT COUNT(*) AS count FROM admission WHERE admitted_at >= ?",
                 (self._iso(day_start),),
             ).fetchone()
         return int(row["count"])
 
+    def record_admission(
+        self, issue_key: str, attempt: int, admitted_at: datetime | str
+    ) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO admission "
+                "(issue_key, attempt, admitted_at) VALUES (?, ?, ?)",
+                (
+                    issue_key,
+                    attempt,
+                    self._iso(admitted_at)
+                    if isinstance(admitted_at, datetime)
+                    else admitted_at,
+                ),
+            )
+
     def record_comment(
         self,
         issue_key: str,
+        attempt: int,
         kind: CommentKind,
         fingerprint: str,
         github_comment_id: int,
@@ -175,10 +243,11 @@ class Store:
         with self.connection() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO comment "
-                "(issue_key, kind, fingerprint, github_comment_id, posted_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "(issue_key, attempt, kind, fingerprint, github_comment_id, posted_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     issue_key,
+                    attempt,
                     kind,
                     fingerprint,
                     github_comment_id,
@@ -189,13 +258,13 @@ class Store:
             )
 
     def comment_exists(
-        self, issue_key: str, kind: CommentKind, fingerprint: str
+        self, issue_key: str, attempt: int, kind: CommentKind, fingerprint: str
     ) -> bool:
         with self.connection() as connection:
             row = connection.execute(
-                "SELECT 1 FROM comment WHERE issue_key = ? AND kind = ? "
-                "AND fingerprint = ?",
-                (issue_key, kind, fingerprint),
+                "SELECT 1 FROM comment WHERE issue_key = ? AND attempt = ? "
+                "AND kind = ? AND fingerprint = ?",
+                (issue_key, attempt, kind, fingerprint),
             ).fetchone()
         return row is not None
 
@@ -228,6 +297,31 @@ class Store:
             connection.execute(
                 "DELETE FROM lease WHERE name = 'poller' AND holder = ?", (holder,)
             )
+
+    def _migrate_v1_to_v2(self, connection: sqlite3.Connection) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            for statement in self._MIGRATE_V1_TO_V2:
+                connection.execute(statement)
+        except Exception:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def _schema_version(connection: sqlite3.Connection) -> int | None:
+        row = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'schema_version'"
+        ).fetchone()
+        if row is None:
+            return None
+        versions = connection.execute("SELECT version FROM schema_version").fetchall()
+        if not versions:
+            return None
+        if len(versions) != 1:
+            value = [item["version"] for item in versions]
+            raise SchemaVersionError(f"unsupported GitHub schema version: {value}")
+        return int(versions[0]["version"])
 
     @staticmethod
     def _issue_row(row: sqlite3.Row) -> IssueRow:

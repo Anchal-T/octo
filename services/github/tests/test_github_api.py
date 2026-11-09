@@ -62,7 +62,11 @@ def issue_row(key, number, state, admitted_at=None):
 async def test_health_status_and_issue_routes_expose_only_intake_fields(tmp_path):
     runtime, _, _ = make_runtime(tmp_path)
     app = create_app(runtime)
-    runtime.store.upsert_issue(issue_row("gh-100-7", 7, "submitted", NOW.isoformat()))
+    admitted = issue_row("gh-100-7", 7, "submitted", NOW.isoformat())
+    runtime.store.upsert_issue(admitted)
+    runtime.store.record_admission(
+        admitted.issue_key, admitted.attempt, NOW.isoformat()
+    )
     runtime.store.upsert_issue(issue_row("gh-100-8", 8, "skipped"))
 
     try:
