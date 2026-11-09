@@ -814,3 +814,114 @@ async def test_issue_opened_by_the_token_owner_is_processed_only_when_enabled(
     assert summary.started == expected_starts
     assert len(fake_workflow.accepted_starts) == expected_starts
     assert store.get_issue(ISSUE_KEY).state == expected_state
+
+
+def _committed_result(**extra):
+    return {
+        "issue_id": ISSUE_KEY,
+        "round_id": "round-1",
+        "event_id": "event-1",
+        "run_id": "run-1",
+        "proposal_id": "proposal-1",
+        "status": "committed",
+        "model": "openai/gpt-oss-20b",
+        "provider": "groq",
+        **extra,
+    }
+
+
+async def _run_finished_issue(tmp_path, fake_workflow, *, row_state="submitted"):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    fake_github.add_issue(7, created_at=NOW, updated_at=NOW)
+    poller, store, github_http, workflow_http, *_ = make_poller(
+        tmp_path, fake_github, fake_workflow
+    )
+    row = replace(
+        make_row(),
+        fingerprint=fingerprint(GithubIssue.from_api(fake_github.issues[7])),
+        github_updated_at=NOW.isoformat(),
+        created_at=NOW.isoformat(),
+    )
+    if row_state == "finished":
+        row = replace(
+            row,
+            state="finished",
+            finished_at=NOW.isoformat(),
+            result_status="committed",
+        )
+    store.upsert_issue(row)
+    try:
+        await poller.prepare()
+        await poller.run_cycle()
+        await poller.run_cycle()
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+    results = [
+        comment["body"]
+        for comment in fake_github.comments.get(7, [])
+        if "kind=result" in comment["body"]
+    ]
+    return store, results
+
+
+@pytest.mark.anyio
+async def test_committed_result_comment_shows_triage_once(tmp_path):
+    fake_workflow = FakeWorkflow()
+    fake_workflow.set_response(
+        "GET",
+        f"/v1/issues/{ISSUE_KEY}/run",
+        200,
+        _committed_result(
+            triage={"kind": "bug", "priority": "high", "summary": "Example summary."}
+        ),
+    )
+
+    store, results = await _run_finished_issue(tmp_path, fake_workflow)
+
+    assert store.get_issue(ISSUE_KEY).result_status == "committed"
+    assert len(results) == 1
+    assert "- Type: bug\n- Priority: high\n- Summary: Example summary." in results[0]
+    assert "Model: `openai/gpt-oss-20b` (groq)." in results[0]
+
+
+@pytest.mark.anyio
+async def test_later_cycle_result_comment_refetches_triage(tmp_path):
+    fake_workflow = FakeWorkflow()
+    fake_workflow.set_response(
+        "GET",
+        f"/v1/issues/{ISSUE_KEY}/run",
+        200,
+        _committed_result(triage_error="unparseable"),
+    )
+
+    _, results = await _run_finished_issue(
+        tmp_path, fake_workflow, row_state="finished"
+    )
+
+    assert len(results) == 1
+    assert "reply could not be read" in results[0]
+
+
+@pytest.mark.anyio
+async def test_later_cycle_result_comment_without_stored_output(tmp_path):
+    _, results = await _run_finished_issue(
+        tmp_path, FakeWorkflow(), row_state="finished"
+    )
+
+    assert len(results) == 1
+    assert "triage details are no longer available" in results[0]
+
+
+@pytest.mark.anyio
+async def test_later_cycle_result_comment_waits_while_workflow_is_down(tmp_path):
+    fake_workflow = FakeWorkflow()
+    fake_workflow.set_response("GET", f"/v1/issues/{ISSUE_KEY}/run", 503, {})
+
+    store, results = await _run_finished_issue(
+        tmp_path, fake_workflow, row_state="finished"
+    )
+
+    assert results == []
+    row = store.get_issue(ISSUE_KEY)
+    assert not store.comment_exists(ISSUE_KEY, "result", row.fingerprint)

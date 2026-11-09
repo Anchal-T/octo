@@ -346,17 +346,7 @@ class Poller:
                         result_status=result.status,
                     )
                 )
-                detail = {"at": finished_at, "status": result.status}
-                if result.retry_at is not None:
-                    detail["retry_at"] = self._iso(result.retry_at).replace(
-                        "+00:00", "Z"
-                    )
-                if result.retry_in is not None:
-                    seconds = result.retry_in
-                    detail["retry_in"] = (
-                        str(int(seconds)) if seconds.is_integer() else str(seconds)
-                    )
-                result_details[row.issue_key] = detail
+                result_details[row.issue_key] = self._result_detail(result, finished_at)
                 summary.finished += 1
             elif (
                 status != "running"
@@ -497,9 +487,9 @@ class Poller:
             }:
                 due.append((row, "failure", {"at": at, "reason": row.reason}))
             elif row.state == "finished" and row.result_status:
-                detail = result_details.get(
-                    row.issue_key, {"at": at, "status": row.result_status}
-                )
+                detail = result_details.get(row.issue_key)
+                if detail is None:
+                    detail = {"at": at, "status": row.result_status, "refetch": "true"}
                 due.append((row, "result", detail))
 
         posted = 0
@@ -535,6 +525,12 @@ class Poller:
                 )
                 continue
 
+            if detail.get("refetch") == "true":
+                refetched = await self._refetch_result_detail(row, detail)
+                if refetched is None:
+                    continue
+                detail = refetched
+
             if posted:
                 await self.sleep(1)
             body = render_comment(
@@ -561,6 +557,43 @@ class Poller:
             )
             posted += 1
             summary.comments_posted += 1
+
+    def _result_detail(self, result: IssueRunResult, at: str) -> dict[str, str]:
+        detail = {"at": at, "status": result.status}
+        if result.retry_at is not None:
+            detail["retry_at"] = self._iso(result.retry_at).replace("+00:00", "Z")
+        if result.retry_in is not None:
+            seconds = result.retry_in
+            detail["retry_in"] = (
+                str(int(seconds)) if seconds.is_integer() else str(seconds)
+            )
+        if result.model is not None:
+            detail["model"] = result.model
+        if result.provider is not None:
+            detail["provider"] = result.provider
+        if result.triage is not None:
+            detail["triage_kind"] = result.triage.kind
+            detail["triage_priority"] = result.triage.priority
+            detail["triage_summary"] = result.triage.summary
+        if result.triage_error is not None:
+            detail["triage_error"] = result.triage_error
+        return detail
+
+    async def _refetch_result_detail(
+        self, row: IssueRow, detail: dict[str, str]
+    ) -> dict[str, str] | None:
+        """Rebuild result details when the comment is posted in a later cycle."""
+        try:
+            status = await self.workflow.status(row.issue_key)
+        except WorkflowUnavailable:
+            return None
+        if isinstance(status, IssueRunResult):
+            return self._result_detail(status, detail["at"])
+        return {
+            "at": detail["at"],
+            "status": detail["status"],
+            "triage_missing": "true",
+        }
 
     def _check_rate_limit(self) -> None:
         if self.github.rate_limit_floor_reached:

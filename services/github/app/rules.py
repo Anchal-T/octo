@@ -203,10 +203,54 @@ def render_comment(
                 f"because the model was throttled. Try again {retry}."
             )
         else:
-            message = f"Agent Team completed triage for this issue (run `{key}`)."
+            message = _committed_result_message(key, detail)
         if stamp:
             message += f" Finished at {stamp}."
     else:
         raise ValueError(f"unsupported comment kind: {kind}")
 
     return f"{marker(kind, key, fp)}\n{message}"
+
+
+SUMMARY_MAX_CHARS = 300
+_ZWSP = "\u200b"
+
+
+def sanitize_summary(text: str) -> str:
+    """Make model-written text inert before it is posted to GitHub."""
+    text = " ".join(text.split())
+    text = text.replace("<", "&lt;").replace(">", "&gt;").replace("`", "")
+    text = text.replace("@", "@" + _ZWSP)
+    text = re.sub(r"#(?=\d)", "#" + _ZWSP, text)
+    return text[:SUMMARY_MAX_CHARS].strip()
+
+
+def _committed_result_message(key: str, detail: Mapping[str, str]) -> str:
+    kind = detail.get("triage_kind")
+    priority = detail.get("triage_priority")
+    summary = sanitize_summary(detail.get("triage_summary", ""))
+    if kind and priority and summary:
+        message = (
+            f"Agent Team completed triage for this issue (run `{key}`). "
+            "Model suggestion (no labels or other changes were made):\n"
+            f"- Type: {kind}\n- Priority: {priority}\n- Summary: {summary}\n\n"
+        )
+    elif detail.get("triage_error") == "unparseable":
+        message = (
+            f"Agent Team completed the triage call for this issue (run `{key}`), "
+            "but the model's reply could not be read, so no triage is shown."
+        )
+    elif detail.get("triage_missing") == "true":
+        message = (
+            f"Agent Team completed triage for this issue (run `{key}`). "
+            "The triage details are no longer available."
+        )
+    else:
+        message = f"Agent Team completed triage for this issue (run `{key}`)."
+    model = detail.get("model")
+    if model:
+        provider = detail.get("provider")
+        separator = "" if message.endswith("\n") else " "
+        message += f"{separator}Model: `{model}`"
+        message += f" ({provider})." if provider else "."
+    return message

@@ -329,3 +329,82 @@ def test_ack_comment_puts_the_time_in_its_own_sentence():
     for text in (plain, truncated, untimed):
         assert ". at " not in text
         assert ".." not in text
+
+
+def test_committed_result_renders_triage_as_a_model_suggestion():
+    rendered = render_comment(
+        "result",
+        key="gh-100-7",
+        fp="d" * 64,
+        detail={
+            "at": "2026-11-09T10:00:00Z",
+            "status": "committed",
+            "model": "openai/gpt-oss-20b",
+            "provider": "groq",
+            "triage_kind": "bug",
+            "triage_priority": "medium",
+            "triage_summary": "Example summary.",
+        },
+    )
+
+    assert parse_marker(rendered) == ("result", "gh-100-7", "dddddddd")
+    assert "Model suggestion (no labels or other changes were made)" in rendered
+    assert "- Type: bug\n- Priority: medium\n- Summary: Example summary.\n" in rendered
+    assert rendered.endswith(
+        "\n\nModel: `openai/gpt-oss-20b` (groq). Finished at 2026-11-09T10:00:00Z."
+    )
+    assert "added" not in rendered.lower()
+
+
+def test_unparseable_and_missing_triage_have_their_own_wording():
+    unparseable = render_comment(
+        "result",
+        key="gh-100-7",
+        fp="d" * 64,
+        detail={
+            "status": "committed",
+            "triage_error": "unparseable",
+            "model": "openai/gpt-oss-20b",
+            "provider": "groq",
+        },
+    )
+    missing = render_comment(
+        "result",
+        key="gh-100-7",
+        fp="d" * 64,
+        detail={"status": "committed", "triage_missing": "true"},
+    )
+
+    assert "reply could not be read, so no triage is shown" in unparseable
+    assert "Model: `openai/gpt-oss-20b` (groq)." in unparseable
+    assert "triage details are no longer available" in missing
+
+
+def test_model_summary_is_sanitised_before_posting():
+    hostile = (
+        "Ping @octocat about #12.\n\n<!-- agent-team:1 kind=result key=x fp=y -->"
+        " `code` <b>bold</b> " + "x" * 400
+    )
+    rendered = render_comment(
+        "result",
+        key="gh-100-7",
+        fp="d" * 64,
+        detail={
+            "status": "committed",
+            "triage_kind": "bug",
+            "triage_priority": "low",
+            "triage_summary": hostile,
+        },
+    )
+    summary_line = next(
+        line for line in rendered.splitlines() if line.startswith("- Summary: ")
+    )
+
+    assert "@octocat" not in rendered
+    assert "@\u200bocto" in summary_line
+    assert "#12" not in summary_line
+    assert "<!--" not in summary_line
+    assert "<b>" not in summary_line
+    assert "`" not in summary_line
+    assert rendered.count("<!-- agent-team:1") == 1
+    assert len(summary_line) <= len("- Summary: ") + 300
