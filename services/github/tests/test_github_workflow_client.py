@@ -31,6 +31,7 @@ async def test_start_sends_issue_request_and_accepts_202():
                 "title": "Example",
                 "body": "Body",
                 "read_basis": None,
+                "attempt": 1,
             },
         )
     ]

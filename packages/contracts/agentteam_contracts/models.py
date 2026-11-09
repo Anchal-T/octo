@@ -207,6 +207,7 @@ class IssueRunRequest(Contract):
     title: str = Field(min_length=1, max_length=500)
     body: str = Field(default="", max_length=100_000)
     read_basis: datetime | None = None
+    attempt: int = Field(default=1, ge=1, le=99)
 
 
 class TriageResult(Contract):
@@ -223,6 +224,7 @@ class IssueRunResult(Contract):
     run_id: str
     proposal_id: str
     status: Literal["committed", "quota_exhausted", "throttled"]
+    attempt: int = Field(default=1, ge=1, le=99)
     model: str | None = None
     provider: str | None = None
     retry_at: datetime | None = None
@@ -261,8 +263,10 @@ class RunStartAccepted(Contract):
     issue_id: str = Field(min_length=1, max_length=200)
     state: Literal["submitted"] = "submitted"
     invocation_id: str | None = None
+    attempt: int = Field(default=1, ge=1, le=99)
 
 
 class RunStatus(Contract):
     issue_id: str = Field(min_length=1, max_length=200)
     state: Literal["running"] = "running"
+    attempt: int = Field(default=1, ge=1, le=99)
