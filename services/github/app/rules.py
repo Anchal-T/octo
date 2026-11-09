@@ -216,6 +216,13 @@ SUMMARY_MAX_CHARS = 300
 _ZWSP = "\u200b"
 
 
+def _suggestion_area(detail: Mapping[str, str]) -> str:
+    raw = detail.get("triage_area")
+    if not raw or not raw.strip():
+        return "unknown"
+    return sanitize_summary(raw) or "unknown"
+
+
 def sanitize_summary(text: str) -> str:
     """Make model-written text inert before it is posted to GitHub."""
     text = " ".join(text.split())
@@ -233,7 +240,8 @@ def _committed_result_message(key: str, detail: Mapping[str, str]) -> str:
         message = (
             f"Agent Team completed triage for this issue (run `{key}`). "
             "Model suggestion (no labels or other changes were made):\n"
-            f"- Type: {kind}\n- Priority: {priority}\n- Summary: {summary}\n\n"
+            f"- Type: {kind}\n- Priority: {priority}\n- Summary: {summary}\n"
+            f"- Area: {_suggestion_area(detail)}\n\n"
         )
     elif detail.get("triage_error") == "unparseable":
         message = (

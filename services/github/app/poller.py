@@ -580,6 +580,7 @@ class Poller:
             detail["triage_kind"] = result.triage.kind
             detail["triage_priority"] = result.triage.priority
             detail["triage_summary"] = result.triage.summary
+            detail["triage_area"] = result.area or "unknown"
         if result.triage_error is not None:
             detail["triage_error"] = result.triage_error
         return detail

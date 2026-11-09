@@ -890,6 +890,7 @@ async def test_committed_result_comment_shows_triage_once(tmp_path):
     assert store.get_issue(ISSUE_KEY).result_status == "committed"
     assert len(results) == 1
     assert "- Type: bug\n- Priority: high\n- Summary: Example summary." in results[0]
+    assert "- Area: fields\n" in results[0]
     assert "Model: `openai/gpt-oss-20b` (groq)." in results[0]
 
 

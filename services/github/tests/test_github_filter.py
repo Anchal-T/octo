@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from agentteam_contracts import IssueRunRequest
 
 from services.github.app.rules import (
@@ -355,6 +356,67 @@ def test_committed_result_renders_triage_as_a_model_suggestion():
         "\n\nModel: `openai/gpt-oss-20b` (groq). Finished at 2026-11-09T10:00:00Z."
     )
     assert "added" not in rendered.lower()
+
+
+def test_committed_result_comment_shows_the_area():
+    rendered = render_comment(
+        "result",
+        key="gh-100-7",
+        fp="d" * 64,
+        detail={
+            "status": "committed",
+            "model": "openai/gpt-oss-20b",
+            "provider": "groq",
+            "triage_kind": "bug",
+            "triage_priority": "medium",
+            "triage_summary": "Example summary.",
+            "triage_area": "parser-tree",
+        },
+    )
+
+    assert "- Area: parser-tree\n" in rendered
+    assert "- Type: bug\n- Priority: medium\n- Summary: Example summary.\n" in rendered
+
+
+@pytest.mark.parametrize("triage_area", ["unknown", "", None])
+def test_committed_result_says_unknown_when_area_is_unknown_or_missing(triage_area):
+    detail = {
+        "status": "committed",
+        "triage_kind": "bug",
+        "triage_priority": "low",
+        "triage_summary": "Example summary.",
+    }
+    if triage_area is not None:
+        detail["triage_area"] = triage_area
+
+    rendered = render_comment("result", key="gh-100-7", fp="d" * 64, detail=detail)
+
+    assert "- Area: unknown\n" in rendered
+    assert "None" not in rendered
+
+
+def test_committed_result_sanitises_the_area():
+    rendered = render_comment(
+        "result",
+        key="gh-100-7",
+        fp="d" * 64,
+        detail={
+            "status": "committed",
+            "triage_kind": "bug",
+            "triage_priority": "low",
+            "triage_summary": "Example summary.",
+            "triage_area": "Ping @octocat about #12 <b>x</b>",
+        },
+    )
+    area_line = next(
+        line for line in rendered.splitlines() if line.startswith("- Area: ")
+    )
+
+    assert "@octocat" not in area_line
+    assert "@\u200bocto" in area_line
+    assert "#12" not in area_line
+    assert "<b>" not in area_line
+    assert "`" not in area_line
 
 
 def test_unparseable_and_missing_triage_have_their_own_wording():
