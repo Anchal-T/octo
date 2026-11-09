@@ -1072,11 +1072,22 @@ async def test_relabel_after_finish_starts_attempt_2_with_r2_comments(tmp_path):
             relabel_at + timedelta(minutes=2)
         ).isoformat()
         second = await poller.run_cycle()
+        comments_after_second = len(fake_github.comments[7])
+        starts_after_second = len([c for c in fake_workflow.calls if c[0] == "POST"])
+        fake_github.issues[7]["updated_at"] = (
+            relabel_at + timedelta(minutes=3)
+        ).isoformat()
+        third = await poller.run_cycle()
     finally:
         await github_http.aclose()
         await workflow_http.aclose()
 
     assert second.finished == 1
+    assert third.started == 0
+    assert len(fake_github.comments[7]) == comments_after_second
+    assert len([c for c in fake_workflow.calls if c[0] == "POST"]) == (
+        starts_after_second
+    )
     final = store.get_issue(ISSUE_KEY)
     assert final.state == "finished"
     assert final.attempt == 2
