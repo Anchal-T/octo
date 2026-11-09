@@ -132,6 +132,42 @@ def test_unparseable_triage_still_commits_with_model_metadata():
     assert result.triage_error == "unparseable"
 
 
+def test_deeply_nested_triage_reply_still_commits_as_unparseable():
+    nested = (
+        '{"kind":"bug","priority":"low","summary":"deep","extra":'
+        + '{"x":' * 10_000
+        + "0"
+        + "}" * 10_000
+        + "}"
+    )
+    outcome = _completed_outcome(nested)
+    request = IssueRunRequest(
+        issue_id="issue-17",
+        title="Example title",
+        read_basis=datetime(2026, 10, 31, 12, tzinfo=UTC),
+    )
+
+    class Context:
+        def __init__(self):
+            self.steps = []
+
+        async def run_typed(self, name, *args, **kwargs):
+            self.steps.append(name)
+            if name == "triage-call:1":
+                return outcome
+            return {}
+
+    context = Context()
+    result = asyncio.run(
+        workflow.run_issue_v1(cast(restate.WorkflowContext, context), request)
+    )
+
+    assert result.status == "committed"
+    assert result.triage is None
+    assert result.triage_error == "unparseable"
+    assert "commit-round" in context.steps
+
+
 def test_decide_wait_includes_exact_two_hour_cap():
     decided_at = datetime(2026, 10, 31, 12, tzinfo=UTC)
 

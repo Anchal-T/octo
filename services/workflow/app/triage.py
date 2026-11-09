@@ -40,7 +40,7 @@ def parse_triage(text: str | None) -> TriageResult | None:
         return None
     try:
         data, _ = json.JSONDecoder().raw_decode(candidate, start)
-    except ValueError:
+    except (RecursionError, ValueError):
         return None
     if not isinstance(data, dict):
         return None
