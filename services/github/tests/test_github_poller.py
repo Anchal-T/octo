@@ -777,6 +777,7 @@ async def test_editing_a_skipped_issue_starts_it_with_one_new_version_comment(
         for method, path, payload in fake_workflow.calls
         if method == "POST" and path.endswith("/start")
     )
+    assert start["repo"] == "agent-bot/fork"
     assert start["title"] == "Now eligible"
     assert len(fake_github.comments[7]) == 2
     assert "skipped this issue" in fake_github.comments[7][0]["body"]
@@ -824,6 +825,7 @@ def _committed_result(**extra):
         "run_id": "run-1",
         "proposal_id": "proposal-1",
         "status": "committed",
+        "area": "unknown",
         "model": "openai/gpt-oss-20b",
         "provider": "groq",
         **extra,
@@ -873,7 +875,13 @@ async def test_committed_result_comment_shows_triage_once(tmp_path):
         f"/v1/issues/{ISSUE_KEY}/run",
         200,
         _committed_result(
-            triage={"kind": "bug", "priority": "high", "summary": "Example summary."}
+            area="fields",
+            triage={
+                "kind": "bug",
+                "priority": "high",
+                "summary": "Example summary.",
+                "area": "fields",
+            },
         ),
     )
 

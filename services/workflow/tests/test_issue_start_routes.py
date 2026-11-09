@@ -59,7 +59,11 @@ async def test_start_route_uses_workflow_key_and_returns_accepted(monkeypatch):
         "create_client",
         lambda _ingress: restate_client(fake),
     )
-    payload = {"issue_id": "gh-100-7", "title": "Example"}
+    payload = {
+        "issue_id": "gh-100-7",
+        "repo": "andialbrecht/sqlparse",
+        "title": "Example",
+    }
 
     first = await request(
         workflow.app, "POST", "/v1/issues/gh-100-7/start", json_body=payload
@@ -84,7 +88,11 @@ async def test_start_route_rejects_a_path_body_mismatch():
         workflow.app,
         "POST",
         "/v1/issues/gh-100-7/start",
-        json_body={"issue_id": "gh-100-8", "title": "Example"},
+        json_body={
+            "issue_id": "gh-100-8",
+            "repo": "andialbrecht/sqlparse",
+            "title": "Example",
+        },
     )
 
     assert response.status_code == 422
@@ -105,7 +113,11 @@ async def test_start_route_preserves_restate_errors(monkeypatch):
         workflow.app,
         "POST",
         "/v1/issues/gh-100-7/start",
-        json_body={"issue_id": "gh-100-7", "title": "Example"},
+        json_body={
+            "issue_id": "gh-100-7",
+            "repo": "andialbrecht/sqlparse",
+            "title": "Example",
+        },
     )
 
     assert response.status_code == 409
@@ -126,7 +138,11 @@ async def test_start_route_maps_transport_errors_to_503(monkeypatch):
         workflow.app,
         "POST",
         "/v1/issues/gh-100-7/start",
-        json_body={"issue_id": "gh-100-7", "title": "Example"},
+        json_body={
+            "issue_id": "gh-100-7",
+            "repo": "andialbrecht/sqlparse",
+            "title": "Example",
+        },
     )
 
     assert response.status_code == 503
@@ -240,7 +256,11 @@ async def test_restate_harness_pins_start_and_output_statuses(monkeypatch):
             unknown = await client.get("/v1/issues/unknown/run")
             assert unknown.status_code == 404
 
-            payload = {"issue_id": "gh-100-7", "title": "Example"}
+            payload = {
+                "issue_id": "gh-100-7",
+                "repo": "andialbrecht/sqlparse",
+                "title": "Example",
+            }
             started = await client.post("/v1/issues/gh-100-7/start", json=payload)
             repeated = await client.post("/v1/issues/gh-100-7/start", json=payload)
             assert started.status_code == repeated.status_code == 202

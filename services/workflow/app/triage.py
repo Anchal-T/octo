@@ -15,20 +15,27 @@ TRIAGER_SYSTEM_PROMPT = (
     "Reply with one JSON object and no other text: "
     '{"kind": "bug|feature|question|docs|other", '
     '"priority": "low|medium|high", '
-    '"summary": "at most two sentences describing the issue"}'
+    '"summary": "at most two sentences describing the issue", '
+    '"area": "{area_values}"}'
 )
+DEFAULT_AREAS = ("unknown",)
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*(.*?)\s*```$", re.DOTALL)
 
 
-def triage_messages(title: str, body: str) -> list[dict[str, str]]:
+def triage_messages(
+    title: str, body: str, *, allowed_areas: tuple[str, ...] = DEFAULT_AREAS
+) -> list[dict[str, str]]:
+    prompt = TRIAGER_SYSTEM_PROMPT.replace("{area_values}", "|".join(allowed_areas))
     return [
-        {"role": "system", "content": TRIAGER_SYSTEM_PROMPT},
+        {"role": "system", "content": prompt},
         {"role": "user", "content": f"GitHub issue title: {title}\n\n{body}"},
     ]
 
 
-def parse_triage(text: str | None) -> TriageResult | None:
+def parse_triage(
+    text: str | None, *, allowed_areas: tuple[str, ...] = DEFAULT_AREAS
+) -> TriageResult | None:
     if not text:
         return None
     candidate = text.strip()
@@ -49,12 +56,17 @@ def parse_triage(text: str | None) -> TriageResult | None:
     summary = data.get("summary")
     if not all(isinstance(value, str) for value in (kind, priority, summary)):
         return None
+    area = data.get("area")
+    allowed_area_names = set(allowed_areas) | {"unknown"}
+    if not isinstance(area, str) or area not in allowed_area_names:
+        area = "unknown"
     summary = " ".join(summary.split())[:SUMMARY_MAX_CHARS].strip()
     try:
         return TriageResult(
             kind=kind.strip().lower(),
             priority=priority.strip().lower(),
             summary=summary,
+            area=area,
         )
     except ValidationError:
         return None

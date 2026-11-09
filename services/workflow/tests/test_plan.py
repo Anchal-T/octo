@@ -8,7 +8,9 @@ from services.workflow.app.plan import build_issue_plan, build_issue_plan_v1
 
 
 def test_issue_request_leaves_read_basis_stable_for_retries():
-    request = IssueRunRequest(issue_id="issue-17", title="Example title")
+    request = IssueRunRequest(
+        issue_id="issue-17", repo="andialbrecht/sqlparse", title="Example title"
+    )
 
     assert request.read_basis is None
     with pytest.raises(ValueError, match="durable workflow"):
@@ -19,6 +21,7 @@ def test_issue_id_limit_keeps_v1_derived_keys_within_contract_limit():
     basis = datetime(2026, 10, 26, tzinfo=UTC)
     request = IssueRunRequest(
         issue_id="i" * 200,
+        repo="andialbrecht/sqlparse",
         title="Example title",
         read_basis=basis,
     )
@@ -35,12 +38,27 @@ def test_issue_id_limit_keeps_v1_derived_keys_within_contract_limit():
         <= 256
     )
     with pytest.raises(ValidationError):
-        IssueRunRequest(issue_id="i" * 201, title="Example title")
+        IssueRunRequest(
+            issue_id="i" * 201,
+            repo="andialbrecht/sqlparse",
+            title="Example title",
+        )
+
+
+def test_issue_request_requires_a_repository():
+    with pytest.raises(ValidationError):
+        IssueRunRequest(issue_id="issue-17", title="Example title")
+
+    request = IssueRunRequest(
+        issue_id="issue-17", repo="andialbrecht/sqlparse", title="Example title"
+    )
+    assert request.repo == "andialbrecht/sqlparse"
 
 
 def test_issue_plan_is_repeatable_and_keeps_user_text_untrusted():
     request = IssueRunRequest(
         issue_id="issue-17",
+        repo="andialbrecht/sqlparse",
         title="Example title",
         body="Example body",
         read_basis=datetime(2026, 10, 26, tzinfo=UTC),

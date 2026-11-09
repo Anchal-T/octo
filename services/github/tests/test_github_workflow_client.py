@@ -11,7 +11,9 @@ async def test_start_sends_issue_request_and_accepts_202():
     fake = FakeWorkflow()
     path = "/v1/issues/gh-100-7/start"
     fake.set_response("POST", path, 202, {"issue_id": "gh-100-7"})
-    request = IssueRunRequest(issue_id="gh-100-7", title="Example", body="Body")
+    request = IssueRunRequest(
+        issue_id="gh-100-7", repo="bot/fork", title="Example", body="Body"
+    )
     http = httpx.AsyncClient(transport=fake.transport)
     client = WorkflowClient(base_url="http://workflow:8002", http=http)
 
@@ -25,6 +27,7 @@ async def test_start_sends_issue_request_and_accepts_202():
             path,
             {
                 "issue_id": "gh-100-7",
+                "repo": "bot/fork",
                 "title": "Example",
                 "body": "Body",
                 "read_basis": None,
@@ -46,7 +49,7 @@ async def test_start_maps_repeat_rejection_and_server_errors(status, expected):
 
     async with http:
         result = await client.start(
-            IssueRunRequest(issue_id="gh-100-7", title="Example")
+            IssueRunRequest(issue_id="gh-100-7", repo="bot/fork", title="Example")
         )
 
     assert result == expected
@@ -62,7 +65,7 @@ async def test_start_maps_timeout_to_unavailable():
 
     async with http:
         result = await client.start(
-            IssueRunRequest(issue_id="gh-100-7", title="Example")
+            IssueRunRequest(issue_id="gh-100-7", repo="bot/fork", title="Example")
         )
 
     assert result == "unavailable"
@@ -124,7 +127,7 @@ async def test_start_resolves_conflict_using_run_status(
 
     async with http:
         result = await client.start(
-            IssueRunRequest(issue_id="gh-100-7", title="Example")
+            IssueRunRequest(issue_id="gh-100-7", repo="bot/fork", title="Example")
         )
 
     assert result == expected

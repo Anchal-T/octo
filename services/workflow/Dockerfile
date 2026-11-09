@@ -4,6 +4,7 @@ WORKDIR /app
 ENV UV_LINK_MODE=copy PYTHONPATH=/app PATH=/app/.venv/bin:$PATH
 
 COPY pyproject.toml uv.lock ./
+COPY agentteam.yaml ./
 COPY packages/ packages/
 COPY services/memory/ services/memory/
 COPY services/workflow/ services/workflow/

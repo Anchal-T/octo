@@ -108,7 +108,7 @@ def admit(
 
 
 def to_run_request(
-    issue: GithubIssue, key: str, body_max_chars: int
+    issue: GithubIssue, key: str, body_max_chars: int, *, repo: str
 ) -> IssueRunRequest:
     if body_max_chars < 0:
         raise ValueError("body_max_chars must not be negative")
@@ -119,7 +119,7 @@ def to_run_request(
             body[:body_max_chars] + "\n\n[Agent Team truncated this issue body; "
             f"the original had {original_length} characters]"
         )
-    return IssueRunRequest(issue_id=key, title=issue.title, body=body)
+    return IssueRunRequest(issue_id=key, repo=repo, title=issue.title, body=body)
 
 
 def marker(kind: str, key: str, fp: str) -> str:

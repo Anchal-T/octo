@@ -203,6 +203,7 @@ class ModelOutcome(Contract):
 
 class IssueRunRequest(Contract):
     issue_id: str = Field(min_length=1, max_length=200)
+    repo: str = Field(min_length=1, max_length=200)
     title: str = Field(min_length=1, max_length=500)
     body: str = Field(default="", max_length=100_000)
     read_basis: datetime | None = None
@@ -212,6 +213,7 @@ class TriageResult(Contract):
     kind: Literal["bug", "feature", "question", "docs", "other"]
     priority: Literal["low", "medium", "high"]
     summary: str = Field(min_length=1, max_length=300)
+    area: str
 
 
 class IssueRunResult(Contract):
@@ -238,6 +240,7 @@ class IssueRunResult(Contract):
     decided_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    area: str = "unknown"
     triage: TriageResult | None = None
     triage_error: Literal["unparseable"] | None = None
 
@@ -245,6 +248,8 @@ class IssueRunResult(Contract):
     def validate_triage_fields(self) -> Self:
         if self.triage is not None and self.triage_error is not None:
             raise ValueError("triage and triage_error cannot both be set")
+        if self.triage is not None and self.area != self.triage.area:
+            raise ValueError("result area must match triage area")
         if self.status != "committed" and (
             self.triage is not None or self.triage_error is not None
         ):

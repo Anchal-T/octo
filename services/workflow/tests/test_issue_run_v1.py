@@ -29,6 +29,7 @@ def test_v1_plan_uses_separate_memory_keys_and_maps_model_completion():
     basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
     request = IssueRunRequest(
         issue_id="issue-17",
+        repo="andialbrecht/sqlparse",
         title="Example title",
         body="Example body",
         read_basis=basis,
@@ -89,12 +90,18 @@ def _completed_outcome(text: str) -> ModelOutcome:
 def test_parsed_triage_is_carried_in_proposal_and_committed_result():
     request = IssueRunRequest(
         issue_id="issue-17",
+        repo="andialbrecht/sqlparse",
         title="Example title",
         read_basis=datetime(2026, 10, 31, 12, tzinfo=UTC),
     )
     plan = build_issue_plan_v1(request)
     outcome = _completed_outcome("example")
-    triage = TriageResult(kind="bug", priority="high", summary="Example summary.")
+    triage = TriageResult(
+        kind="bug",
+        priority="high",
+        summary="Example summary.",
+        area="fields",
+    )
 
     provider = "configured-provider"
     proposal = build_triage_proposal_v1(plan, outcome, triage)
@@ -106,6 +113,7 @@ def test_parsed_triage_is_carried_in_proposal_and_committed_result():
         "kind": "bug",
         "priority": "high",
         "summary": "Example summary.",
+        "area": "fields",
     }
     assert proposal.payload["triage_error"] is None
     assert result.status == "committed"
@@ -113,6 +121,7 @@ def test_parsed_triage_is_carried_in_proposal_and_committed_result():
     assert result.provider == provider
     assert result.started_at == outcome.started_at
     assert result.finished_at == outcome.finished_at
+    assert result.area == "fields"
     assert result.triage == triage
     assert result.triage_error is None
 
@@ -120,6 +129,7 @@ def test_parsed_triage_is_carried_in_proposal_and_committed_result():
 def test_unparseable_triage_still_commits_with_model_metadata():
     request = IssueRunRequest(
         issue_id="issue-17",
+        repo="andialbrecht/sqlparse",
         title="Example title",
         read_basis=datetime(2026, 10, 31, 12, tzinfo=UTC),
     )
@@ -132,6 +142,7 @@ def test_unparseable_triage_still_commits_with_model_metadata():
     assert result.status == "committed"
     assert result.model == "openai/gpt-oss-20b"
     assert result.provider == "groq"
+    assert result.area == "unknown"
     assert result.triage is None
     assert result.triage_error == "unparseable"
 
@@ -147,6 +158,7 @@ def test_deeply_nested_triage_reply_still_commits_as_unparseable():
     outcome = _completed_outcome(nested)
     request = IssueRunRequest(
         issue_id="issue-17",
+        repo="andialbrecht/sqlparse",
         title="Example title",
         read_basis=datetime(2026, 10, 31, 12, tzinfo=UTC),
     )
@@ -172,6 +184,45 @@ def test_deeply_nested_triage_reply_still_commits_as_unparseable():
     assert "commit-round" in context.steps
 
 
+def test_workflow_builds_prompt_and_result_area_from_repo_config():
+    basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
+    outcome = _completed_outcome(
+        '{"kind":"feature","priority":"medium",'
+        '"summary":"Add field behavior.","area":"fields"}'
+    )
+    request = IssueRunRequest(
+        issue_id="issue-areas",
+        repo="marshmallow-code/marshmallow",
+        title="Example title",
+        read_basis=basis,
+    )
+    model_requests = []
+    proposals = []
+
+    class Context:
+        async def run_typed(self, name, *args, **kwargs):
+            if name == "triage-call:1":
+                model_requests.append(kwargs["request"])
+                return outcome
+            if name == "write-route-proposal":
+                proposals.append(kwargs["payload"])
+            return {}
+
+    result = asyncio.run(
+        workflow.run_issue_v1(cast(restate.WorkflowContext, Context()), request)
+    )
+
+    assert len(model_requests) == 1
+    assert (
+        '"area": "fields|schema|validate|hooks|errors|utils-registry|docs-build|unknown"'
+        in (model_requests[0].messages[0]["content"])
+    )
+    assert result.status == "committed"
+    assert result.area == "fields"
+    assert result.triage.area == "fields"
+    assert proposals[0]["payload"]["triage"]["area"] == "fields"
+
+
 def test_workflow_result_uses_provider_from_triager_pin(monkeypatch):
     provider = "configured-provider"
     monkeypatch.setattr(
@@ -183,6 +234,7 @@ def test_workflow_result_uses_provider_from_triager_pin(monkeypatch):
     outcome = _completed_outcome('{"kind":"bug","priority":"low","summary":"Example."}')
     request = IssueRunRequest(
         issue_id="issue-17",
+        repo="andialbrecht/sqlparse",
         title="Example title",
         read_basis=datetime(2026, 10, 31, 12, tzinfo=UTC),
     )
@@ -289,7 +341,9 @@ def test_throttle_wait_over_two_hours_returns_without_sleeping():
             self.sleeps.append((duration, name))
 
     context = Context()
-    request = IssueRunRequest(issue_id="issue-17", title="Example title")
+    request = IssueRunRequest(
+        issue_id="issue-17", repo="andialbrecht/sqlparse", title="Example title"
+    )
 
     result = asyncio.run(
         workflow.run_issue_v1(cast(restate.WorkflowContext, context), request)
@@ -303,7 +357,10 @@ def test_throttle_wait_over_two_hours_returns_without_sleeping():
 def test_issue_plan_validation_error_is_terminal(monkeypatch):
     basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
     request = IssueRunRequest(
-        issue_id="issue-17", title="Example title", read_basis=basis
+        issue_id="issue-17",
+        repo="andialbrecht/sqlparse",
+        title="Example title",
+        read_basis=basis,
     )
 
     class Context:
@@ -325,7 +382,10 @@ def test_issue_plan_validation_error_is_terminal(monkeypatch):
 def test_triage_plan_validation_error_is_terminal_after_model_call(monkeypatch):
     basis = datetime(2026, 10, 31, 12, tzinfo=UTC)
     request = IssueRunRequest(
-        issue_id="issue-17", title="Example title", read_basis=basis
+        issue_id="issue-17",
+        repo="andialbrecht/sqlparse",
+        title="Example title",
+        read_basis=basis,
     )
     plan = workflow.build_issue_plan_v1(request)
     model_outcome = ModelOutcome(
@@ -362,6 +422,7 @@ def test_second_throttle_result_preserves_retry_and_model_metadata():
     plan = build_issue_plan_v1(
         IssueRunRequest(
             issue_id="issue-17",
+            repo="andialbrecht/sqlparse",
             title="Example title",
             read_basis=basis,
         )
@@ -386,6 +447,7 @@ def test_second_throttle_result_preserves_retry_and_model_metadata():
     assert result.retry_in == 30
     assert result.model == "openai/gpt-oss-20b"
     assert result.provider == provider
+    assert result.area == "unknown"
     assert result.started_at == basis
     assert result.finished_at == basis
     assert result.decided_at == basis

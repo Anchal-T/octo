@@ -399,7 +399,12 @@ class Poller:
             self.store.upsert_issue(admitted)
             try:
                 result = await self.workflow.start(
-                    to_run_request(issue, row.issue_key, self.settings.body_max_chars)
+                    to_run_request(
+                        issue,
+                        row.issue_key,
+                        self.settings.body_max_chars,
+                        repo=self.settings.repo,
+                    )
                 )
             except WorkflowUnavailable:
                 result = "unavailable"

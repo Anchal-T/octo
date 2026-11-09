@@ -7,6 +7,7 @@ from services.workflow.app.triage import (
 )
 
 VALID = '{"kind": "bug", "priority": "medium", "summary": "Example summary."}'
+AREAS = ("fields", "schema", "unknown")
 
 
 @pytest.mark.parametrize(
@@ -32,6 +33,7 @@ def test_parse_triage_accepts_usable_replies(text):
         "medium",
         "Example summary.",
     )
+    assert result.area == "unknown"
 
 
 @pytest.mark.parametrize(
@@ -73,7 +75,9 @@ def test_triage_messages_state_facts_and_ask_for_json_only():
     messages = triage_messages("Example title", "Example body")
 
     assert [message["role"] for message in messages] == ["system", "user"]
-    assert messages[0]["content"] == TRIAGER_SYSTEM_PROMPT
+    assert messages[0]["content"] == TRIAGER_SYSTEM_PROMPT.replace(
+        "{area_values}", "unknown"
+    )
     assert "already added the agent-team label" in TRIAGER_SYSTEM_PROMPT
     assert "cannot take any action" in TRIAGER_SYSTEM_PROMPT
     assert "JSON" in TRIAGER_SYSTEM_PROMPT
@@ -88,3 +92,30 @@ def test_parse_triage_keeps_braces_inside_the_summary():
 
     assert result is not None
     assert result.summary == "Fails on {a} and {b}."
+
+
+@pytest.mark.parametrize(
+    ("area_field", "expected_area"),
+    [
+        ('"area": "fields",', "fields"),
+        ('"area": "not-configured",', "unknown"),
+        ("", "unknown"),
+    ],
+)
+def test_parse_triage_maps_missing_or_unlisted_area_to_unknown(
+    area_field, expected_area
+):
+    text = f'{{"kind":"bug","priority":"low",{area_field}"summary":"Example"}}'
+
+    result = parse_triage(text, allowed_areas=AREAS)
+
+    assert result is not None
+    assert result.area == expected_area
+
+
+def test_triage_prompt_lists_areas_from_repo_config():
+    system = triage_messages("Example title", "Example body", allowed_areas=AREAS)[0][
+        "content"
+    ]
+
+    assert '"area": "fields|schema|unknown"' in system

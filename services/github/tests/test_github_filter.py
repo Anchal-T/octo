@@ -211,10 +211,11 @@ def test_eligible_issue_is_pending_and_fingerprints_content_only():
 def test_run_request_truncates_at_cap_and_preserves_issue_key():
     issue = make_issue(body="x" * 20_000)
 
-    request = to_run_request(issue, "gh-100-7", 8000)
+    request = to_run_request(issue, "gh-100-7", 8000, repo="bot/fork")
 
     assert isinstance(request, IssueRunRequest)
     assert request.issue_id == "gh-100-7"
+    assert request.repo == "bot/fork"
     assert request.body == (
         "x" * 8000
         + "\n\n[Agent Team truncated this issue body; the original had 20000 characters]"

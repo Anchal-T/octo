@@ -3,7 +3,7 @@ from typing import Any
 
 import httpx
 import restate
-from agentteam_common import Settings
+from agentteam_common import Settings, load_agentteam_config
 from agentteam_contracts import (
     IssueRunRequest,
     IssueRunResult,
@@ -34,6 +34,7 @@ from .retries import WaitDecision, decide_delay, decide_wait
 from .triage import parse_triage, triage_messages
 
 settings = Settings.from_env()
+agentteam_config = load_agentteam_config()
 issue_run = restate.Workflow("IssueRun")
 issue_run_v1 = restate.Workflow("IssueRunV1")
 _model_client: ModelClient | None = None
@@ -148,6 +149,11 @@ async def run_issue(
 async def run_issue_v1(
     ctx: restate.WorkflowContext, request: IssueRunRequest
 ) -> IssueRunResult:
+    try:
+        allowed_areas = agentteam_config.repo(request.repo).allowed_area_names
+    except ValueError as error:
+        raise restate.TerminalError("repository is not configured") from error
+
     if request.read_basis is None:
         basis = await ctx.run_typed("read-basis", current_basis)
         request = request.model_copy(
@@ -176,7 +182,9 @@ async def run_issue_v1(
         run_id=plan.run_id,
         step="triage",
         role="triager",
-        messages=triage_messages(request.title, request.body),
+        messages=triage_messages(
+            request.title, request.body, allowed_areas=allowed_areas
+        ),
         sampling=Sampling(),
         taint=2,
         source="github_issue",
@@ -240,7 +248,7 @@ async def run_issue_v1(
     else:
         raise restate.TerminalError("triager did not complete within two calls")
 
-    triage = parse_triage(outcome.text)
+    triage = parse_triage(outcome.text, allowed_areas=allowed_areas)
     try:
         run = map_triage_run_v1(plan, outcome)
         proposal = build_triage_proposal_v1(plan, outcome, triage)

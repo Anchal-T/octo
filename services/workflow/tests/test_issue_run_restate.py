@@ -154,6 +154,7 @@ def test_restate_replay_and_triager_retry_paths(monkeypatch, tmp_path):
     async def invoke(env, case: str):
         request = IssueRunRequest(
             issue_id=f"issue-{case}",
+            repo="andialbrecht/sqlparse",
             title=f"Example {case}",
             body=f"Example body {case}",
         )
