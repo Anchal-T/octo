@@ -272,6 +272,52 @@ def test_comment_markers_and_templates_are_fixed_and_parseable():
     )
 
 
+def test_marker_regex_parses_base_and_attempt_suffix_keys():
+    assert parse_marker(
+        "<!-- agent-team:1 kind=ack key=gh-1-2 fp=abcdef01 -->\nbody"
+    ) == ("ack", "gh-1-2", "abcdef01")
+    assert parse_marker(
+        "<!-- agent-team:1 kind=result key=gh-1-2-r2 fp=abcdef01 -->\nbody"
+    ) == ("result", "gh-1-2-r2", "abcdef01")
+
+
+def test_ack_text_for_attempt_1_is_unchanged_literal():
+    rendered = render_comment(
+        "ack",
+        key="gh-100-7",
+        fp="a" * 64,
+        detail={"at": "2026-11-06T12:00:00Z"},
+    )
+
+    assert rendered == (
+        "<!-- agent-team:1 kind=ack key=gh-100-7 fp=aaaaaaaa -->\n"
+        "Agent Team has started a triage run for this issue (run `gh-100-7`). "
+        "I will post the result here. Started at 2026-11-06T12:00:00Z."
+    )
+
+
+def test_ack_text_for_attempt_2_says_again():
+    rendered = render_comment(
+        "ack",
+        key="gh-100-7-r2",
+        fp="a" * 64,
+        detail={"at": "2026-11-06T12:00:00Z", "attempt": "2"},
+    )
+
+    assert rendered == (
+        "<!-- agent-team:1 kind=ack key=gh-100-7-r2 fp=aaaaaaaa -->\n"
+        "Agent Team will triage this issue again (run `gh-100-7-r2`, attempt 2). "
+        "I will post the result here. Started at 2026-11-06T12:00:00Z."
+    )
+
+
+def test_to_run_request_sets_attempt():
+    request = to_run_request(make_issue(), "gh-100-7", 8000, repo="bot/fork", attempt=2)
+
+    assert request.attempt == 2
+    assert request.issue_id == "gh-100-7"
+
+
 def test_comment_templates_cover_queued_skip_failure_and_result():
     queued = render_comment(
         "queued",

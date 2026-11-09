@@ -105,6 +105,26 @@ async def test_status_maps_unknown_running_and_finished(status_code, payload, ex
         assert state.status == "committed"
     else:
         assert state == expected
+    assert fake.queries[-1] == {"attempt": ["1"]}
+
+
+@pytest.mark.anyio
+async def test_status_sends_attempt_query_param():
+    fake = FakeWorkflow()
+    fake.set_response(
+        "GET",
+        "/v1/issues/gh-100-7/run",
+        202,
+        {"issue_id": "gh-100-7", "state": "running"},
+    )
+    http = httpx.AsyncClient(transport=fake.transport)
+    client = WorkflowClient(base_url="http://workflow:8002", http=http)
+
+    async with http:
+        state = await client.status("gh-100-7", attempt=2)
+
+    assert state == "running"
+    assert fake.queries == [{"attempt": ["2"]}]
 
 
 @pytest.mark.anyio
@@ -128,7 +148,9 @@ async def test_start_resolves_conflict_using_run_status(
 
     async with http:
         result = await client.start(
-            IssueRunRequest(issue_id="gh-100-7", repo="bot/fork", title="Example")
+            IssueRunRequest(
+                issue_id="gh-100-7", repo="bot/fork", title="Example", attempt=2
+            )
         )
 
     assert result == expected
@@ -136,3 +158,4 @@ async def test_start_resolves_conflict_using_run_status(
         ("POST", path),
         ("GET", "/v1/issues/gh-100-7/run"),
     ]
+    assert fake.queries[-1] == {"attempt": ["2"]}

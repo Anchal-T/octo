@@ -933,3 +933,51 @@ async def test_later_cycle_result_comment_waits_while_workflow_is_down(tmp_path)
     assert results == []
     row = store.get_issue(ISSUE_KEY)
     assert not store.comment_exists(ISSUE_KEY, row.attempt, "result", row.fingerprint)
+
+
+@pytest.mark.anyio
+async def test_attempt_2_pending_row_starts_with_attempt_and_r2_ack(tmp_path):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    issue_data = fake_github.add_issue(7, created_at=NOW, updated_at=NOW)
+    issue = GithubIssue.from_api(issue_data)
+    fp = fingerprint(issue)
+    fake_workflow = FakeWorkflow()
+    fake_workflow.set_response(
+        "POST", f"/v1/issues/{ISSUE_KEY}/start", 202, {"issue_id": ISSUE_KEY}
+    )
+    poller, store, github_http, workflow_http, *_ = make_poller(
+        tmp_path, fake_github, fake_workflow
+    )
+    store.upsert_issue(
+        replace(
+            make_row("pending_start"),
+            fingerprint=fp,
+            github_updated_at=NOW.isoformat(),
+            created_at=NOW.isoformat(),
+            admitted_at=None,
+            submitted_at=None,
+            attempt=2,
+            label_seen_at=NOW.isoformat(),
+        )
+    )
+
+    try:
+        await poller.prepare()
+        await poller.run_cycle()
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    start = next(
+        payload
+        for method, path, payload in fake_workflow.calls
+        if method == "POST" and path.endswith("/start")
+    )
+    assert start["attempt"] == 2
+    assert store.get_issue(ISSUE_KEY).state == "submitted"
+    assert store.comment_exists(ISSUE_KEY, 2, "ack", fp)
+    assert len(fake_github.comments[7]) == 1
+    body = fake_github.comments[7][0]["body"]
+    assert "key=gh-100-7-r2" in body
+    assert "will triage this issue again" in body
+    assert "attempt 2" in body

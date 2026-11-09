@@ -3,6 +3,7 @@ import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+from agentteam_common.ids import workflow_key
 from agentteam_contracts import IssueRunResult
 
 from .client import GithubClient, GithubFailure
@@ -330,7 +331,7 @@ class Poller:
             result: IssueRunResult | None = None
             status: RunState | None = None
             try:
-                status = await self.workflow.status(row.issue_key)
+                status = await self.workflow.status(row.issue_key, attempt=row.attempt)
                 if isinstance(status, IssueRunResult):
                     result = status
             except WorkflowUnavailable:
@@ -410,6 +411,7 @@ class Poller:
                         row.issue_key,
                         self.settings.body_max_chars,
                         repo=self.settings.repo,
+                        attempt=row.attempt,
                     )
                 )
             except WorkflowUnavailable:
@@ -470,7 +472,7 @@ class Poller:
             at = self._iso(self._now())
             if row.state == "submitted":
                 issue = current.get(row.number)
-                detail = {"at": at}
+                detail = {"at": at, "attempt": str(row.attempt)}
                 if issue is not None and len(issue.body) > self.settings.body_max_chars:
                     detail.update(
                         truncated="true",
@@ -518,13 +520,14 @@ class Poller:
                 continue
             self.auth_state = "ok"
             self._check_rate_limit()
+            run_key = workflow_key(row.issue_key, row.attempt)
             existing = next(
                 (
                     comment
                     for comment in comments
                     if comment.author_login.casefold() == self.self_login.casefold()
                     and parse_marker(comment.body)
-                    == (kind, row.issue_key, row.fingerprint[:8])
+                    == (kind, run_key, row.fingerprint[:8])
                 ),
                 None,
             )
@@ -549,7 +552,7 @@ class Poller:
                 await self.sleep(1)
             body = render_comment(
                 kind,
-                key=row.issue_key,
+                key=run_key,
                 fp=row.fingerprint,
                 detail=detail,
             )
@@ -600,7 +603,7 @@ class Poller:
     ) -> dict[str, str] | None:
         """Rebuild result details when the comment is posted in a later cycle."""
         try:
-            status = await self.workflow.status(row.issue_key)
+            status = await self.workflow.status(row.issue_key, attempt=row.attempt)
         except WorkflowUnavailable:
             return None
         if isinstance(status, IssueRunResult):

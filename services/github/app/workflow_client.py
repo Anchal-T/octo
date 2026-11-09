@@ -36,17 +36,18 @@ class WorkflowClient:
             return "rejected"
         if response.status_code == 409:
             try:
-                state = await self.status(request.issue_id)
+                state = await self.status(request.issue_id, attempt=request.attempt)
             except WorkflowUnavailable:
                 return "unavailable"
             return "conflict" if state == "unknown" else "submitted"
         return "unavailable"
 
-    async def status(self, issue_key: str) -> RunState:
+    async def status(self, issue_key: str, attempt: int = 1) -> RunState:
         key = quote(issue_key, safe="")
         try:
             response = await self.http.get(
                 f"{self.base_url}/v1/issues/{key}/run",
+                params={"attempt": attempt},
                 timeout=WORKFLOW_START_TIMEOUT_S,
             )
         except httpx.HTTPError as error:

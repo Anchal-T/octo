@@ -241,6 +241,7 @@ class FakeWorkflow:
     def __init__(self):
         self.responses = {}
         self.calls = []
+        self.queries = []
         self.accepted_starts = {}
 
     @property
@@ -253,6 +254,7 @@ class FakeWorkflow:
     def handle(self, request):
         payload = json.loads(request.content) if request.content else None
         self.calls.append((request.method, request.url.path, payload))
+        self.queries.append(parse_qs(request.url.query.decode()))
         path = request.url.path
         if (
             request.method == "POST"
