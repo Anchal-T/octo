@@ -57,6 +57,8 @@ def parse_triage(
     if not all(isinstance(value, str) for value in (kind, priority, summary)):
         return None
     area = data.get("area")
+    if isinstance(area, str):
+        area = area.strip().lower()
     allowed_area_names = set(allowed_areas) | {"unknown"}
     if not isinstance(area, str) or area not in allowed_area_names:
         area = "unknown"

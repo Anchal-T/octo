@@ -94,6 +94,16 @@ def test_parse_triage_keeps_braces_inside_the_summary():
     assert result.summary == "Fails on {a} and {b}."
 
 
+def test_parse_triage_normalises_area_before_checking_it():
+    result = parse_triage(
+        '{"kind":"bug","priority":"low","summary":"Example","area":"Parser-Tree "}',
+        allowed_areas=("parser-tree", "unknown"),
+    )
+
+    assert result is not None
+    assert result.area == "parser-tree"
+
+
 @pytest.mark.parametrize(
     ("area_field", "expected_area"),
     [
