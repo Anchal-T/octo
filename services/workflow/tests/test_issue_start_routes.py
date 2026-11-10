@@ -199,6 +199,60 @@ async def test_run_route_maps_restate_output_states(monkeypatch):
     )
 
 
+@pytest.mark.anyio
+async def test_run_status_reads_triage_written_before_area_as_unknown(monkeypatch):
+    stored = {
+        "issue_id": "gh-100-7",
+        "round_id": "round-1",
+        "event_id": "event-1",
+        "run_id": "run-1",
+        "proposal_id": "proposal-1",
+        "status": "committed",
+        "model": "openai/gpt-oss-20b",
+        "provider": "groq",
+        "retry_at": None,
+        "retry_in": None,
+        "scope": None,
+        "decided_at": "2026-10-31T12:00:00Z",
+        "started_at": "2026-10-31T12:00:00Z",
+        "finished_at": "2026-10-31T12:00:01Z",
+        "triage": {
+            "kind": "bug",
+            "priority": "medium",
+            "summary": "Example summary.",
+        },
+        "triage_error": None,
+    }
+
+    def handle(request):
+        assert json.loads(request.content)["workflowKey"] == "gh-100-7"
+        return httpx.Response(200, json=stored)
+
+    monkeypatch.setattr(
+        workflow.httpx,
+        "AsyncClient",
+        lambda *, base_url, timeout: HttpxAsyncClient(
+            base_url=base_url,
+            timeout=timeout,
+            transport=httpx.MockTransport(handle),
+        ),
+    )
+    async with HttpxAsyncClient(
+        transport=httpx.ASGITransport(app=workflow.app), base_url="http://test"
+    ) as client:
+        finished = await client.get("/v1/issues/gh-100-7/run")
+
+    assert finished.status_code == 200
+    body = finished.json()
+    assert body["area"] == "unknown"
+    assert body["attempt"] == 1
+    assert body["triage"]["area"] == "unknown"
+    assert body["triage"]["kind"] == "bug"
+    assert body["triage"]["priority"] == "medium"
+    assert body["triage"]["summary"] == "Example summary."
+    assert body["status"] == "committed"
+
+
 def docker_unavailable_reason():
     if shutil.which("docker") is None:
         return "Docker CLI is unavailable; the Restate harness test needs Docker."

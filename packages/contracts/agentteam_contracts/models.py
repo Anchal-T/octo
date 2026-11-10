@@ -2,7 +2,7 @@ import math
 from datetime import datetime
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _MAX_CONTRACT_DEPTH = 64
 
@@ -245,6 +245,14 @@ class IssueRunResult(Contract):
     area: str = "unknown"
     triage: TriageResult | None = None
     triage_error: Literal["unparseable"] | None = None
+
+    @field_validator("triage", mode="before")
+    @classmethod
+    def default_missing_triage_area(cls, value: Any) -> Any:
+        # Results stored before triage.area existed omit the field.
+        if isinstance(value, dict) and "area" not in value:
+            return {**value, "area": "unknown"}
+        return value
 
     @model_validator(mode="after")
     def validate_triage_fields(self) -> Self:

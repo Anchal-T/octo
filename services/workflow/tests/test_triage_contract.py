@@ -19,6 +19,38 @@ def test_stored_result_without_triage_fields_still_validates():
     assert result.triage_error is None
 
 
+def test_stored_triage_written_before_area_reads_as_unknown():
+    stored = {
+        **IDS,
+        "status": "committed",
+        "model": "openai/gpt-oss-20b",
+        "provider": "groq",
+        "retry_at": None,
+        "retry_in": None,
+        "scope": None,
+        "decided_at": "2026-10-31T12:00:00Z",
+        "started_at": "2026-10-31T12:00:00Z",
+        "finished_at": "2026-10-31T12:00:01Z",
+        "triage": {
+            "kind": "bug",
+            "priority": "medium",
+            "summary": "Example summary.",
+        },
+        "triage_error": None,
+    }
+
+    result = IssueRunResult.model_validate(stored)
+
+    assert result.area == "unknown"
+    assert result.attempt == 1
+    assert result.triage is not None
+    assert result.triage.area == "unknown"
+    assert result.triage.kind == "bug"
+    assert result.triage.priority == "medium"
+    assert result.triage.summary == "Example summary."
+    assert "area" not in stored["triage"]
+
+
 def test_committed_result_carries_triage():
     triage = TriageResult(
         kind="bug", priority="medium", summary="Example summary", area="fields"
@@ -26,12 +58,17 @@ def test_committed_result_carries_triage():
     result = IssueRunResult(**IDS, status="committed", area="fields", triage=triage)
 
     assert result.area == "fields"
-    assert result.model_dump(mode="json")["triage"] == {
+    dumped = result.model_dump(mode="json")
+    assert dumped["triage"] == {
         "kind": "bug",
         "priority": "medium",
         "summary": "Example summary",
         "area": "fields",
     }
+    reread = IssueRunResult.model_validate(dumped)
+    assert reread.area == "fields"
+    assert reread.triage is not None
+    assert reread.triage.area == "fields"
 
 
 @pytest.mark.parametrize(
