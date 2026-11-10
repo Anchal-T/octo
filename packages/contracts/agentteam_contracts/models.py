@@ -2,7 +2,7 @@ import math
 from datetime import datetime
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _MAX_CONTRACT_DEPTH = 64
 
@@ -207,6 +207,7 @@ class IssueRunRequest(Contract):
     title: str = Field(min_length=1, max_length=500)
     body: str = Field(default="", max_length=100_000)
     read_basis: datetime | None = None
+    attempt: int = Field(default=1, ge=1, le=99)
 
 
 class TriageResult(Contract):
@@ -223,6 +224,7 @@ class IssueRunResult(Contract):
     run_id: str
     proposal_id: str
     status: Literal["committed", "quota_exhausted", "throttled"]
+    attempt: int = Field(default=1, ge=1, le=99)
     model: str | None = None
     provider: str | None = None
     retry_at: datetime | None = None
@@ -244,6 +246,14 @@ class IssueRunResult(Contract):
     triage: TriageResult | None = None
     triage_error: Literal["unparseable"] | None = None
 
+    @field_validator("triage", mode="before")
+    @classmethod
+    def default_missing_triage_area(cls, value: Any) -> Any:
+        # Results stored before triage.area existed omit the field.
+        if isinstance(value, dict) and "area" not in value:
+            return {**value, "area": "unknown"}
+        return value
+
     @model_validator(mode="after")
     def validate_triage_fields(self) -> Self:
         if self.triage is not None and self.triage_error is not None:
@@ -261,8 +271,10 @@ class RunStartAccepted(Contract):
     issue_id: str = Field(min_length=1, max_length=200)
     state: Literal["submitted"] = "submitted"
     invocation_id: str | None = None
+    attempt: int = Field(default=1, ge=1, le=99)
 
 
 class RunStatus(Contract):
     issue_id: str = Field(min_length=1, max_length=200)
     state: Literal["running"] = "running"
+    attempt: int = Field(default=1, ge=1, le=99)

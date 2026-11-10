@@ -3,6 +3,7 @@ import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+from agentteam_common.ids import workflow_key
 from agentteam_contracts import IssueRunResult
 
 from .client import GithubClient, GithubFailure
@@ -230,17 +231,19 @@ class Poller:
         existing = self.store.get_issue(key)
 
         if existing is not None:
-            if existing.state in {"submitted", "finished"}:
+            if existing.state == "submitted":
                 if existing.github_updated_at != updated_at:
                     self.store.upsert_issue(
                         replace(existing, github_updated_at=updated_at)
                     )
                 return
-            if existing.state == "failed" and existing.fingerprint == fp:
-                if existing.github_updated_at != updated_at:
-                    self.store.upsert_issue(
-                        replace(existing, github_updated_at=updated_at)
-                    )
+            if existing.state == "finished" or (
+                existing.state == "failed" and existing.fingerprint == fp
+            ):
+                if existing.github_updated_at == updated_at:
+                    return
+                self.store.upsert_issue(replace(existing, github_updated_at=updated_at))
+                await self._maybe_retriage(existing, issue)
                 return
             if (
                 existing.state != "cancelled"
@@ -315,6 +318,8 @@ class Poller:
             submitted_at=submitted_at,
             finished_at=finished_at,
             result_status=result_status,
+            attempt=1 if existing is None else existing.attempt,
+            label_seen_at=None if existing is None else existing.label_seen_at,
         )
         self.store.upsert_issue(row)
         if decision.state == "skipped":
@@ -328,7 +333,7 @@ class Poller:
             result: IssueRunResult | None = None
             status: RunState | None = None
             try:
-                status = await self.workflow.status(row.issue_key)
+                status = await self.workflow.status(row.issue_key, attempt=row.attempt)
                 if isinstance(status, IssueRunResult):
                     result = status
             except WorkflowUnavailable:
@@ -391,12 +396,16 @@ class Poller:
 
         for row in admission.starts:
             issue = current[row.number]
+            admitted_at = row.admitted_at or self._iso(now)
             admitted = replace(
                 row,
                 deferred_reason=None,
-                admitted_at=row.admitted_at or self._iso(now),
+                admitted_at=admitted_at,
             )
             self.store.upsert_issue(admitted)
+            self.store.record_admission(
+                admitted.issue_key, admitted.attempt, admitted_at
+            )
             try:
                 result = await self.workflow.start(
                     to_run_request(
@@ -404,6 +413,7 @@ class Poller:
                         row.issue_key,
                         self.settings.body_max_chars,
                         repo=self.settings.repo,
+                        attempt=row.attempt,
                     )
                 )
             except WorkflowUnavailable:
@@ -464,7 +474,7 @@ class Poller:
             at = self._iso(self._now())
             if row.state == "submitted":
                 issue = current.get(row.number)
-                detail = {"at": at}
+                detail = {"at": at, "attempt": str(row.attempt)}
                 if issue is not None and len(issue.body) > self.settings.body_max_chars:
                     detail.update(
                         truncated="true",
@@ -499,7 +509,9 @@ class Poller:
 
         posted = 0
         for row, kind, detail in due:
-            if self.store.comment_exists(row.issue_key, kind, row.fingerprint):
+            if self.store.comment_exists(
+                row.issue_key, row.attempt, kind, row.fingerprint
+            ):
                 continue
             try:
                 comments = await self.github.list_comments(row.number)
@@ -510,19 +522,21 @@ class Poller:
                 continue
             self.auth_state = "ok"
             self._check_rate_limit()
+            run_key = workflow_key(row.issue_key, row.attempt)
             existing = next(
                 (
                     comment
                     for comment in comments
                     if comment.author_login.casefold() == self.self_login.casefold()
                     and parse_marker(comment.body)
-                    == (kind, row.issue_key, row.fingerprint[:8])
+                    == (kind, run_key, row.fingerprint[:8])
                 ),
                 None,
             )
             if existing is not None:
                 self.store.record_comment(
                     row.issue_key,
+                    row.attempt,
                     kind,
                     row.fingerprint,
                     existing.id,
@@ -540,7 +554,7 @@ class Poller:
                 await self.sleep(1)
             body = render_comment(
                 kind,
-                key=row.issue_key,
+                key=run_key,
                 fp=row.fingerprint,
                 detail=detail,
             )
@@ -555,6 +569,7 @@ class Poller:
             self._check_rate_limit()
             self.store.record_comment(
                 row.issue_key,
+                row.attempt,
                 kind,
                 row.fingerprint,
                 comment_id,
@@ -562,6 +577,66 @@ class Poller:
             )
             posted += 1
             summary.comments_posted += 1
+
+    async def _maybe_retriage(self, row: IssueRow, issue: GithubIssue) -> None:
+        if issue.state != "open" or GITHUB_LABEL not in issue.labels:
+            return
+        if row.attempt >= 99:
+            return
+        try:
+            events = await self.github.list_label_events(issue.number)
+        except GithubFailure as error:
+            self._record_auth_failure(error)
+            if self._should_abort(error):
+                raise
+            return
+        self._check_rate_limit()
+
+        timestamps = [
+            value
+            for value in (
+                row.label_seen_at,
+                row.finished_at,
+                row.submitted_at,
+                row.admitted_at,
+            )
+            if value is not None
+        ]
+        if not timestamps:
+            return
+        threshold = max(self._datetime(value) for value in timestamps)
+        allow_self = self.settings.process_own_issues
+        matching = [
+            event
+            for event in events
+            if event.event == "labeled"
+            and event.label_name.casefold() == GITHUB_LABEL.casefold()
+            and event.actor_login is not None
+            and (
+                allow_self or event.actor_login.casefold() != self.self_login.casefold()
+            )
+            and event.created_at > threshold
+        ]
+        if not matching:
+            return
+        newest = max(matching, key=lambda event: event.created_at)
+        self.store.upsert_issue(
+            replace(
+                row,
+                attempt=row.attempt + 1,
+                state="pending_start",
+                reason=None,
+                deferred_reason=None,
+                fingerprint=fingerprint(issue),
+                github_updated_at=self._iso(issue.updated_at),
+                label_seen_at=self._iso(newest.created_at),
+                start_attempts=0,
+                admitted_at=None,
+                submitted_at=None,
+                finished_at=None,
+                result_status=None,
+            )
+        )
 
     def _result_detail(self, result: IssueRunResult, at: str) -> dict[str, str]:
         detail = {"at": at, "status": result.status}
@@ -590,7 +665,7 @@ class Poller:
     ) -> dict[str, str] | None:
         """Rebuild result details when the comment is posted in a later cycle."""
         try:
-            status = await self.workflow.status(row.issue_key)
+            status = await self.workflow.status(row.issue_key, attempt=row.attempt)
         except WorkflowUnavailable:
             return None
         if isinstance(status, IssueRunResult):

@@ -128,6 +128,7 @@ class LabelEvent(Contract):
     event: str
     label_name: str
     created_at: datetime
+    actor_login: str | None = None
 
 
 class GithubComment(Contract):

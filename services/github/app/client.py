@@ -160,6 +160,7 @@ class GithubClient:
                     event=item["event"],
                     label_name=(item.get("label") or {}).get("name", ""),
                     created_at=item["created_at"],
+                    actor_login=(item.get("actor") or {}).get("login"),
                 )
                 for item in items
             )

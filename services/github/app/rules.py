@@ -29,7 +29,7 @@ class AdmissionPlan:
 
 _MARKER_RE = re.compile(
     r"^<!-- agent-team:1 kind=(ack|queued|skip|failure|result) "
-    r"key=(gh-\d+-\d+) fp=([0-9a-f]{8}) -->"
+    r"key=(gh-\d+-\d+(?:-r\d+)?) fp=([0-9a-f]{8}) -->"
 )
 _COMMENT_KINDS = {"ack", "queued", "skip", "failure", "result"}
 
@@ -108,7 +108,12 @@ def admit(
 
 
 def to_run_request(
-    issue: GithubIssue, key: str, body_max_chars: int, *, repo: str
+    issue: GithubIssue,
+    key: str,
+    body_max_chars: int,
+    *,
+    repo: str,
+    attempt: int = 1,
 ) -> IssueRunRequest:
     if body_max_chars < 0:
         raise ValueError("body_max_chars must not be negative")
@@ -119,7 +124,9 @@ def to_run_request(
             body[:body_max_chars] + "\n\n[Agent Team truncated this issue body; "
             f"the original had {original_length} characters]"
         )
-    return IssueRunRequest(issue_id=key, repo=repo, title=issue.title, body=body)
+    return IssueRunRequest(
+        issue_id=key, repo=repo, title=issue.title, body=body, attempt=attempt
+    )
 
 
 def marker(kind: str, key: str, fp: str) -> str:
@@ -142,10 +149,17 @@ def render_comment(
 ) -> str:
     stamp = detail.get("at")
     if kind == "ack":
-        message = (
-            f"Agent Team has started a triage run for this issue (run `{key}`). "
-            "I will post the result here."
-        )
+        attempt = detail.get("attempt")
+        if attempt is None or attempt == "1":
+            message = (
+                f"Agent Team has started a triage run for this issue (run `{key}`). "
+                "I will post the result here."
+            )
+        else:
+            message = (
+                f"Agent Team will triage this issue again (run `{key}`, "
+                f"attempt {attempt}). I will post the result here."
+            )
         if detail.get("truncated") == "true":
             limit = detail.get("body_max_chars", "the configured limit")
             message += f" The original issue body was truncated to {limit} characters."

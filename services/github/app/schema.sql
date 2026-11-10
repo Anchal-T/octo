@@ -19,18 +19,29 @@ CREATE TABLE IF NOT EXISTS issue (
     admitted_at TEXT,
     submitted_at TEXT,
     finished_at TEXT,
-    result_status TEXT CHECK (result_status IN ('committed','quota_exhausted','throttled'))
+    result_status TEXT CHECK (result_status IN ('committed','quota_exhausted','throttled')),
+    attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt BETWEEN 1 AND 99),
+    label_seen_at TEXT
 );
 CREATE INDEX IF NOT EXISTS issue_state_created ON issue(state, created_at);
 CREATE INDEX IF NOT EXISTS issue_admitted_at ON issue(admitted_at);
 
+CREATE TABLE IF NOT EXISTS admission (
+    issue_key TEXT NOT NULL REFERENCES issue(issue_key),
+    attempt INTEGER NOT NULL,
+    admitted_at TEXT NOT NULL,
+    PRIMARY KEY (issue_key, attempt)
+);
+CREATE INDEX IF NOT EXISTS admission_admitted_at ON admission(admitted_at);
+
 CREATE TABLE IF NOT EXISTS comment (
     issue_key TEXT NOT NULL REFERENCES issue(issue_key),
+    attempt INTEGER NOT NULL DEFAULT 1,
     kind TEXT NOT NULL CHECK (kind IN ('ack','queued','skip','failure','result')),
     fingerprint TEXT NOT NULL,
     github_comment_id INTEGER NOT NULL,
     posted_at TEXT NOT NULL,
-    PRIMARY KEY (issue_key, kind, fingerprint)
+    PRIMARY KEY (issue_key, attempt, kind, fingerprint)
 );
 
 CREATE TABLE IF NOT EXISTS lease (
