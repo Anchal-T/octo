@@ -22,6 +22,16 @@ _LOST_CONTAINER_PATTERNS = (
     "can not exec in a stopped state",
 )
 
+_GIT_EXCLUDE_PATTERNS = (
+    "__pycache__/\n"
+    "*.py[cod]\n"
+    ".pytest_cache/\n"
+    ".ruff_cache/\n"
+    ".mypy_cache/\n"
+    ".coverage\n"
+    "*.egg-info/\n"
+)
+
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -187,6 +197,12 @@ class _BaseGitSandbox:
             exit_code=proc.returncode,
             git_diff=self.git_diff(),
             timed_out=False,
+        )
+
+    def _configure_git_excludes(self) -> None:
+        self._run_in_workspace(
+            ["sh", "-c", "mkdir -p .git/info && cat >> .git/info/exclude"],
+            input_text=_GIT_EXCLUDE_PATTERNS,
         )
 
     def _stage_intent_to_add(self) -> None:
@@ -400,6 +416,7 @@ class DockerSandbox(_BaseGitSandbox):
             if checkout.returncode != 0:
                 raise RuntimeError(f"git checkout failed: {checkout.stderr.strip()}")
             self._run_in_workspace(["git", "clean", "-fdx"])
+            self._configure_git_excludes()
         except Exception:
             self.close()
             raise
@@ -471,6 +488,7 @@ class LocalGitSandbox(_BaseGitSandbox):
             self.close()
             raise RuntimeError(f"git checkout failed: {checkout.stderr.strip()}")
         self._run_in_workspace(["git", "clean", "-fdx"])
+        self._configure_git_excludes()
 
     def _run_in_workspace(
         self,
