@@ -17,7 +17,7 @@ from psycopg.types.string import StrDumperVarchar
 
 from .dag import Commit, UnknownCommit
 from .scip_indexer import ScipIndexer
-from .sync import validate_proposal
+from .sync import resolve_edit_conflicts, validate_proposal
 
 TAINT_LABELS = {0: "trusted", 1: "internal", 2: "untrusted", 3: "quarantined"}
 TABLES = {"events", "runs", "rounds", "proposals", "commits"}
@@ -541,7 +541,6 @@ class MemoryStore:
                 committed_at = self.scip_indexer.committer_date(base_commit)
 
             decisions = []
-            accepted_ids = []
             for proposal in proposals:
                 run = self._fetch(conn, "runs", proposal["run_id"])
                 evidence_ids = list(proposal.get("evidence_event_ids") or [])
@@ -560,8 +559,12 @@ class MemoryStore:
                     existing_fact_ids=existing_fact_ids,
                 )
                 decisions.append((proposal, status, reason, fact))
-                if status == "accepted":
-                    accepted_ids.append(proposal["_id"])
+            decisions = resolve_edit_conflicts(decisions)
+            accepted_ids = [
+                proposal["_id"]
+                for proposal, status, _, _ in decisions
+                if status == "accepted"
+            ]
 
             try:
                 with conn.transaction():

@@ -116,7 +116,11 @@ class ModelClient:
                 )
 
             if reservation.status == "cached":
-                return self._cached(reservation.completion, reservation.retry_ordinal)
+                return self._cached(
+                    reservation.completion,
+                    reservation.retry_ordinal,
+                    role=request.role,
+                )
             if reservation.status == "in_flight":
                 return self._in_flight(request, request_id, pin, reservation, started)
             if reservation.status == "quota_exhausted":
@@ -204,6 +208,7 @@ class ModelClient:
                     outcome,
                     ordinal,
                     "throttled",
+                    role=request.role,
                     decision="quota_exhausted",
                     started=started,
                     finished=finished,
@@ -243,6 +248,7 @@ class ModelClient:
                         throttled,
                         ordinal,
                         "throttled",
+                        role=request.role,
                         decision="retry_in_call",
                         started=started,
                         finished=finished,
@@ -269,6 +275,7 @@ class ModelClient:
                     outcome,
                     ordinal,
                     "throttled",
+                    role=request.role,
                     decision="throttled",
                     started=started,
                     finished=finished,
@@ -301,6 +308,7 @@ class ModelClient:
                     outcome,
                     ordinal,
                     "throttled",
+                    role=request.role,
                     decision="provider_retry",
                     started=started,
                     finished=finished,
@@ -333,6 +341,7 @@ class ModelClient:
                     outcome,
                     ordinal,
                     state,
+                    role=request.role,
                     decision="failed",
                     started=started,
                     finished=finished,
@@ -373,6 +382,7 @@ class ModelClient:
                     outcome,
                     ordinal,
                     "failed",
+                    role=request.role,
                     decision="failed",
                     started=started,
                     finished=finished,
@@ -402,6 +412,7 @@ class ModelClient:
                     outcome,
                     ordinal,
                     "failed",
+                    role=request.role,
                     decision="failed",
                     started=started,
                     finished=finished,
@@ -434,6 +445,7 @@ class ModelClient:
                     retry_ordinal=ordinal,
                     log_row=self._log_row(
                         outcome,
+                        role=request.role,
                         decision="completed",
                         retry_ordinal=ordinal,
                         started=started,
@@ -511,6 +523,7 @@ class ModelClient:
             outcome,
             retry_ordinal,
             "throttled",
+            role=request.role,
             decision="provider_retry",
             started=attempt_started,
             finished=finished,
@@ -550,6 +563,7 @@ class ModelClient:
             outcome,
             retry_ordinal,
             "failed",
+            role=request.role,
             decision="failed",
             started=attempt_started,
             finished=finished,
@@ -579,16 +593,21 @@ class ModelClient:
             error_code=error_code,
             reason=reason,
         )
-        self._record_without_attempt(outcome, decision="failed")
+        self._record_without_attempt(outcome, role=request.role, decision="failed")
         return outcome
 
     def _cached(
-        self, completion: ModelOutcome | None, retry_ordinal: int
+        self,
+        completion: ModelOutcome | None,
+        retry_ordinal: int,
+        *,
+        role: str = "triager",
     ) -> ModelOutcome:
         if completion is None:
             raise RuntimeError("cached reservation is missing its completion")
         self._record_without_attempt(
             completion,
+            role=role,
             decision="stored",
             retry_ordinal=max(retry_ordinal, completion.retry_count + 1),
         )
@@ -613,6 +632,7 @@ class ModelClient:
         )
         self._record_without_attempt(
             outcome,
+            role=request.role,
             decision="in_flight",
             retry_ordinal=reservation.retry_ordinal,
         )
@@ -639,6 +659,7 @@ class ModelClient:
         )
         self._record_without_attempt(
             outcome,
+            role=request.role,
             decision="quota_exhausted",
             retry_at_source="config",
             retry_at=reservation.retry_at,
@@ -742,7 +763,7 @@ class ModelClient:
             "request_id": outcome.request_id,
             "run_id": outcome.run_id,
             "step": outcome.step,
-            "role": "triager",
+            "role": extra.get("role", "triager"),
             "model_pinned": outcome.model_pinned,
             "model_reported": extra.get("model_reported", outcome.model_reported),
             "outcome": outcome.outcome,

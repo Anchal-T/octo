@@ -1,12 +1,17 @@
 import hashlib
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal
+
+from agentteam_common import is_safe_relative_path, is_test_path
 
 from .scip import ScipIndex
 
 Validation = tuple[Literal["accepted", "rejected"], str, dict[str, Any] | None]
+ProposalDecision = tuple[
+    dict[str, Any], Literal["accepted", "rejected"], str, dict[str, Any] | None
+]
 ACTION_OPS = frozenset({"edit_file", "grant_role"})
 FACT_KINDS = {"triager": "user_report", "reproducer": "bug_cause"}
 
@@ -80,11 +85,24 @@ def validate_proposal(
         return "rejected", "action requires evidence with taint below 2", None
 
     role = run.get("role")
-    if proposal.get("op") == "route_issue":
+    op = proposal.get("op")
+    if op == "route_issue":
         if role == "triager":
             return "accepted", "supported triage routing proposal", None
         return "rejected", "operation is not supported for this role", None
-    if proposal.get("op") != "assert_fact":
+    if op == "add_repro":
+        if role != "reproducer":
+            return "rejected", "operation is not supported for this role", None
+        return _validate_add_repro(proposal.get("payload"), evidence_rows)
+    if op == "edit_file":
+        if role != "fixer":
+            return "rejected", "operation is not supported for this role", None
+        return _validate_edit_file(proposal.get("payload"))
+    if op == "review":
+        if role != "tester":
+            return "rejected", "operation is not supported for this role", None
+        return _validate_review(proposal.get("payload"), evidence_rows)
+    if op != "assert_fact":
         return "rejected", "operation is not supported for this role", None
 
     fact_kind = FACT_KINDS.get(role) if isinstance(role, str) else None
@@ -170,3 +188,116 @@ def validate_proposal(
         "proposal_id": proposal["_id"],
     }
     return "accepted", "supported triage user_report fact proposal", fact
+
+
+def _valid_file_list(files: Any, *, must_be_test: bool) -> bool:
+    if not isinstance(files, list) or not files:
+        return False
+    for path in files:
+        if not isinstance(path, str) or not is_safe_relative_path(path):
+            return False
+        if is_test_path(path) != must_be_test:
+            return False
+    return True
+
+
+def _validate_add_repro(
+    payload: Any, evidence_rows: Sequence[Mapping[str, Any]]
+) -> Validation:
+    if not any(event.get("taint") == 0 for event in evidence_rows):
+        return "rejected", "add_repro requires tool observation evidence", None
+    if not isinstance(payload, dict):
+        return "rejected", "add_repro requires a payload mapping", None
+    patch = payload.get("patch")
+    test_node_id = payload.get("test_node_id")
+    test_passed = payload.get("test_passed")
+    if not isinstance(patch, str) or not patch.strip():
+        return "rejected", "add_repro requires a non-empty patch", None
+    if not _valid_file_list(payload.get("files"), must_be_test=True):
+        return "rejected", "add_repro files must be test paths only", None
+    if not isinstance(test_node_id, str) or not test_node_id.strip():
+        return "rejected", "add_repro requires a test_node_id", None
+    if type(test_passed) is not bool or test_passed is not False:
+        return "rejected", "Repro rejected by sync: no failing test.", None
+    return "accepted", "supported reproducer add_repro proposal", None
+
+
+def _validate_edit_file(payload: Any) -> Validation:
+    if not isinstance(payload, dict):
+        return "rejected", "edit_file requires a payload mapping", None
+    patch = payload.get("patch")
+    test_node_id = payload.get("test_node_id")
+    test_passed = payload.get("test_passed")
+    if not isinstance(patch, str) or not patch.strip():
+        return "rejected", "edit_file requires a non-empty patch", None
+    if not _valid_file_list(payload.get("files"), must_be_test=False):
+        return "rejected", "edit_file files must be non-test source paths", None
+    if not isinstance(test_node_id, str) or not test_node_id.strip():
+        return "rejected", "edit_file requires a test_node_id", None
+    if type(test_passed) is not bool or test_passed is not True:
+        return "rejected", "edit_file requires passing repro test", None
+    return "accepted", "supported fixer edit_file proposal", None
+
+
+def _validate_review(
+    payload: Any, evidence_rows: Sequence[Mapping[str, Any]]
+) -> Validation:
+    if not any(event.get("taint") == 0 for event in evidence_rows):
+        return "rejected", "review requires clean-checkout tool evidence", None
+    if not isinstance(payload, dict):
+        return "rejected", "review requires a payload mapping", None
+    verdict = payload.get("verdict")
+    notes = payload.get("notes", "")
+    repro_before = payload.get("repro_failed_before")
+    repro_after = payload.get("repro_passed_after")
+    suite_passed = payload.get("suite_passed")
+    if verdict not in {"approve", "changes_requested"}:
+        return "rejected", "review verdict must be approve or changes_requested", None
+    if not isinstance(notes, str):
+        return "rejected", "review notes must be a string", None
+    if any(
+        type(flag) is not bool for flag in (repro_before, repro_after, suite_passed)
+    ):
+        return "rejected", "review requires boolean clean-checkout test flags", None
+    if verdict == "approve" and not (repro_before and repro_after and suite_passed):
+        return (
+            "rejected",
+            "approve review requires passing clean-checkout checks",
+            None,
+        )
+    return "accepted", "supported tester review proposal", None
+
+
+def resolve_edit_conflicts(
+    decisions: Sequence[ProposalDecision],
+) -> list[ProposalDecision]:
+    accepted_edits = [
+        (idx, prop)
+        for idx, (prop, status, _, _) in enumerate(decisions)
+        if status == "accepted" and prop.get("op") == "edit_file"
+    ]
+    if len(accepted_edits) <= 1:
+        return list(decisions)
+
+    ordered = sorted(
+        accepted_edits,
+        key=lambda item: (
+            not bool((item[1].get("payload") or {}).get("test_passed")),
+            str(item[1].get("_id", "")),
+        ),
+    )
+    claimed_files: set[str] = set()
+    losers: set[int] = set()
+    for idx, prop in ordered:
+        files = set((prop.get("payload") or {}).get("files") or ())
+        if files & claimed_files:
+            losers.add(idx)
+        else:
+            claimed_files.update(files)
+
+    return [
+        (prop, "rejected", "conflict: requeued", None)
+        if idx in losers
+        else (prop, status, reason, fact)
+        for idx, (prop, status, reason, fact) in enumerate(decisions)
+    ]
