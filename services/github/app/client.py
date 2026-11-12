@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 import httpx
 
+from .auth import GithubAppTokenSource, StaticTokenSource, TokenSource
 from .schemas import (
     Clock,
     GithubComment,
@@ -40,13 +41,17 @@ class GithubClient:
     def __init__(
         self,
         *,
-        token: str,
+        token: str = "",
         repo: str,
         http: httpx.AsyncClient,
         clock: Clock,
         sleep: Sleep,
+        token_source: TokenSource | None = None,
     ) -> None:
         self.token = token
+        self.token_source: TokenSource = token_source or StaticTokenSource(token)
+        if isinstance(self.token_source, GithubAppTokenSource):
+            self.token_source.bind_requester(self._app_jwt_request)
         self.repo = repo
         self.http = http
         self.clock = clock
@@ -57,6 +62,10 @@ class GithubClient:
         self.poll_interval_s: int | None = None
 
     @property
+    def auth_mode(self) -> Literal["app", "pat"]:
+        return self.token_source.auth_mode
+
+    @property
     def rate_limit_floor_reached(self) -> bool:
         return (
             self.rate_limit_remaining is not None
@@ -64,6 +73,8 @@ class GithubClient:
         )
 
     async def get_self(self) -> str:
+        if self.auth_mode == "app":
+            return await self.token_source.resolve_self_login()
         response = await self._request("GET", "/user")
         return self._json(response).get("login", "")
 
@@ -77,7 +88,23 @@ class GithubClient:
             fork=item["fork"],
             owner_login=owner.get("login", ""),
             has_issues=item["has_issues"],
+            default_branch=item.get("default_branch") or "main",
         )
+
+    async def _app_jwt_request(
+        self,
+        method: str,
+        path: str,
+        app_jwt: str,
+        json_body: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        response = await self._request(
+            method,
+            path,
+            json=json_body,
+            bearer_override=app_jwt,
+        )
+        return self._json(response)
 
     async def get_issue(self, number: int) -> GithubIssue:
         response = await self._request(
@@ -208,18 +235,25 @@ class GithubClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
         missing: Literal["repo", "issue", "revalidation"] = "repo",
+        bearer_override: str | None = None,
     ) -> httpx.Response:
         server_retry = 0
         secondary_retried = False
+        app_token_refreshed = False
         retry_delays = (1, 2, 4)
         url = f"{GITHUB_API_BASE_URL}{path}"
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
+        bearer = (
+            bearer_override
+            if bearer_override is not None
+            else await self.token_source.bearer_token()
+        )
 
         while True:
+            headers = {
+                "Authorization": f"Bearer {bearer}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
             try:
                 async with self._request_lock:
                     response = await self.http.request(
@@ -334,6 +368,14 @@ class GithubClient:
                 )
 
             if status == 401:
+                if (
+                    bearer_override is None
+                    and self.auth_mode == "app"
+                    and not app_token_refreshed
+                ):
+                    app_token_refreshed = True
+                    bearer = await self.token_source.bearer_token(force_refresh=True)
+                    continue
                 raise GithubFailure(
                     self._error_outcome(
                         "unauthorized",

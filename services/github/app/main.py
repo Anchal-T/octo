@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 
+from .auth import GithubAppTokenSource, StaticTokenSource, TokenSource
 from .client import GithubClient
 from .poller import Poller
 from .schemas import Clock, CycleSummary, IssueView, Sleep
@@ -48,12 +49,24 @@ def build_runtime(
     store = Store(settings.sqlite_path)
     github_http = httpx.AsyncClient(transport=transport)
     workflow_http = httpx.AsyncClient(transport=transport)
+    token_source: TokenSource
+    if settings.auth_mode == "app":
+        token_source = GithubAppTokenSource(
+            app_id=settings.app_id,
+            private_key_pem=settings.load_private_key_pem(),
+            repo=settings.repo,
+            clock=clock,
+            installation_id=settings.app_installation_id,
+        )
+    else:
+        token_source = StaticTokenSource(settings.token)
     github = GithubClient(
         token=settings.token,
         repo=settings.repo,
         http=github_http,
         clock=clock,
         sleep=sleep,
+        token_source=token_source,
     )
     workflow = WorkflowClient(base_url=settings.workflow_url, http=workflow_http)
     poller = Poller(

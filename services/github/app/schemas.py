@@ -122,6 +122,7 @@ class RepoInfo(Contract):
     fork: bool
     owner_login: str
     has_issues: bool
+    default_branch: str = "main"
 
 
 class LabelEvent(Contract):

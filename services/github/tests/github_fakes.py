@@ -1,15 +1,34 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs
 
 import httpx
+import jwt
 
 
 class FakeGithub:
-    def __init__(self, *, repo="bot/fork", self_login="agent-bot", repo_id=100):
+    def __init__(
+        self,
+        *,
+        repo="bot/fork",
+        self_login="agent-bot",
+        repo_id=100,
+        app_public_key_pem=None,
+        app_id="4242",
+        app_slug="octo-agent-team",
+        installation_id=9001,
+        clock=None,
+    ):
         self.repo = repo
         self.self_login = self_login
         self.repo_id = repo_id
+        self.app_public_key_pem = app_public_key_pem
+        self.app_id = app_id
+        self.app_slug = app_slug
+        self.installation_id = installation_id
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self.installation_tokens = {}
+        self.minted_token_bodies = []
         self.issues = {}
         self.events = {}
         self.comments = {}
@@ -122,10 +141,6 @@ class FakeGithub:
 
         if request.url.host != "api.github.com":
             return httpx.Response(404, json={"message": "unexpected host"})
-        if request.headers.get("authorization") != "Bearer test-token":
-            return httpx.Response(
-                401, headers=response_headers, json={"message": "bad auth"}
-            )
         if request.headers.get("accept") != "application/vnd.github+json":
             return httpx.Response(
                 400, headers=response_headers, json={"message": "bad accept"}
@@ -136,6 +151,28 @@ class FakeGithub:
             )
 
         path = request.url.path
+        auth_header = request.headers.get("authorization", "")
+        if self.app_public_key_pem is not None:
+            app_resp = self._handle_app_auth_routes(
+                request, path, auth_header, response_headers
+            )
+            if app_resp is not None:
+                return app_resp
+            if not self._valid_install_token(auth_header):
+                return httpx.Response(
+                    401, headers=response_headers, json={"message": "bad install auth"}
+                )
+            if path == "/user":
+                return httpx.Response(
+                    403,
+                    headers=response_headers,
+                    json={"message": "Resource not accessible by integration"},
+                )
+        elif auth_header != "Bearer test-token":
+            return httpx.Response(
+                401, headers=response_headers, json={"message": "bad auth"}
+            )
+
         if request.method == "GET" and path == "/user":
             return httpx.Response(
                 200, headers=response_headers, json={"login": self.self_login}
@@ -233,6 +270,79 @@ class FakeGithub:
         return httpx.Response(
             404, headers=response_headers, json={"message": "unexpected endpoint"}
         )
+
+    def _verify_app_jwt(self, auth_header: str) -> bool:
+        if not auth_header.startswith("Bearer ") or self.app_public_key_pem is None:
+            return False
+        raw = auth_header.removeprefix("Bearer ")
+        now_ts = int(self._clock().timestamp())
+        try:
+            claims = jwt.decode(
+                raw,
+                self.app_public_key_pem,
+                algorithms=["RS256"],
+                options={"verify_exp": False, "verify_iat": False},
+            )
+        except jwt.PyJWTError:
+            return False
+        return (
+            claims.get("iss") == self.app_id
+            and isinstance(claims.get("iat"), int)
+            and isinstance(claims.get("exp"), int)
+            and claims["iat"] <= now_ts <= claims["exp"]
+        )
+
+    def _valid_install_token(self, auth_header: str) -> bool:
+        if not auth_header.startswith("Bearer "):
+            return False
+        token = auth_header.removeprefix("Bearer ")
+        expires_at = self.installation_tokens.get(token)
+        return expires_at is not None and self._clock() < expires_at
+
+    def _handle_app_auth_routes(self, request, path, auth_header, response_headers):
+        repo_prefix = f"/repos/{self.repo}"
+        if path == "/app" and request.method == "GET":
+            if not self._verify_app_jwt(auth_header):
+                return httpx.Response(
+                    401, headers=response_headers, json={"message": "bad app jwt"}
+                )
+            return httpx.Response(
+                200,
+                headers=response_headers,
+                json={"id": int(self.app_id), "slug": self.app_slug},
+            )
+        if path == f"{repo_prefix}/installation" and request.method == "GET":
+            if not self._verify_app_jwt(auth_header):
+                return httpx.Response(
+                    401, headers=response_headers, json={"message": "bad app jwt"}
+                )
+            return httpx.Response(
+                200,
+                headers=response_headers,
+                json={"id": self.installation_id, "app_slug": self.app_slug},
+            )
+        if (
+            path == f"/app/installations/{self.installation_id}/access_tokens"
+            and request.method == "POST"
+        ):
+            if not self._verify_app_jwt(auth_header):
+                return httpx.Response(
+                    401, headers=response_headers, json={"message": "bad app jwt"}
+                )
+            body = json.loads(request.content) if request.content else {}
+            self.minted_token_bodies.append(body)
+            token = f"ghs_install_{len(self.installation_tokens) + 1}"
+            expires_at = self._clock() + timedelta(hours=1)
+            self.installation_tokens[token] = expires_at
+            return httpx.Response(
+                201,
+                headers=response_headers,
+                json={
+                    "token": token,
+                    "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+                },
+            )
+        return None
 
     @staticmethod
     def _page(items, query, headers):

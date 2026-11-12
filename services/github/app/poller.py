@@ -18,6 +18,7 @@ from .rules import (
 )
 from .schemas import Clock, CycleSummary, GithubIssue, RepoInfo, Sleep
 from .settings import (
+    FORBIDDEN_UPSTREAM_REPOS,
     GITHUB_LABEL,
     GITHUB_LEASE_TTL_S,
     GITHUB_MAX_START_ATTEMPTS,
@@ -56,6 +57,7 @@ class Poller:
         self.sleep = sleep
         self.holder = holder
         self.self_login = ""
+        self.approvers: tuple[str, ...] = ()
         self.repo_info: RepoInfo | None = None
         self.auth_state = "unknown"
         self.last_cycle: CycleSummary | None = None
@@ -66,14 +68,36 @@ class Poller:
         self.settings.validate_for_start()
         login = await self.github.get_self()
         repo = await self.github.get_repo()
-        if (
-            not repo.fork
-            or repo.owner_login.casefold() != login.casefold()
-            or not repo.has_issues
-        ):
+        if repo.full_name.casefold() in FORBIDDEN_UPSTREAM_REPOS:
             raise RuntimeError(
-                "GITHUB_REPO must be an issues-enabled fork owned by the bot"
+                "GITHUB_REPO must be a fork, never an upstream repository"
             )
+        if self.github.auth_mode == "app":
+            if (
+                not repo.fork
+                or not repo.has_issues
+                or not login.endswith("[bot]")
+                or repo.owner_login.casefold() == login.casefold()
+            ):
+                raise RuntimeError(
+                    "GITHUB_REPO must be an issues-enabled fork where the GitHub App bot is not the owner"
+                )
+            approvers = self.settings.approvers or (repo.owner_login,)
+            if any(item.casefold() == login.casefold() for item in approvers):
+                raise RuntimeError(
+                    "GitHub App bot login cannot be configured as an approver"
+                )
+            self.approvers = approvers
+        else:
+            if (
+                not repo.fork
+                or repo.owner_login.casefold() != login.casefold()
+                or not repo.has_issues
+            ):
+                raise RuntimeError(
+                    "GITHUB_REPO must be an issues-enabled fork owned by the bot"
+                )
+            self.approvers = self.settings.approvers
 
         stored_repo_id = self.store.get_meta("repo_id")
         if stored_repo_id is not None and int(stored_repo_id) != repo.id:
