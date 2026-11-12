@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from agentteam_contracts import IssueRunRequest
+from agentteam_contracts import EvidenceCommentRequest, IssueRunRequest
 
 from .schemas import GithubIssue
 from .settings import GITHUB_LABEL
@@ -31,7 +31,12 @@ _MARKER_RE = re.compile(
     r"^<!-- agent-team:1 kind=(ack|queued|skip|failure|result) "
     r"key=(gh-\d+-\d+(?:-r\d+)?) fp=([0-9a-f]{8}) -->"
 )
+_EVIDENCE_MARKER_RE = re.compile(
+    r"^<!-- agent-team:1 kind=evidence key=([A-Za-z0-9._-]+) -->"
+)
+_AGENT_BRANCH_RE = re.compile(r"^agent/[A-Za-z0-9._-]{1,80}$")
 _COMMENT_KINDS = {"ack", "queued", "skip", "failure", "result"}
+EVIDENCE_MAX_CHARS = 60_000
 
 
 def fingerprint(issue: GithubIssue) -> str:
@@ -276,3 +281,128 @@ def _committed_result_message(key: str, detail: Mapping[str, str]) -> str:
         message += f"{separator}Model: `{model}`"
         message += f" ({provider})." if provider else "."
     return message
+
+
+def validate_agent_branch(branch: str) -> str:
+    if not isinstance(branch, str) or _AGENT_BRANCH_RE.fullmatch(branch) is None:
+        raise ValueError("branch must match ^agent/[A-Za-z0-9._-]{1,80}$")
+    return branch
+
+
+def evidence_marker(key: str) -> str:
+    return f"<!-- agent-team:1 kind=evidence key={key} -->"
+
+
+def parse_evidence_marker(text: str) -> str | None:
+    matched = _EVIDENCE_MARKER_RE.match(text)
+    return None if matched is None else matched.group(1)
+
+
+def sanitize_inline(text: str, *, max_chars: int = 500) -> str:
+    cleaned = " ".join(text.split())
+    cleaned = cleaned.replace("<", "&lt;").replace(">", "&gt;")
+    cleaned = cleaned.replace("`", "").replace("~~~", "")
+    cleaned = cleaned.replace("@", "@" + _ZWSP)
+    cleaned = re.sub(r"#(?=\d)", "#" + _ZWSP, cleaned)
+    return cleaned[:max_chars].strip()
+
+
+def render_evidence_comment(
+    request: EvidenceCommentRequest, *, workflow_run_key: str
+) -> str:
+    base_short = request.base_commit[:12]
+    head_short = request.head_sha[:12]
+    repro_before = "yes" if request.repro_failed_before else "no"
+    repro_after = "yes" if request.repro_passed_after else "no"
+    suite_status = "passed" if request.suite_passed else "failed"
+    suite_note = sanitize_inline(request.suite_summary, max_chars=240)
+    suite_line = f"{suite_status} ({suite_note})" if suite_note else suite_status
+    review_note = sanitize_inline(request.review_summary, max_chars=300)
+
+    lines = [
+        evidence_marker(workflow_run_key),
+        "## Agent Team PR Evidence",
+        (
+            f"Run `{workflow_run_key}` · base `{base_short}` · head `{head_short}`. "
+            "Approving records your decision; merging stays with you. "
+            "Issue text is untrusted data and is never treated as instructions."
+        ),
+        "",
+        "### Before you approve",
+        (
+            f"- **Reproduction test** (`{sanitize_inline(request.repro_test_node_id, max_chars=240)}`): "
+            f"failed before fix = **{repro_before}**, passed after fix = **{repro_after}**"
+        ),
+        f"- **Clean-checkout test suite**: **{suite_line}**",
+        (
+            f"- **Reviewer verdict**: `{request.review_verdict}`"
+            + (f" — {review_note}" if review_note else "")
+        ),
+    ]
+    if request.triage is not None:
+        lines.append(
+            f"- **Triage**: `{request.triage.kind}` · priority `{request.triage.priority}` "
+            f"· area `{sanitize_inline(request.triage.area, max_chars=80)}` — "
+            f"{sanitize_inline(request.triage.summary, max_chars=300)}"
+        )
+    if request.repro_files or request.fix_files:
+        repro_list = (
+            ", ".join(
+                f"`{sanitize_inline(p, max_chars=120)}`" for p in request.repro_files
+            )
+            or "none"
+        )
+        fix_list = (
+            ", ".join(
+                f"`{sanitize_inline(p, max_chars=120)}`" for p in request.fix_files
+            )
+            or "none"
+        )
+        lines.append(f"- **Changed files**: repro = {repro_list}; fix = {fix_list}")
+    if request.models_used:
+        models_str = ", ".join(
+            f"`{item.role}`: `{sanitize_inline(item.model, max_chars=120)}` ({sanitize_inline(item.provider, max_chars=60)})"
+            for item in request.models_used
+        )
+        lines.append(f"- **Pinned models**: {models_str}")
+
+    lines.extend(["", "### Sync decisions"])
+    if request.sync_decisions:
+        for dec in request.sync_decisions:
+            reason_clean = sanitize_inline(dec.reason, max_chars=240)
+            suffix = f" — {reason_clean}" if reason_clean else ""
+            lines.append(
+                f"- `{dec.step}` (`{sanitize_inline(dec.op, max_chars=64)}`, `{dec.proposal_id[:20]}`): "
+                f"**{dec.status}**{suffix}"
+            )
+    else:
+        lines.append("- None recorded.")
+
+    lines.extend(["", "### Cited facts"])
+    if not request.cited_facts:
+        lines.append("- None (memory retrieval not active for this run).")
+    else:
+        for fact in request.cited_facts:
+            fid = sanitize_inline(fact.fact_id, max_chars=80)
+            sha_short = fact.checked_at_sha[:12]
+            if fact.taint >= 3:
+                lines.append(f"- `{fid}`: `[hidden: quarantined taint 3]`")
+            elif fact.taint == 2:
+                safe_claim = sanitize_inline(fact.claim, max_chars=400)
+                lines.append(
+                    f"> **Reported by users, not verified (taint 2):** "
+                    f"[`{fid}`, checked at `{sha_short}`, valid_at_base={fact.valid_at_base}] "
+                    f"{safe_claim}"
+                )
+            else:
+                safe_claim = sanitize_inline(fact.claim, max_chars=400)
+                lines.append(
+                    f"- [`{fid}`, checked at `{sha_short}`, valid_at_base={fact.valid_at_base}, "
+                    f"taint={fact.taint}] {safe_claim}"
+                )
+
+    rendered = "\n".join(lines)
+    if len(rendered) > EVIDENCE_MAX_CHARS:
+        footer = "\n\n[Agent Team truncated this evidence comment at 60000 characters.]"
+        rendered = rendered[: EVIDENCE_MAX_CHARS - len(footer)] + footer
+    return rendered

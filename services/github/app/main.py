@@ -7,14 +7,27 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
+from agentteam_contracts import (
+    CommitStatusRequest,
+    EvidenceCommentRequest,
+    GithubWriteOutcome,
+    OpenPrRequest,
+    RepoHeadResponse,
+)
 from fastapi import FastAPI, HTTPException, Request
 
 from .auth import GithubAppTokenSource, StaticTokenSource, TokenSource
-from .client import GithubClient
+from .client import GithubClient, GithubFailure
 from .poller import Poller
+from .pr_service import (
+    fetch_repo_head,
+    open_draft_pull_request,
+    set_commit_status,
+    upsert_pr_evidence_comment,
+)
 from .schemas import Clock, CycleSummary, IssueView, Sleep
 from .settings import GithubSettings, SettingsError
-from .store import IssueState, Store
+from .store import IssueState, Store, WriteConflictError
 from .workflow_client import WorkflowClient
 
 
@@ -170,6 +183,67 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
         if summary.aborted_reason == "cycle_in_progress":
             raise HTTPException(status_code=409, detail="cycle_in_progress")
         return summary
+
+    @app.get("/v1/repo/head", response_model=RepoHeadResponse)
+    async def repo_head(request: Request) -> RepoHeadResponse:
+        active = _runtime(request)
+        try:
+            return await fetch_repo_head(active.github)
+        except GithubFailure as error:
+            raise HTTPException(
+                status_code=502,
+                detail=error.outcome.reason or error.outcome.outcome,
+            ) from error
+
+    @app.post("/v1/prs", response_model=GithubWriteOutcome)
+    async def open_pr(request: Request, body: OpenPrRequest) -> GithubWriteOutcome:
+        active = _runtime(request)
+        try:
+            return await open_draft_pull_request(
+                settings=active.settings,
+                github=active.github,
+                store=active.store,
+                clock=active.poller.clock,
+                request=body,
+            )
+        except WriteConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.put("/v1/prs/{pr_number}/evidence", response_model=GithubWriteOutcome)
+    async def upsert_evidence(
+        pr_number: int,
+        request: Request,
+        body: EvidenceCommentRequest,
+    ) -> GithubWriteOutcome:
+        active = _runtime(request)
+        try:
+            return await upsert_pr_evidence_comment(
+                github=active.github,
+                store=active.store,
+                clock=active.poller.clock,
+                pr_number=pr_number,
+                request=body,
+            )
+        except WriteConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/v1/commits/{sha}/status", response_model=GithubWriteOutcome)
+    async def commit_status(
+        sha: str,
+        request: Request,
+        body: CommitStatusRequest,
+    ) -> GithubWriteOutcome:
+        active = _runtime(request)
+        try:
+            return await set_commit_status(
+                github=active.github,
+                store=active.store,
+                clock=active.poller.clock,
+                sha=sha,
+                request=body,
+            )
+        except WriteConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     return app
 

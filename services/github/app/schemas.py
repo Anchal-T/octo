@@ -102,7 +102,17 @@ class IssueView(Contract):
     ]
     reason: str | None = None
     start_attempts: int = Field(ge=0)
-    result_status: Literal["committed", "quota_exhausted", "throttled"] | None = None
+    result_status: (
+        Literal[
+            "committed",
+            "quota_exhausted",
+            "throttled",
+            "approved",
+            "rejected",
+            "failed",
+        ]
+        | None
+    ) = None
 
 
 class CycleSummary(Contract):
@@ -137,3 +147,53 @@ class GithubComment(Contract):
     body: str
     author_login: str
     created_at: datetime
+
+
+class GithubPullRequest(Contract):
+    number: int = Field(ge=1)
+    html_url: str
+    state: Literal["open", "closed"]
+    merged: bool = False
+    draft: bool = True
+    head_ref: str
+    head_sha: str
+    base_ref: str
+    author_login: str
+
+    @classmethod
+    def from_api(cls, item: Mapping[str, Any]) -> "GithubPullRequest":
+        head = item.get("head") or {}
+        base = item.get("base") or {}
+        user = item.get("user") or {}
+        return cls(
+            number=item["number"],
+            html_url=item.get("html_url", ""),
+            state=item["state"],
+            merged=bool(item.get("merged", False)),
+            draft=bool(item.get("draft", False)),
+            head_ref=head.get("ref", ""),
+            head_sha=head.get("sha", ""),
+            base_ref=base.get("ref", ""),
+            author_login=user.get("login", ""),
+        )
+
+
+class GithubReview(Contract):
+    id: int = Field(ge=1)
+    author_login: str
+    state: str
+    commit_id: str = ""
+    body: str = ""
+    submitted_at: datetime | None = None
+
+    @classmethod
+    def from_api(cls, item: Mapping[str, Any]) -> "GithubReview":
+        user = item.get("user") or {}
+        return cls(
+            id=item["id"],
+            author_login=user.get("login") or "",
+            state=str(item.get("state") or "").upper(),
+            commit_id=item.get("commit_id") or "",
+            body=item.get("body") or "",
+            submitted_at=item.get("submitted_at"),
+        )

@@ -41,7 +41,7 @@ def test_store_initializes_schema_version_and_round_trips_issue(tmp_path):
     assert store.count_admitted_since(NOW - timedelta(hours=12)) == 1
     with store.connection() as connection:
         assert (
-            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
         )
 
     store.set_meta("repo_id", "100")
@@ -52,9 +52,9 @@ def test_store_refuses_an_unknown_schema_version(tmp_path):
     path = str(tmp_path / "github.sqlite")
     Store(path)
     with sqlite3.connect(path) as connection:
-        connection.execute("UPDATE schema_version SET version = 3")
+        connection.execute("UPDATE schema_version SET version = 4")
 
-    with pytest.raises(SchemaVersionError, match="3"):
+    with pytest.raises(SchemaVersionError, match="4"):
         Store(path)
 
 

@@ -1,10 +1,12 @@
 import asyncio
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
 import httpx
+from agentteam_contracts import PrFileChange
 
 from .auth import GithubAppTokenSource, StaticTokenSource, TokenSource
 from .schemas import (
@@ -12,6 +14,8 @@ from .schemas import (
     GithubComment,
     GithubIssue,
     GithubOutcome,
+    GithubPullRequest,
+    GithubReview,
     LabelEvent,
     PollResult,
     RepoInfo,
@@ -226,6 +230,193 @@ class GithubClient:
             missing="issue",
         )
         return self._json(response)["id"]
+
+    async def update_comment(self, comment_id: int, body: str) -> int:
+        response = await self._request(
+            "PATCH",
+            f"/repos/{self.repo}/issues/comments/{comment_id}",
+            json={"body": body},
+            missing="issue",
+        )
+        return self._json(response)["id"]
+
+    async def get_branch_head(self, branch: str) -> str:
+        response = await self._request(
+            "GET",
+            f"/repos/{self.repo}/git/ref/heads/{branch}",
+            missing="issue",
+        )
+        obj = self._json(response).get("object") or {}
+        sha = str(obj.get("sha") or "").strip()
+        if not sha:
+            raise GithubFailure(
+                self._error_outcome(
+                    "unavailable",
+                    "invalid_github_response",
+                    "GitHub ref response did not contain a commit SHA",
+                    http_status=response.status_code,
+                )
+            )
+        return sha
+
+    async def create_tree(
+        self, *, base_tree: str, files: Sequence[PrFileChange]
+    ) -> str:
+        entries: list[dict[str, Any]] = []
+        for item in files:
+            if item.content is None:
+                entries.append(
+                    {
+                        "path": item.path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": None,
+                    }
+                )
+            else:
+                entries.append(
+                    {
+                        "path": item.path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "content": item.content,
+                    }
+                )
+        response = await self._request(
+            "POST",
+            f"/repos/{self.repo}/git/trees",
+            json={"base_tree": base_tree, "tree": entries},
+        )
+        return self._json(response)["sha"]
+
+    async def create_commit(
+        self, *, message: str, tree_sha: str, parents: Sequence[str]
+    ) -> str:
+        response = await self._request(
+            "POST",
+            f"/repos/{self.repo}/git/commits",
+            json={
+                "message": message,
+                "tree": tree_sha,
+                "parents": list(parents),
+            },
+        )
+        return self._json(response)["sha"]
+
+    async def upsert_branch_ref(self, branch: str, sha: str) -> None:
+        exists = False
+        try:
+            await self._request(
+                "GET",
+                f"/repos/{self.repo}/git/ref/heads/{branch}",
+                missing="issue",
+            )
+            exists = True
+        except GithubFailure as error:
+            if error.outcome.outcome != "not_found":
+                raise
+        if exists:
+            await self._request(
+                "PATCH",
+                f"/repos/{self.repo}/git/refs/heads/{branch}",
+                json={"sha": sha, "force": True},
+                missing="issue",
+            )
+        else:
+            await self._request(
+                "POST",
+                f"/repos/{self.repo}/git/refs",
+                json={"ref": f"refs/heads/{branch}", "sha": sha},
+            )
+
+    async def find_open_pr(self, *, head_branch: str) -> GithubPullRequest | None:
+        owner = self.repo.split("/", 1)[0]
+        response = await self._request(
+            "GET",
+            f"/repos/{self.repo}/pulls",
+            params={
+                "state": "open",
+                "head": f"{owner}:{head_branch}",
+                "per_page": 10,
+                "page": 1,
+            },
+        )
+        items = self._json_list(response)
+        return GithubPullRequest.from_api(items[0]) if items else None
+
+    async def create_draft_pr(
+        self,
+        *,
+        title: str,
+        body: str,
+        head_branch: str,
+        base_branch: str,
+    ) -> GithubPullRequest:
+        response = await self._request(
+            "POST",
+            f"/repos/{self.repo}/pulls",
+            json={
+                "title": title,
+                "body": body,
+                "head": head_branch,
+                "base": base_branch,
+                "draft": True,
+            },
+        )
+        return GithubPullRequest.from_api(self._json(response))
+
+    async def get_pull_request(self, pr_number: int) -> GithubPullRequest:
+        response = await self._request(
+            "GET",
+            f"/repos/{self.repo}/pulls/{pr_number}",
+            missing="issue",
+        )
+        return GithubPullRequest.from_api(self._json(response))
+
+    async def request_reviewers(self, pr_number: int, reviewers: Sequence[str]) -> None:
+        clean = [login for login in reviewers if login.strip()]
+        if not clean:
+            return
+        await self._request(
+            "POST",
+            f"/repos/{self.repo}/pulls/{pr_number}/requested_reviewers",
+            json={"reviewers": clean},
+            missing="issue",
+        )
+
+    async def list_reviews(self, pr_number: int) -> list[GithubReview]:
+        reviews: list[GithubReview] = []
+        for page in range(1, GITHUB_MAX_PAGES + 1):
+            response = await self._request(
+                "GET",
+                f"/repos/{self.repo}/pulls/{pr_number}/reviews",
+                params={"per_page": GITHUB_PAGE_SIZE, "page": page},
+                missing="issue",
+            )
+            items = self._json_list(response)
+            reviews.extend(GithubReview.from_api(item) for item in items)
+            if len(items) < GITHUB_PAGE_SIZE:
+                break
+        return reviews
+
+    async def create_commit_status(
+        self,
+        sha: str,
+        *,
+        state: Literal["pending", "success", "failure", "error"],
+        description: str,
+        context: str = "agent-team",
+    ) -> None:
+        await self._request(
+            "POST",
+            f"/repos/{self.repo}/statuses/{sha}",
+            json={
+                "state": state,
+                "description": description[:140],
+                "context": context,
+            },
+            missing="issue",
+        )
 
     async def _request(
         self,

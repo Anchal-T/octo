@@ -95,7 +95,7 @@ def test_v1_fixture_migrates_to_v2_with_admission_and_attempted_comments(tmp_pat
     assert store.count_admitted_since(NOW - timedelta(hours=1)) == 1
     with store.connection() as connection:
         assert (
-            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
         )
         admission = connection.execute(
             "SELECT issue_key, attempt, admitted_at FROM admission"
@@ -208,11 +208,43 @@ def test_two_attempts_on_one_day_count_as_two(tmp_path):
     assert store.count_admitted_since(NOW.replace(hour=0, minute=0, second=0)) == 2
 
 
-def test_store_refuses_schema_version_three(tmp_path):
+def test_store_refuses_schema_version_four(tmp_path):
     path = str(tmp_path / "github.sqlite")
     Store(path)
     with sqlite3.connect(path) as connection:
-        connection.execute("UPDATE schema_version SET version = 3")
+        connection.execute("UPDATE schema_version SET version = 4")
 
-    with pytest.raises(SchemaVersionError, match="3"):
+    with pytest.raises(SchemaVersionError, match="4"):
         Store(path)
+
+
+def test_v2_migration_failure_rolls_back_and_leaves_version_2(tmp_path, monkeypatch):
+    path = str(tmp_path / "github.sqlite")
+    _seed_v1(path)
+    store = Store.__new__(Store)
+    store.path = path
+    store.busy_timeout_ms = 5000
+    conn = store.connect()
+    try:
+        store._migrate_v1_to_v2(conn)
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        Store,
+        "_MIGRATE_V2_TO_V3",
+        ("CREATE TABLE pull_request (pr_number INTEGER PRIMARY KEY)", "INVALID SQL"),
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        Store(path)
+
+    with sqlite3.connect(path) as check:
+        version = check.execute("SELECT version FROM schema_version").fetchone()[0]
+        tables = {
+            row[0]
+            for row in check.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert version == 2
+    assert "pull_request" not in tables

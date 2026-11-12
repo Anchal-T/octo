@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs
@@ -18,6 +19,8 @@ class FakeGithub:
         app_slug="octo-agent-team",
         installation_id=9001,
         clock=None,
+        default_branch="main",
+        default_head_sha="0000000000000000000000000000000000000001",
     ):
         self.repo = repo
         self.self_login = self_login
@@ -27,6 +30,14 @@ class FakeGithub:
         self.app_slug = app_slug
         self.installation_id = installation_id
         self._clock = clock or (lambda: datetime.now(UTC))
+        self.default_branch = default_branch
+        self.refs = {f"heads/{default_branch}": default_head_sha}
+        self.trees = {}
+        self.git_commits = {}
+        self.pulls = {}
+        self.reviews = {}
+        self.review_requests = {}
+        self.statuses = {}
         self.installation_tokens = {}
         self.minted_token_bodies = []
         self.issues = {}
@@ -190,6 +201,7 @@ class FakeGithub:
                     "fork": True,
                     "owner": {"login": owner},
                     "has_issues": True,
+                    "default_branch": self.default_branch,
                 },
             )
 
@@ -237,7 +249,7 @@ class FakeGithub:
             return httpx.Response(
                 200, headers=response_headers, json=self.issues[number]
             )
-        if len(parts) == 3 and parts[0] == "issues":
+        if len(parts) == 3 and parts[0] == "issues" and parts[1].isdigit():
             number = int(parts[1])
             if request.method == "GET" and parts[2] == "events":
                 if number not in self.issues:
@@ -256,7 +268,9 @@ class FakeGithub:
                     )
                 if request.method == "POST":
                     body = json.loads(request.content)["body"]
-                    comment_id = self.add_comment(number, body=body)
+                    comment_id = self.add_comment(
+                        number, body=body, author=self.self_login
+                    )
                     return httpx.Response(
                         201,
                         headers=response_headers,
@@ -267,9 +281,215 @@ class FakeGithub:
                         },
                     )
 
+        pr_or_git_resp = self._handle_git_and_pr_routes(
+            request, path, query, response_headers
+        )
+        if pr_or_git_resp is not None:
+            return pr_or_git_resp
+
         return httpx.Response(
             404, headers=response_headers, json={"message": "unexpected endpoint"}
         )
+
+    def add_review(
+        self,
+        pr_number,
+        *,
+        author,
+        state,
+        commit_id,
+        body="",
+        submitted_at=None,
+        review_id=None,
+    ):
+        items = self.reviews.setdefault(pr_number, [])
+        if review_id is None:
+            review_id = max((r["id"] for r in items), default=0) + 1
+        items.append(
+            {
+                "id": review_id,
+                "user": {"login": author} if author is not None else None,
+                "state": state,
+                "commit_id": commit_id,
+                "body": body,
+                "submitted_at": (submitted_at or self._clock()).isoformat(),
+            }
+        )
+        return review_id
+
+    def push_pr_commit(self, pr_number, new_sha):
+        pr = self.pulls[pr_number]
+        branch = pr["head"]["ref"]
+        self.refs[f"heads/{branch}"] = new_sha
+        pr["head"]["sha"] = new_sha
+        pr["updated_at"] = self._clock().isoformat()
+
+    def _handle_git_and_pr_routes(self, request, path, query, response_headers):
+        repo_prefix = f"/repos/{self.repo}"
+        if not path.startswith(f"{repo_prefix}/"):
+            return None
+        subpath = path.removeprefix(f"{repo_prefix}/")
+
+        if subpath.startswith("git/ref/") and request.method == "GET":
+            ref_name = subpath.removeprefix("git/ref/")
+            if ref_name not in self.refs:
+                return httpx.Response(
+                    404, headers=response_headers, json={"message": "ref not found"}
+                )
+            return httpx.Response(
+                200,
+                headers=response_headers,
+                json={
+                    "ref": f"refs/{ref_name}",
+                    "object": {"sha": self.refs[ref_name]},
+                },
+            )
+
+        if subpath == "git/refs" and request.method == "POST":
+            body = json.loads(request.content)
+            ref_name = body["ref"].removeprefix("refs/")
+            self.refs[ref_name] = body["sha"]
+            return httpx.Response(
+                201,
+                headers=response_headers,
+                json={"ref": body["ref"], "object": {"sha": body["sha"]}},
+            )
+
+        if subpath.startswith("git/refs/") and request.method == "PATCH":
+            ref_name = subpath.removeprefix("git/refs/")
+            body = json.loads(request.content)
+            self.refs[ref_name] = body["sha"]
+            for pr in self.pulls.values():
+                if f"heads/{pr['head']['ref']}" == ref_name:
+                    pr["head"]["sha"] = body["sha"]
+            return httpx.Response(
+                200,
+                headers=response_headers,
+                json={"ref": f"refs/{ref_name}", "object": {"sha": body["sha"]}},
+            )
+
+        if subpath == "git/trees" and request.method == "POST":
+            raw = request.content
+            tree_sha = hashlib.sha1(raw).hexdigest()
+            self.trees[tree_sha] = json.loads(raw)
+            return httpx.Response(201, headers=response_headers, json={"sha": tree_sha})
+
+        if subpath == "git/commits" and request.method == "POST":
+            raw = request.content
+            commit_sha = hashlib.sha1(raw).hexdigest()
+            self.git_commits[commit_sha] = json.loads(raw)
+            return httpx.Response(
+                201, headers=response_headers, json={"sha": commit_sha}
+            )
+
+        if subpath.startswith("issues/comments/") and request.method == "PATCH":
+            comment_id = int(subpath.removeprefix("issues/comments/"))
+            new_body = json.loads(request.content)["body"]
+            for comment_list in self.comments.values():
+                for item in comment_list:
+                    if item["id"] == comment_id:
+                        item["body"] = new_body
+                        return httpx.Response(200, headers=response_headers, json=item)
+            return httpx.Response(
+                404, headers=response_headers, json={"message": "comment not found"}
+            )
+
+        if subpath.startswith("statuses/") and request.method == "POST":
+            sha = subpath.removeprefix("statuses/")
+            body = json.loads(request.content)
+            self.statuses.setdefault(sha, []).append(body)
+            return httpx.Response(201, headers=response_headers, json=body)
+
+        if subpath == "pulls":
+            if request.method == "GET":
+                wanted_state = query.get("state", ["open"])[0]
+                wanted_head = query.get("head", [None])[0]
+                owner = self.repo.split("/", 1)[0]
+                items = list(self.pulls.values())
+                if wanted_state != "all":
+                    items = [pr for pr in items if pr["state"] == wanted_state]
+                if wanted_head:
+                    items = [
+                        pr
+                        for pr in items
+                        if f"{owner}:{pr['head']['ref']}" == wanted_head
+                    ]
+                return self._page(items, query, response_headers)
+            if request.method == "POST":
+                body = json.loads(request.content)
+                pr_number = (
+                    max(
+                        [*self.issues.keys(), *self.pulls.keys()],
+                        default=0,
+                    )
+                    + 1
+                )
+                head_ref = body["head"]
+                head_sha = self.refs.get(f"heads/{head_ref}", "")
+                pr = {
+                    "number": pr_number,
+                    "html_url": f"https://github.com/{self.repo}/pull/{pr_number}",
+                    "state": "open",
+                    "merged": False,
+                    "draft": bool(body.get("draft", False)),
+                    "title": body["title"],
+                    "body": body.get("body", ""),
+                    "head": {"ref": head_ref, "sha": head_sha},
+                    "base": {"ref": body["base"]},
+                    "user": {"login": self.self_login},
+                    "created_at": self._clock().isoformat(),
+                    "updated_at": self._clock().isoformat(),
+                }
+                self.pulls[pr_number] = pr
+                # On GitHub, every PR also has an issue-comments thread at /issues/{pr_number}/comments!
+                self.issues.setdefault(
+                    pr_number,
+                    {
+                        "number": pr_number,
+                        "node_id": f"PR_{pr_number}",
+                        "title": body["title"],
+                        "body": body.get("body", ""),
+                        "state": "open",
+                        "labels": [],
+                        "user": {"login": self.self_login},
+                        "locked": False,
+                        "pull_request": {
+                            "url": f"https://api.github.com/repos/{self.repo}/pulls/{pr_number}"
+                        },
+                        "created_at": pr["created_at"],
+                        "updated_at": pr["updated_at"],
+                    },
+                )
+                self.comments.setdefault(pr_number, [])
+                return httpx.Response(201, headers=response_headers, json=pr)
+
+        pr_parts = subpath.split("/")
+        if len(pr_parts) == 2 and pr_parts[0] == "pulls" and request.method == "GET":
+            pr_number = int(pr_parts[1])
+            if pr_number not in self.pulls:
+                return httpx.Response(
+                    404, headers=response_headers, json={"message": "PR not found"}
+                )
+            return httpx.Response(
+                200, headers=response_headers, json=self.pulls[pr_number]
+            )
+        if len(pr_parts) == 3 and pr_parts[0] == "pulls":
+            pr_number = int(pr_parts[1])
+            if pr_number not in self.pulls:
+                return httpx.Response(
+                    404, headers=response_headers, json={"message": "PR not found"}
+                )
+            if pr_parts[2] == "requested_reviewers" and request.method == "POST":
+                reviewers = list(json.loads(request.content).get("reviewers", []))
+                self.review_requests.setdefault(pr_number, []).append(reviewers)
+                return httpx.Response(
+                    201, headers=response_headers, json=self.pulls[pr_number]
+                )
+            if pr_parts[2] == "reviews" and request.method == "GET":
+                return self._page(
+                    self.reviews.get(pr_number, []), query, response_headers
+                )
+        return None
 
     def _verify_app_jwt(self, auth_header: str) -> bool:
         if not auth_header.startswith("Bearer ") or self.app_public_key_pem is None:
