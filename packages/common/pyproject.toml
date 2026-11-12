@@ -2,7 +2,14 @@
 name = "agentteam-common"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["PyYAML>=6,<7"]
+dependencies = [
+    "PyYAML>=6,<7",
+    "agentteam-contracts>=0.1.0",
+    "httpx>=0.27,<1",
+]
+
+[project.scripts]
+agentteam = "agentteam_common.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

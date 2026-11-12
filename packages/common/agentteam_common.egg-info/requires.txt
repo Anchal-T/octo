@@ -1,0 +1,3 @@
+PyYAML<7,>=6
+agentteam-contracts>=0.1.0
+httpx<1,>=0.27

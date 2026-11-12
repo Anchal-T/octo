@@ -44,11 +44,17 @@ name = "agentteam-common"
 version = "0.1.0"
 source = { editable = "packages/common" }
 dependencies = [
+    { name = "agentteam-contracts" },
+    { name = "httpx" },
     { name = "pyyaml" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pyyaml", specifier = ">=6,<7" }]
+requires-dist = [
+    { name = "agentteam-contracts", editable = "packages/contracts" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "pyyaml", specifier = ">=6,<7" },
+]
 
 [[package]]
 name = "agentteam-contracts"

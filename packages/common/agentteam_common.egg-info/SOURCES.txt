@@ -1,8 +1,13 @@
 pyproject.toml
 agentteam_common/__init__.py
+agentteam_common/areas.py
+agentteam_common/cli.py
 agentteam_common/ids.py
+agentteam_common/repo_config.py
 agentteam_common/settings.py
 agentteam_common.egg-info/PKG-INFO
 agentteam_common.egg-info/SOURCES.txt
 agentteam_common.egg-info/dependency_links.txt
+agentteam_common.egg-info/entry_points.txt
+agentteam_common.egg-info/requires.txt
 agentteam_common.egg-info/top_level.txt

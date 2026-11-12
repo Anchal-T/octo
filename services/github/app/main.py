@@ -209,6 +209,20 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
         except WriteConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
+    @app.get("/v1/prs/{pr_number}")
+    def read_pr(pr_number: int, request: Request) -> dict[str, object]:
+        row = _runtime(request).store.get_pull_request(pr_number)
+        if row is None:
+            raise HTTPException(status_code=404, detail="pull request not found")
+        return {
+            "pr_number": row.pr_number,
+            "issue_key": row.issue_key,
+            "attempt": row.attempt,
+            "head_sha": row.head_sha,
+            "state": row.state,
+            "decision": row.decision,
+        }
+
     @app.put("/v1/prs/{pr_number}/evidence", response_model=GithubWriteOutcome)
     async def upsert_evidence(
         pr_number: int,

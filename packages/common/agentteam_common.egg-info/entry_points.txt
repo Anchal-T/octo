@@ -1,0 +1,2 @@
+[console_scripts]
+agentteam = agentteam_common.cli:main

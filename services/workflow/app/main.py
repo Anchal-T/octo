@@ -5,12 +5,18 @@ import httpx
 import restate
 from agentteam_common import Settings, load_agentteam_config, workflow_key
 from agentteam_contracts import (
+    ApprovalDecision,
+    ApprovalRequest,
+    ApprovalResult,
     IssueRunRequest,
+    IssueRunRequestV2,
     IssueRunResult,
+    IssueRunResultV2,
     ModelCallRequest,
     ModelOutcome,
     RunStartAccepted,
     RunStatus,
+    RunStatusV2,
     Sampling,
 )
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -20,6 +26,12 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from restate.client_types import HttpError as RestateHttpError
 
+from .issue_run_v2 import (
+    approve_issue_v2,
+    info_issue_v2,
+    issue_run_v2,
+    run_issue_v2,
+)
 from .models import Ledger, ModelClient, Store
 from .models.pools import pin_for
 from .plan import (
@@ -276,7 +288,10 @@ async def run_issue_v1(
     return result
 
 
-app.mount("/restate/v1", restate.app(services=[issue_run, issue_run_v1]))
+app.mount(
+    "/restate/v1",
+    restate.app(services=[issue_run, issue_run_v1, issue_run_v2]),
+)
 
 
 @app.get("/healthz")
@@ -385,3 +400,151 @@ async def issue_run_status(
         return IssueRunResult.model_validate(output)
     except (TypeError, ValueError) as error:
         raise HTTPException(status_code=502, detail="Invalid Restate output") from error
+
+
+@app.post("/v2/issues/{issue_id}/run", response_model=IssueRunResultV2)
+async def start_issue_v2(issue_id: str, request: IssueRunRequestV2) -> IssueRunResultV2:
+    if issue_id != request.issue_id:
+        raise HTTPException(status_code=422, detail="issue_id does not match the path")
+    key = workflow_key(issue_id, request.attempt)
+    try:
+        async with restate.create_client(settings.restate_ingress) as client:
+            return await client.workflow_call(run_issue_v2, key=key, arg=request)
+    except RestateHttpError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=error.body or error.message,
+        ) from error
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail="Restate is unavailable") from error
+
+
+@app.post(
+    "/v2/issues/{issue_id}/start",
+    response_model=RunStartAccepted,
+    status_code=202,
+)
+async def start_issue_v2_async(
+    issue_id: str, request: IssueRunRequestV2
+) -> RunStartAccepted:
+    if issue_id != request.issue_id:
+        raise HTTPException(status_code=422, detail="issue_id does not match the path")
+    key = workflow_key(issue_id, request.attempt)
+    try:
+        async with restate.create_client(settings.restate_ingress) as client:
+            handle = await client.workflow_send(
+                run_issue_v2,
+                key=key,
+                arg=request,
+            )
+        return RunStartAccepted(
+            issue_id=issue_id,
+            invocation_id=handle.invocation_id,
+            attempt=request.attempt,
+        )
+    except RestateHttpError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=error.body or error.message,
+        ) from error
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail="Restate is unavailable") from error
+
+
+@app.get(
+    "/v2/issues/{issue_id}/run",
+    response_model=IssueRunResultV2 | RunStatusV2,
+)
+async def issue_run_v2_status(
+    issue_id: str,
+    attempt: int = Query(default=1, ge=1, le=99),
+) -> IssueRunResultV2 | RunStatusV2 | JSONResponse:
+    key = workflow_key(issue_id, attempt)
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.restate_ingress, timeout=5
+        ) as http:
+            response = await http.post(
+                "/restate/output",
+                json={
+                    "target": "workflow",
+                    "workflowName": "IssueRunV2",
+                    "workflowKey": key,
+                },
+            )
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail="Restate is unavailable") from error
+
+    try:
+        output = response.json()
+    except ValueError as error:
+        raise HTTPException(status_code=502, detail="Invalid Restate output") from error
+
+    if response.status_code == 470 or (
+        isinstance(output, dict) and output.get("message") == "not ready"
+    ):
+        status_v2 = RunStatusV2(issue_id=issue_id, attempt=attempt)
+        try:
+            async with restate.create_client(settings.restate_ingress) as client:
+                status_v2 = await client.workflow_call(info_issue_v2, key=key, arg=None)
+        except (RestateHttpError, httpx.HTTPError):
+            status_v2 = RunStatusV2(issue_id=issue_id, attempt=attempt)
+        return JSONResponse(
+            status_code=202,
+            content=status_v2.model_dump(mode="json"),
+        )
+    if response.status_code == 404 or (
+        isinstance(output, dict) and output.get("message") == "not found"
+    ):
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if response.is_error:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=output.get("message", "Restate request failed")
+            if isinstance(output, dict)
+            else "Restate request failed",
+        )
+    try:
+        return IssueRunResultV2.model_validate(output)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=502, detail="Invalid Restate output") from error
+
+
+@app.post(
+    "/v2/issues/{issue_id}/approve",
+    response_model=ApprovalResult,
+)
+async def approve_issue_v2_route(
+    issue_id: str, request: ApprovalRequest
+) -> ApprovalResult:
+    if issue_id != request.issue_id:
+        raise HTTPException(status_code=422, detail="issue_id does not match the path")
+    key = workflow_key(issue_id, request.attempt)
+    decision = ApprovalDecision(
+        approved=request.approved,
+        by=request.by,
+        reason=request.reason,
+        head_sha=request.head_sha,
+        review_id=request.review_id,
+        source=request.source,
+    )
+    try:
+        async with restate.create_client(settings.restate_ingress) as client:
+            return await client.workflow_call(
+                approve_issue_v2,
+                key=key,
+                arg=decision,
+            )
+    except RestateHttpError as error:
+        if error.status_code == 409:
+            return ApprovalResult(
+                issue_id=issue_id,
+                attempt=request.attempt,
+                status="already_decided",
+            )
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=error.body or error.message,
+        ) from error
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail="Restate is unavailable") from error
