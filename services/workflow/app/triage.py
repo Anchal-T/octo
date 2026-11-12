@@ -21,6 +21,47 @@ TRIAGER_SYSTEM_PROMPT = (
 DEFAULT_AREAS = ("unknown",)
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*(.*?)\s*```$", re.DOTALL)
+_JSON_ESCAPES = frozenset('"\\/bfnrt')
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _escape_invalid_backslashes(text: str) -> str:
+    """Double backslashes that start an invalid escape inside JSON strings.
+
+    Models sometimes copy regexes such as ``\\Z`` into a summary verbatim.
+    Valid JSON escapes and everything outside string literals are left alone.
+    """
+    out: list[str] = []
+    in_string = False
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if not in_string:
+            in_string = char == '"'
+            out.append(char)
+            i += 1
+            continue
+        if char == '"':
+            in_string = False
+        elif char == "\\":
+            following = text[i + 1 : i + 2]
+            hex_digits = text[i + 2 : i + 6]
+            if following and following in _JSON_ESCAPES:
+                out.append(text[i : i + 2])
+                i += 2
+                continue
+            if (
+                following == "u"
+                and len(hex_digits) == 4
+                and set(hex_digits) <= _HEX_DIGITS
+            ):
+                out.append(text[i : i + 6])
+                i += 6
+                continue
+            out.append("\\")
+        out.append(char)
+        i += 1
+    return "".join(out)
 
 
 def triage_messages(
@@ -45,10 +86,15 @@ def parse_triage(
     start = candidate.find("{")
     if start == -1:
         return None
+    decoder = json.JSONDecoder()
     try:
-        data, _ = json.JSONDecoder().raw_decode(candidate, start)
+        data, _ = decoder.raw_decode(candidate, start)
     except (RecursionError, ValueError):
-        return None
+        repaired = _escape_invalid_backslashes(candidate[start:])
+        try:
+            data, _ = decoder.raw_decode(repaired)
+        except (RecursionError, ValueError):
+            return None
     if not isinstance(data, dict):
         return None
     kind = data.get("kind")
