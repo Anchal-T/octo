@@ -129,3 +129,56 @@ def test_triage_prompt_lists_areas_from_repo_config():
     ]
 
     assert '"area": "fields|schema|unknown"' in system
+
+
+@pytest.mark.parametrize(
+    ("raw_summary", "expected_summary"),
+    [
+        (
+            r"Regex anchor \Z rejects trailing newlines.",
+            r"Regex anchor \Z rejects trailing newlines.",
+        ),
+        (
+            r"Pattern \d+ fails on unicode digits.",
+            r"Pattern \d+ fails on unicode digits.",
+        ),
+    ],
+)
+def test_parse_triage_keeps_invalid_escapes_as_literal_backslashes(
+    raw_summary, expected_summary
+):
+    text = (
+        '{"kind": "bug", "priority": "medium", '
+        f'"summary": "{raw_summary}", "area": "validate"}}'
+    )
+
+    result = parse_triage(text, allowed_areas=("fields", "validate", "unknown"))
+
+    assert result is not None
+    assert result.area == "validate"
+    assert result.summary == expected_summary
+
+
+def test_parse_triage_repair_leaves_valid_escapes_alone():
+    text = (
+        r'{"kind": "bug", "priority": "low", '
+        r'"summary": "Say \"hi\" \u0041\\B\/C\tD\nE \Z", "area": "fields"}'
+    )
+
+    result = parse_triage(text, allowed_areas=AREAS)
+
+    assert result is not None
+    assert result.area == "fields"
+    assert result.summary == 'Say "hi" A\\B/C D E \\Z'
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        r'{"kind": "bug", "priority": "medium", "summary": "Bad \Z',
+        r'{kind: "bug", priority: "medium", summary: "Bad \Z"}',
+        r'{"kind": "bug", "priority": "urgent", "summary": "Bad \Z"}',
+    ],
+)
+def test_parse_triage_repair_does_not_rescue_broken_replies(text):
+    assert parse_triage(text) is None

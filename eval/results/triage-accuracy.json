@@ -1,0 +1,1540 @@
+{
+  "dataset_id": "nebius/SWE-rebench",
+  "dataset_revision": "89cdfbab4ab1bd8f5a658bb212d1b63624f4f881",
+  "repo": "marshmallow-code/marshmallow",
+  "model_pinned": "openai/gpt-oss-20b",
+  "provider": "groq",
+  "evaluated_at": "2026-11-12T11:46:09.137186Z",
+  "split_counts": {
+    "filtered": 11,
+    "test": 61
+  },
+  "filtered_subset_of_test": true,
+  "blocker": null,
+  "total_tasks": 61,
+  "attempted": 61,
+  "scorable": 50,
+  "hits": 22,
+  "misses": 27,
+  "parse_failures": 1,
+  "no_gold_area": 11,
+  "failed_calls": 0,
+  "multi_area_gold_count": 25,
+  "accuracy_scorable": 0.44,
+  "accuracy_all_attempted": 0.36065573770491804,
+  "layout_diagnostic": {
+    "legacy_prefix_task_count": 26,
+    "legacy_docs_only_gold_count": 16,
+    "mapped_code_multi_area_count": 19,
+    "mapped_scorable": 59,
+    "mapped_no_gold_area": 2,
+    "mapped_hits": 39,
+    "mapped_accuracy_scorable": 0.6610169491525424
+  },
+  "area_stats": [
+    {
+      "area": "fields",
+      "gold_support": 19,
+      "predicted_scorable": 23,
+      "predicted_no_gold": 5,
+      "direct_hits": 13,
+      "gold_task_hits": 17,
+      "gold_misses": 2,
+      "false_positives": 10
+    },
+    {
+      "area": "schema",
+      "gold_support": 15,
+      "predicted_scorable": 15,
+      "predicted_no_gold": 2,
+      "direct_hits": 7,
+      "gold_task_hits": 9,
+      "gold_misses": 6,
+      "false_positives": 8
+    },
+    {
+      "area": "validate",
+      "gold_support": 5,
+      "predicted_scorable": 6,
+      "predicted_no_gold": 1,
+      "direct_hits": 2,
+      "gold_task_hits": 3,
+      "gold_misses": 2,
+      "false_positives": 4
+    },
+    {
+      "area": "hooks",
+      "gold_support": 2,
+      "predicted_scorable": 0,
+      "predicted_no_gold": 2,
+      "direct_hits": 0,
+      "gold_task_hits": 0,
+      "gold_misses": 2,
+      "false_positives": 0
+    },
+    {
+      "area": "errors",
+      "gold_support": 0,
+      "predicted_scorable": 2,
+      "predicted_no_gold": 0,
+      "direct_hits": 0,
+      "gold_task_hits": 0,
+      "gold_misses": 0,
+      "false_positives": 2
+    },
+    {
+      "area": "utils-registry",
+      "gold_support": 9,
+      "predicted_scorable": 2,
+      "predicted_no_gold": 0,
+      "direct_hits": 0,
+      "gold_task_hits": 7,
+      "gold_misses": 2,
+      "false_positives": 2
+    },
+    {
+      "area": "docs-build",
+      "gold_support": 39,
+      "predicted_scorable": 0,
+      "predicted_no_gold": 0,
+      "direct_hits": 0,
+      "gold_task_hits": 15,
+      "gold_misses": 24,
+      "false_positives": 0
+    },
+    {
+      "area": "unknown",
+      "gold_support": 0,
+      "predicted_scorable": 1,
+      "predicted_no_gold": 1,
+      "direct_hits": 0,
+      "gold_task_hits": 0,
+      "gold_misses": 0,
+      "false_positives": 1
+    }
+  ],
+  "records": [
+    {
+      "instance_id": "marshmallow-code__marshmallow-1002",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "marshmallow/fields.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 448,
+      "tokens_out": 116,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1036",
+      "changed_paths": [
+        "AUTHORS.rst",
+        "CHANGELOG.rst",
+        "marshmallow/class_registry.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 372,
+      "tokens_out": 163,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1063",
+      "changed_paths": [
+        "marshmallow/utils.py"
+      ],
+      "gold_areas": [],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "no_gold_area",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 417,
+      "tokens_out": 160,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1067",
+      "changed_paths": [
+        "AUTHORS.rst",
+        "CHANGELOG.rst",
+        "docs/api_reference.rst",
+        "docs/extending.rst",
+        "marshmallow/fields.py",
+        "marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 297,
+      "tokens_out": 144,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1078",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "marshmallow/fields.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 343,
+      "tokens_out": 235,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1079",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "utils-registry",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 285,
+      "tokens_out": 101,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1142",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/upgrading.rst",
+        "src/marshmallow/fields.py",
+        "src/marshmallow/utils.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields",
+        "utils-registry"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 525,
+      "tokens_out": 162,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1164",
+      "changed_paths": [
+        "AUTHORS.rst",
+        "src/marshmallow/fields.py",
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "fields",
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 435,
+      "tokens_out": 179,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1220",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/extending.rst",
+        "docs/quickstart.rst",
+        "docs/upgrading.rst",
+        "examples/flask_example.py",
+        "examples/peewee_example.py",
+        "performance/benchmark.py",
+        "src/marshmallow/decorators.py",
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "hooks",
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "validate",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 288,
+      "tokens_out": 301,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1229",
+      "changed_paths": [
+        "src/marshmallow/fields.py"
+      ],
+      "gold_areas": [
+        "fields"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 455,
+      "tokens_out": 144,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1238",
+      "changed_paths": [
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 375,
+      "tokens_out": 164,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1249",
+      "changed_paths": [
+        "src/marshmallow/utils.py"
+      ],
+      "gold_areas": [
+        "utils-registry"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 637,
+      "tokens_out": 131,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1252",
+      "changed_paths": [
+        "src/marshmallow/utils.py"
+      ],
+      "gold_areas": [
+        "utils-registry"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "validate",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 476,
+      "tokens_out": 153,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1278",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/upgrading.rst",
+        "src/marshmallow/fields.py",
+        "src/marshmallow/utils.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields",
+        "utils-registry"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "feature",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 1142,
+      "tokens_out": 182,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1304",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/extending.rst",
+        "docs/quickstart.rst",
+        "docs/upgrading.rst",
+        "src/marshmallow/fields.py",
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields",
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "errors",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 550,
+      "tokens_out": 132,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1322",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/quickstart.rst",
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 426,
+      "tokens_out": 166,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1343",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "validate",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 801,
+      "tokens_out": 204,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1359",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "src/marshmallow/fields.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 708,
+      "tokens_out": 113,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1379",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 492,
+      "tokens_out": 125,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1382",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/nesting.rst",
+        "docs/upgrading.rst",
+        "docs/why.rst",
+        "examples/peewee_example.py",
+        "src/marshmallow/fields.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "question",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 448,
+      "tokens_out": 200,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1385",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "src/marshmallow/fields.py",
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields",
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 627,
+      "tokens_out": 189,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1401",
+      "changed_paths": [
+        ".gitignore",
+        "CHANGELOG.rst",
+        "src/marshmallow/fields.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 319,
+      "tokens_out": 157,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1405",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "src/marshmallow/fields.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 299,
+      "tokens_out": 270,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1503",
+      "changed_paths": [
+        "setup.py",
+        "src/marshmallow/fields.py",
+        "tox.ini"
+      ],
+      "gold_areas": [
+        "fields"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 545,
+      "tokens_out": 156,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1524",
+      "changed_paths": [
+        "AUTHORS.rst",
+        "src/marshmallow/validate.py"
+      ],
+      "gold_areas": [
+        "validate"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": null,
+      "predicted_kind": null,
+      "predicted_priority": null,
+      "parse_failure": true,
+      "verdict": "parse_failure",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 432,
+      "tokens_out": 95,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-168",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/custom_fields.rst",
+        "docs/extending.rst",
+        "docs/nesting.rst",
+        "docs/quickstart.rst",
+        "docs/upgrading.rst",
+        "marshmallow/exceptions.py",
+        "marshmallow/fields.py",
+        "marshmallow/marshalling.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "errors",
+      "predicted_kind": "feature",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 618,
+      "tokens_out": 140,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1682",
+      "changed_paths": [
+        "AUTHORS.rst",
+        "CHANGELOG.rst",
+        "src/marshmallow/fields.py",
+        "src/marshmallow/schema.py",
+        "src/marshmallow/utils.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields",
+        "schema",
+        "utils-registry"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 290,
+      "tokens_out": 114,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1702",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/extending.rst",
+        "docs/quickstart.rst",
+        "setup.py",
+        "src/marshmallow/fields.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 459,
+      "tokens_out": 143,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1745",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 612,
+      "tokens_out": 171,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1777",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "src/marshmallow/fields.py",
+        "src/marshmallow/types.py",
+        "src/marshmallow/validate.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields",
+        "utils-registry",
+        "validate"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "validate",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 801,
+      "tokens_out": 187,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1810",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "src/marshmallow/base.py",
+        "src/marshmallow/fields.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 977,
+      "tokens_out": 140,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1896",
+      "changed_paths": [
+        "docs/quickstart.rst",
+        "src/marshmallow/fields.py",
+        "src/marshmallow/schema.py",
+        "src/marshmallow/types.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields",
+        "schema",
+        "utils-registry"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 547,
+      "tokens_out": 165,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1989",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "src/marshmallow/schema.py",
+        "src/marshmallow/utils.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "schema",
+        "utils-registry"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 407,
+      "tokens_out": 545,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-2123",
+      "changed_paths": [
+        "src/marshmallow/fields.py",
+        "src/marshmallow/validate.py"
+      ],
+      "gold_areas": [
+        "fields",
+        "validate"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 431,
+      "tokens_out": 154,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-2150",
+      "changed_paths": [
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 848,
+      "tokens_out": 134,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-2229",
+      "changed_paths": [
+        ".github/dependabot.yml",
+        ".github/workflows/build-release.yml",
+        ".pre-commit-config.yaml",
+        "CHANGELOG.rst",
+        "RELEASING.md",
+        "src/marshmallow/__init__.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "unknown",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 265,
+      "tokens_out": 298,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-2252",
+      "changed_paths": [
+        "examples/flask_example.py",
+        "examples/peewee_example.py"
+      ],
+      "gold_areas": [],
+      "call_outcome": "completed",
+      "predicted_area": "unknown",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "no_gold_area",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 291,
+      "tokens_out": 183,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-2264",
+      "changed_paths": [
+        "src/marshmallow/fields.py",
+        "src/marshmallow/utils.py"
+      ],
+      "gold_areas": [
+        "fields",
+        "utils-registry"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 393,
+      "tokens_out": 140,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-2271",
+      "changed_paths": [
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 602,
+      "tokens_out": 182,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-234",
+      "changed_paths": [
+        "marshmallow/schema.py"
+      ],
+      "gold_areas": [],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "no_gold_area",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 275,
+      "tokens_out": 121,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-262",
+      "changed_paths": [
+        "AUTHORS.rst",
+        "CHANGELOG.rst",
+        "MANIFEST.in",
+        "docs/extending.rst",
+        "marshmallow/__init__.py",
+        "marshmallow/fields.py",
+        "marshmallow/marshalling.py",
+        "marshmallow/schema.py",
+        "marshmallow/validate.py",
+        "tasks.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 489,
+      "tokens_out": 146,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-2708",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/quickstart.rst",
+        "docs/upgrading.rst",
+        "src/marshmallow/fields.py",
+        "src/marshmallow/validate.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "fields",
+        "validate"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "validate",
+      "predicted_kind": "feature",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "hit",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 363,
+      "tokens_out": 199,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-2715",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/extending.rst",
+        "examples/peewee_example.py",
+        "src/marshmallow/decorators.py",
+        "src/marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "hooks",
+        "schema"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "utils-registry",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 260,
+      "tokens_out": 195,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-2800",
+      "changed_paths": [
+        "AUTHORS.rst",
+        "CHANGELOG.rst",
+        "src/marshmallow/validate.py"
+      ],
+      "gold_areas": [
+        "docs-build",
+        "validate"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 560,
+      "tokens_out": 137,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-293",
+      "changed_paths": [
+        "docs/quickstart.rst",
+        "marshmallow/marshalling.py",
+        "marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 411,
+      "tokens_out": 317,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-299",
+      "changed_paths": [
+        "marshmallow/marshalling.py"
+      ],
+      "gold_areas": [],
+      "call_outcome": "completed",
+      "predicted_area": "validate",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "no_gold_area",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 627,
+      "tokens_out": 138,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-691",
+      "changed_paths": [
+        "AUTHORS.rst",
+        "marshmallow/fields.py"
+      ],
+      "gold_areas": [],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "no_gold_area",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 262,
+      "tokens_out": 159,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-700",
+      "changed_paths": [
+        "marshmallow/fields.py"
+      ],
+      "gold_areas": [],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "question",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "no_gold_area",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 499,
+      "tokens_out": 150,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-744",
+      "changed_paths": [
+        "marshmallow/schema.py"
+      ],
+      "gold_areas": [],
+      "call_outcome": "completed",
+      "predicted_area": "hooks",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "no_gold_area",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 370,
+      "tokens_out": 273,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-750",
+      "changed_paths": [
+        "marshmallow/decorators.py",
+        "marshmallow/schema.py"
+      ],
+      "gold_areas": [],
+      "call_outcome": "completed",
+      "predicted_area": "hooks",
+      "predicted_kind": "bug",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "no_gold_area",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 370,
+      "tokens_out": 179,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-756",
+      "changed_paths": [
+        "docs/quickstart.rst",
+        "docs/upgrading.rst",
+        "marshmallow/fields.py",
+        "marshmallow/marshalling.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "feature",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 538,
+      "tokens_out": 367,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-819",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/upgrading.rst",
+        "marshmallow/schema.py",
+        "marshmallow/utils.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 332,
+      "tokens_out": 208,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-821",
+      "changed_paths": [
+        "marshmallow/fields.py"
+      ],
+      "gold_areas": [],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "question",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "no_gold_area",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 402,
+      "tokens_out": 153,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-823",
+      "changed_paths": [
+        "docs/nesting.rst",
+        "docs/upgrading.rst",
+        "marshmallow/fields.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 811,
+      "tokens_out": 165,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-826",
+      "changed_paths": [
+        "AUTHORS.rst",
+        "CHANGELOG.rst",
+        "marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 389,
+      "tokens_out": 148,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-872",
+      "changed_paths": [
+        "marshmallow/marshalling.py",
+        "marshmallow/schema.py"
+      ],
+      "gold_areas": [],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "no_gold_area",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 274,
+      "tokens_out": 228,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-945",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "docs/upgrading.rst",
+        "marshmallow/fields.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "feature",
+      "predicted_priority": "medium",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 410,
+      "tokens_out": 164,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-950",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "marshmallow/schema.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "schema",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 1469,
+      "tokens_out": 140,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-959",
+      "changed_paths": [
+        "CHANGELOG.rst",
+        "marshmallow/marshalling.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "validate",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 307,
+      "tokens_out": 193,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-960",
+      "changed_paths": [
+        "marshmallow/fields.py"
+      ],
+      "gold_areas": [],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "no_gold_area",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 558,
+      "tokens_out": 165,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-968",
+      "changed_paths": [
+        "AUTHORS.rst",
+        "CHANGELOG.rst",
+        "marshmallow/utils.py"
+      ],
+      "gold_areas": [
+        "docs-build"
+      ],
+      "call_outcome": "completed",
+      "predicted_area": "fields",
+      "predicted_kind": "bug",
+      "predicted_priority": "high",
+      "parse_failure": false,
+      "verdict": "miss",
+      "model": "openai/gpt-oss-20b",
+      "tokens_in": 506,
+      "tokens_out": 146,
+      "retry_count": 0,
+      "error_code": null,
+      "http_status": 200
+    }
+  ]
+}
