@@ -123,6 +123,7 @@ class CycleSummary(Contract):
     finished: int = Field(default=0, ge=0)
     failed: int = Field(default=0, ge=0)
     comments_posted: int = Field(default=0, ge=0)
+    approvals_delivered: int = Field(default=0, ge=0)
     aborted_reason: str | None = None
 
 

@@ -81,7 +81,11 @@ def build_runtime(
         sleep=sleep,
         token_source=token_source,
     )
-    workflow = WorkflowClient(base_url=settings.workflow_url, http=workflow_http)
+    workflow = WorkflowClient(
+        base_url=settings.workflow_url,
+        http=workflow_http,
+        version=settings.workflow_version,
+    )
     poller = Poller(
         settings=settings,
         github=github,

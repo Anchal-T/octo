@@ -4,12 +4,13 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from agentteam_common.ids import workflow_key
-from agentteam_contracts import IssueRunResult
+from agentteam_contracts import ApprovalRequest, IssueRunResult, IssueRunResultV2
 
 from .client import GithubClient, GithubFailure
 from .rules import (
     admit,
     decide,
+    evaluate_pr_reviews,
     fingerprint,
     issue_key,
     parse_marker,
@@ -25,7 +26,7 @@ from .settings import (
     GITHUB_POLL_OVERLAP_S,
     GithubSettings,
 )
-from .store import CommentKind, IssueRow, Store
+from .store import CommentKind, IssueRow, PullRequestRow, Store
 from .workflow_client import RunState, WorkflowClient, WorkflowUnavailable
 
 logger = logging.getLogger(__name__)
@@ -236,6 +237,7 @@ class Poller:
         result_details: dict[str, dict[str, str]] = {}
         await self._process_submitted(summary, result_details)
         await self._admit_pending(current, summary)
+        await self._process_pull_requests(summary)
         await self._post_due_comments(current, summary, result_details)
 
         if not discovery.truncated and discovery.max_updated_at is not None:
@@ -354,11 +356,11 @@ class Poller:
     ) -> None:
         now = self._now()
         for row in self.store.submitted_issues():
-            result: IssueRunResult | None = None
+            result: IssueRunResult | IssueRunResultV2 | None = None
             status: RunState | None = None
             try:
                 status = await self.workflow.status(row.issue_key, attempt=row.attempt)
-                if isinstance(status, IssueRunResult):
+                if isinstance(status, (IssueRunResult, IssueRunResultV2)):
                     result = status
             except WorkflowUnavailable:
                 pass
@@ -662,8 +664,127 @@ class Poller:
             )
         )
 
-    def _result_detail(self, result: IssueRunResult, at: str) -> dict[str, str]:
+    async def _process_pull_requests(self, summary: CycleSummary) -> None:
+        for stored in self.store.list_open_pull_requests():
+            try:
+                pr = await self.github.get_pull_request(stored.pr_number)
+            except GithubFailure as error:
+                self._record_auth_failure(error)
+                if self._should_abort(error):
+                    raise
+                continue
+            self.auth_state = "ok"
+            self._check_rate_limit()
+
+            state = "merged" if pr.merged else pr.state
+            row = stored
+            if (
+                row.head_sha != pr.head_sha
+                or row.state != state
+                or row.html_url != pr.html_url
+            ):
+                row = replace(
+                    row,
+                    head_sha=pr.head_sha,
+                    html_url=pr.html_url,
+                    state=state,
+                    updated_at=self._iso(self._now()),
+                )
+                self.store.upsert_pull_request(row)
+
+            if pr.state == "open" and row.review_requested_sha != pr.head_sha:
+                try:
+                    if self.approvers:
+                        await self.github.request_reviewers(pr.number, self.approvers)
+                    await self.github.create_commit_status(
+                        pr.head_sha,
+                        state="pending",
+                        description="Waiting for approval on the current PR head.",
+                    )
+                except GithubFailure as error:
+                    self._record_auth_failure(error)
+                    if self._should_abort(error):
+                        raise
+                    continue
+                self.auth_state = "ok"
+                self._check_rate_limit()
+                row = replace(
+                    row,
+                    review_requested_sha=pr.head_sha if self.approvers else None,
+                    updated_at=self._iso(self._now()),
+                )
+                self.store.upsert_pull_request(row)
+
+            if row.decision == "pending":
+                try:
+                    reviews = (
+                        await self.github.list_reviews(pr.number)
+                        if pr.state == "open"
+                        else []
+                    )
+                except GithubFailure as error:
+                    self._record_auth_failure(error)
+                    if self._should_abort(error):
+                        raise
+                    continue
+                self.auth_state = "ok"
+                self._check_rate_limit()
+                decision = evaluate_pr_reviews(
+                    pr,
+                    reviews,
+                    approvers=self.approvers,
+                    self_login=self.self_login,
+                )
+                if decision.decision == "pending":
+                    continue
+                now = self._iso(self._now())
+                row = replace(
+                    row,
+                    decision=decision.decision,
+                    decided_by=decision.by or "github",
+                    decision_reason=decision.reason,
+                    decided_review_id=decision.review_id,
+                    decided_head_sha=decision.head_sha or pr.head_sha,
+                    decided_at=now,
+                    updated_at=now,
+                )
+                self.store.upsert_pull_request(row)
+
+            if row.delivered_at is None:
+                await self._deliver_pr_decision(row, summary)
+
+    async def _deliver_pr_decision(
+        self, row: PullRequestRow, summary: CycleSummary
+    ) -> None:
+        outcome = await self.workflow.approve(
+            ApprovalRequest(
+                issue_id=row.issue_key,
+                attempt=row.attempt,
+                approved=row.decision == "approved",
+                by=row.decided_by or "github",
+                reason=row.decision_reason,
+                head_sha=row.decided_head_sha or row.head_sha,
+                review_id=row.decided_review_id,
+                source="github_review",
+            )
+        )
+        if outcome in {"recorded", "already_decided"}:
+            now = self._iso(self._now())
+            self.store.upsert_pull_request(
+                replace(row, delivered_at=now, updated_at=now)
+            )
+            if outcome == "recorded":
+                summary.approvals_delivered += 1
+
+    def _result_detail(
+        self, result: IssueRunResult | IssueRunResultV2, at: str
+    ) -> dict[str, str]:
         detail = {"at": at, "status": result.status}
+        if isinstance(result, IssueRunResultV2):
+            if result.pr_number is not None:
+                detail["pr_number"] = str(result.pr_number)
+            if result.failure_reason is not None:
+                detail["failure_reason"] = result.failure_reason
         if result.retry_at is not None:
             detail["retry_at"] = self._iso(result.retry_at).replace("+00:00", "Z")
         if result.retry_in is not None:
@@ -692,7 +813,7 @@ class Poller:
             status = await self.workflow.status(row.issue_key, attempt=row.attempt)
         except WorkflowUnavailable:
             return None
-        if isinstance(status, IssueRunResult):
+        if isinstance(status, (IssueRunResult, IssueRunResultV2)):
             return self._result_detail(status, detail["at"])
         return {
             "at": detail["at"],

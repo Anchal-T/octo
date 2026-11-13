@@ -430,7 +430,8 @@ class Store:
     def list_open_pull_requests(self) -> list[PullRequestRow]:
         with self.connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM pull_request WHERE state = 'open' ORDER BY pr_number"
+                "SELECT * FROM pull_request WHERE delivered_at IS NULL "
+                "OR (state = 'open' AND decision = 'pending') ORDER BY pr_number"
             ).fetchall()
         return [self._pr_row(row) for row in rows]
 

@@ -3,13 +3,13 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from agentteam_contracts import EvidenceCommentRequest, IssueRunRequest
 
-from .schemas import GithubIssue
+from .schemas import GithubIssue, GithubPullRequest, GithubReview
 from .settings import GITHUB_LABEL
-from .store import CommentKind, IssueRow, IssueState
+from .store import CommentKind, IssueRow, IssueState, PrDecision
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,15 @@ class AdmissionPlan:
     starts: tuple[IssueRow, ...]
     deferred_cycle: tuple[IssueRow, ...]
     deferred_day: tuple[IssueRow, ...]
+
+
+@dataclass(frozen=True)
+class PrReviewEvaluation:
+    decision: PrDecision
+    by: str | None = None
+    reason: str | None = None
+    review_id: int | None = None
+    head_sha: str | None = None
 
 
 _MARKER_RE = re.compile(
@@ -110,6 +119,64 @@ def admit(
         deferred_cycle=tuple(deferred_cycle),
         deferred_day=tuple(deferred_day),
     )
+
+
+def evaluate_pr_reviews(
+    pr: GithubPullRequest,
+    reviews: Sequence[GithubReview],
+    *,
+    approvers: Sequence[str],
+    self_login: str,
+) -> PrReviewEvaluation:
+    if pr.merged:
+        return PrReviewEvaluation("approved", by="github", head_sha=pr.head_sha)
+    if pr.state == "closed":
+        return PrReviewEvaluation("rejected", reason="pr_closed", head_sha=pr.head_sha)
+
+    allowed = {login.casefold() for login in approvers}
+    allowed.discard(self_login.casefold())
+    latest: dict[str, GithubReview] = {}
+    ordered = sorted(
+        reviews,
+        key=lambda review: (
+            review.submitted_at or datetime.min.replace(tzinfo=UTC),
+            review.id,
+        ),
+    )
+    for review in ordered:
+        login = review.author_login.casefold()
+        if (
+            login not in allowed
+            or login == pr.author_login.casefold()
+            or review.commit_id != pr.head_sha
+            or review.state not in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
+        ):
+            continue
+        latest[login] = review
+
+    changes_requested = [
+        review for review in latest.values() if review.state == "CHANGES_REQUESTED"
+    ]
+    if changes_requested:
+        review = max(changes_requested, key=lambda item: item.id)
+        return PrReviewEvaluation(
+            "rejected",
+            by=review.author_login,
+            reason=review.body,
+            review_id=review.id,
+            head_sha=pr.head_sha,
+        )
+
+    approvals = [review for review in latest.values() if review.state == "APPROVED"]
+    if approvals:
+        review = max(approvals, key=lambda item: item.id)
+        return PrReviewEvaluation(
+            "approved",
+            by=review.author_login,
+            review_id=review.id,
+            head_sha=pr.head_sha,
+        )
+    return PrReviewEvaluation("pending", head_sha=pr.head_sha)
 
 
 def to_run_request(
@@ -220,6 +287,25 @@ def render_comment(
             message = (
                 f"Agent Team could not complete triage for this issue (run `{key}`) "
                 f"because the model was throttled. Try again {retry}."
+            )
+        elif status == "approved":
+            pr_num = detail.get("pr_number", "")
+            pr_part = f"PR #{pr_num} was " if pr_num else "the draft PR was "
+            message = (
+                f"Agent Team completed run `{key}`: {pr_part}approved and is ready "
+                "for manual merge."
+            )
+        elif status == "rejected":
+            pr_num = detail.get("pr_number", "")
+            pr_part = f"PR #{pr_num} was " if pr_num else "the draft PR was "
+            message = f"Agent Team closed run `{key}`: {pr_part}not approved."
+        elif status == "failed":
+            reason_code = sanitize_inline(
+                detail.get("failure_reason", "pipeline_failed"), max_chars=120
+            )
+            message = (
+                f"Agent Team could not complete a verified fix for this issue "
+                f"(run `{key}`, reason: `{reason_code}`)."
             )
         else:
             message = _committed_result_message(key, detail)

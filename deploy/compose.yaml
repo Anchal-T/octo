@@ -77,6 +77,11 @@ services:
       dockerfile: services/github/Dockerfile
     environment:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      GITHUB_APPROVERS: ${GITHUB_APPROVERS:-}
+      GITHUB_WORKFLOW_VERSION: ${GITHUB_WORKFLOW_VERSION:-v2}
       GITHUB_REPO: ${GITHUB_REPO:-}
       WORKFLOW_URL: http://workflow:8002
       GITHUB_SQLITE_PATH: /var/lib/agent-team/github/github.sqlite
