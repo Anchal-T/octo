@@ -440,7 +440,11 @@ def reproducer_base_messages(
         else ""
     )
 
-    fact_section = f"{fact_block}\n\n" if fact_block else ""
+    fact_section = (
+        f"{fact_block}\nIf you relied on a fact, cite it as [fact-<12 hex>].\n\n"
+        if fact_block
+        else ""
+    )
 
     def messages_for(files: str) -> list[dict[str, str]]:
         tracked_files_line = (
@@ -499,7 +503,11 @@ def fixer_base_messages(
         if review_notes
         else ""
     )
-    fact_section = f"\n\n{fact_block}" if fact_block else ""
+    fact_section = (
+        f"\n\n{fact_block}\nIf you relied on a fact, cite it as [fact-<12 hex>]."
+        if fact_block
+        else ""
+    )
     user = (
         f"Repository: {repo}\n"
         f"{triage_line}"

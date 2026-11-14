@@ -349,3 +349,25 @@ def test_fact_insert_conflict_rolls_back_proposal_and_round_updates():
     proposal_row = store.get_proposal(proposal["_id"])
     assert round_row is not None and round_row["status"] == "syncing"
     assert proposal_row is not None and proposal_row["status"] == "pending"
+
+
+def test_run_fact_ids_survive_xtdb_roundtrip():
+    store = MemoryStore()
+    round_id = _new_round(store, "a" * 40)  # synthetic base
+    request = RunWrite(
+        idempotency_key=str(uuid4()),
+        agent_id="reproducer-test",
+        role="reproducer",
+        round_id=round_id,
+        workflow_id="example-workflow",
+        step="repro",
+        outcome="reproduced",
+        started_at=COMMIT_TIME,
+        fact_ids_injected=["fact-111111111111", "fact-222222222222"],
+        fact_ids_cited=["fact-222222222222"],
+    )
+    row = store.create_run(request)
+    assert store.create_run(request)["_id"] == row["_id"]
+    saved = store.get_run(row["_id"])
+    assert saved["fact_ids_injected"] == request.fact_ids_injected
+    assert saved["fact_ids_cited"] == request.fact_ids_cited

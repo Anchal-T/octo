@@ -136,3 +136,23 @@ def test_2_7_expired_fact_excluded_by_decay_produces_no_event():
     res = render_fact_block([aged_fact], NOW)
     assert res.injected_ids == []
     assert res.text == ""
+
+
+def test_citations_filter_unknown_ids_and_collapse_duplicates_in_order(caplog):
+    from services.workflow.app.fact_block import parse_citations
+
+    injected = ["fact-111111111111", "fact-222222222222"]
+    text = "[fact-222222222222] [fact-aaaaaaaaaaaa] [fact-111111111111] [fact-222222222222]"
+    assert parse_citations(text, injected) == ["fact-222222222222", "fact-111111111111"]
+    assert "fact_cite_unknown" in caplog.text
+    assert "fact-aaaaaaaaaaaa" in caplog.text
+    assert (
+        parse_citations("[fact-123] [fact-ABCDEF123456] [fact-1111111111111]", injected)
+        == []
+    )
+
+
+def test_citations_with_no_injected_facts_return_empty():
+    from services.workflow.app.fact_block import parse_citations
+
+    assert parse_citations("[fact-111111111111]", []) == []

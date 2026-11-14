@@ -98,6 +98,8 @@ class RunWrite(Contract):
     tokens_out: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0, ge=0)
     outcome: str
+    fact_ids_injected: list[str] = Field(default_factory=list)
+    fact_ids_cited: list[str] = Field(default_factory=list)
     event_ids: list[str] = Field(default_factory=list)
     started_at: datetime
     ended_at: datetime | None = None
@@ -116,6 +118,8 @@ class RunRecord(Contract):
     tokens_out: int
     cost_usd: float
     outcome: str
+    fact_ids_injected: list[str] = Field(default_factory=list)
+    fact_ids_cited: list[str] = Field(default_factory=list)
     event_ids: list[str]
     started_at: datetime
     ended_at: datetime | None

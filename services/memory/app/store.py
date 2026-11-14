@@ -487,6 +487,8 @@ class MemoryStore:
             "cost_usd": request.cost_usd,
             "outcome": request.outcome,
             "event_ids": Jsonb(request.event_ids),
+            "fact_ids_injected": Jsonb(request.fact_ids_injected),
+            "fact_ids_cited": Jsonb(request.fact_ids_cited),
             "started_at": request.started_at,
             "ended_at": request.ended_at,
         }

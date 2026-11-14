@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -34,7 +35,7 @@ from agentteam_contracts import (
     SyncDecisionItem,
 )
 
-from .fact_block import effective_confidence, render_fact_block
+from .fact_block import effective_confidence, parse_citations, render_fact_block
 from .fact_symbols import symbol_candidates
 from .models import Ledger, ModelClient, Store
 from .models.pools import pin_for
@@ -210,6 +211,8 @@ def _key_prefix_v2(issue_id: str, attempt: int) -> str:
 class RestateStepJournal:
     def __init__(self, ctx: restate.WorkflowContext) -> None:
         self.ctx = ctx
+        self.injected_ids: dict[str, list[str]] = {}
+        self.cited_ids: dict[str, list[str]] = {}
 
     async def call_model(
         self, name: str, request: ModelCallRequest
@@ -223,6 +226,23 @@ class RestateStepJournal:
                 request=request,
             )
             if outcome.outcome == "completed":
+                # Parse the raw text and tool arguments before submit parsing trims
+                # summaries. Replay rebuilds this aggregate from journaled outputs.
+                text = (
+                    (outcome.text or "")
+                    + "\n"
+                    + "\n".join(
+                        json.dumps(
+                            call.get("function", {}).get("arguments", ""),
+                            ensure_ascii=False,
+                        )
+                        for call in outcome.tool_calls
+                        if isinstance(call.get("function"), dict)
+                    )
+                )
+                cited = parse_citations(text, self.injected_ids.get(request.run_id, []))
+                previous = self.cited_ids.setdefault(request.run_id, [])
+                previous.extend(fact_id for fact_id in cited if fact_id not in previous)
                 return outcome, provider
             if outcome.outcome in ("failed", "ledger_unavailable"):
                 raise restate.TerminalError(
@@ -591,6 +611,7 @@ async def run_issue_v2(
         text=request.title + "\n" + request.body,
         now=datetime.fromisoformat(repro_basis_iso),
     )
+    journal.injected_ids[repro_run_id] = repro_facts["injected_ids"]
     repro = await run_reproducer_step(
         journal=journal,
         sessions=sessions,
@@ -652,6 +673,8 @@ async def run_issue_v2(
             tokens_in=repro.tokens_in,
             tokens_out=repro.tokens_out,
             outcome="reproduced",
+            fact_ids_injected=repro_facts["injected_ids"],
+            fact_ids_cited=journal.cited_ids.get(repro_run_id, []),
             event_ids=[*repro.event_ids, *repro_facts["event_ids"]],
             started_at=repro.started_at or read_basis,
             ended_at=repro.ended_at or read_basis,
@@ -771,6 +794,7 @@ async def run_issue_v2(
             now=datetime.fromisoformat(fix_basis_iso),
             diff=repro.patch,
         )
+        journal.injected_ids[fix_run_id] = fix_facts["injected_ids"]
         fix = await run_fixer_step(
             journal=journal,
             sessions=sessions,
@@ -843,6 +867,8 @@ async def run_issue_v2(
                 tokens_in=fix.tokens_in,
                 tokens_out=fix.tokens_out,
                 outcome="patched",
+                fact_ids_injected=fix_facts["injected_ids"],
+                fact_ids_cited=journal.cited_ids.get(fix_run_id, []),
                 event_ids=[*fix.event_ids, *fix_facts["event_ids"]],
                 started_at=fix.started_at or read_basis,
                 ended_at=fix.ended_at or read_basis,

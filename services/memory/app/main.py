@@ -102,6 +102,8 @@ def _run(row: dict[str, Any]) -> RunRecord:
         cost_usd=row["cost_usd"],
         outcome=row["outcome"],
         event_ids=list(row.get("event_ids") or []),
+        fact_ids_injected=list(row.get("fact_ids_injected") or []),
+        fact_ids_cited=list(row.get("fact_ids_cited") or []),
         started_at=row["started_at"],
         ended_at=row.get("ended_at"),
     )

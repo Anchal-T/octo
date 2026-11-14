@@ -174,6 +174,8 @@ async def test_run_read_returns_the_stored_record(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "id": "run-example",
+        "fact_ids_injected": [],
+        "fact_ids_cited": [],
         **{k: v for k, v in row.items() if k != "_id"},
     }
 
@@ -351,3 +353,36 @@ async def test_resolve_symbols_uses_base_index_and_innermost_location(monkeypatc
     assert response.json() == {"symbols": [symbol]}
     assert hostile.status_code == 422
     assert calls == [base]
+
+
+@pytest.mark.anyio
+async def test_run_write_and_read_expose_injected_and_cited_fact_ids(monkeypatch):
+    rows = {}
+
+    def create(request):
+        rows["run-example"] = {"_id": "run-example", **request.model_dump()}
+        return rows["run-example"]
+
+    monkeypatch.setattr(store, "create_run", create)
+    monkeypatch.setattr(store, "get_run", rows.get)
+    payload = {
+        "idempotency_key": "example-run",
+        "agent_id": "reproducer",
+        "role": "reproducer",
+        "round_id": "round-example",
+        "workflow_id": "example-workflow",
+        "step": "repro",
+        "outcome": "reproduced",
+        "started_at": "2026-11-15T00:00:00Z",
+        "fact_ids_injected": ["fact-111111111111", "fact-222222222222"],
+        "fact_ids_cited": ["fact-222222222222"],
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        written = await client.post("/v1/runs", json=payload)
+        read = await client.get("/v1/runs/run-example")
+    assert written.status_code == 201
+    assert read.status_code == 200
+    assert read.json()["fact_ids_injected"] == payload["fact_ids_injected"]
+    assert read.json()["fact_ids_cited"] == payload["fact_ids_cited"]

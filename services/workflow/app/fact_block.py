@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -83,3 +85,17 @@ def render_fact_block(
 
     text = "\n\n".join(parts)
     return RenderedFacts(text=text, injected_ids=injected_ids)
+
+
+_CITATION = re.compile(r"\[(fact-[0-9a-f]{12})\]")
+
+
+def parse_citations(text: str, injected_ids: list[str]) -> list[str]:
+    allowed = set(injected_ids)
+    cited = []
+    for fact_id in dict.fromkeys(_CITATION.findall(text)):
+        if fact_id in allowed:
+            cited.append(fact_id)
+        else:
+            logging.getLogger(__name__).warning("fact_cite_unknown fact_id=%s", fact_id)
+    return cited

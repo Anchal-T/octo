@@ -715,7 +715,25 @@ async def test_fact_read_path_continues_on_outage_and_replays_without_queries(
         return await backend.post_memory(path, payload)
 
     async def repro(**kwargs):
+        from agentteam_contracts import ModelCallRequest
+
         role_blocks.append(kwargs["fact_block"])
+        await kwargs["journal"].call_model(
+            "example-repro-model",
+            ModelCallRequest(
+                run_id=kwargs["run_id"],
+                step="repro:0",
+                role="reproducer",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": kwargs["fact_block"] or "Example no facts",
+                    }
+                ],
+                taint=2,
+                source="github_issue",
+            ),
+        )
         event_id = await kwargs["journal"].record_event(
             "example-repro-test",
             EventWrite(
@@ -745,6 +763,9 @@ async def test_fact_read_path_continues_on_outage_and_replays_without_queries(
 
     model, _ = _scripted_model(
         {
+            "reproducer": [
+                "Example cause [fact-123456789abc] [fact-aaaaaaaaaaaa] [fact-123456789abc]"
+            ],
             "triager": [
                 json.dumps(
                     {
@@ -754,7 +775,7 @@ async def test_fact_read_path_continues_on_outage_and_replays_without_queries(
                         "summary": "Example summary",
                     }
                 )
-            ]
+            ],
         }
     )
     monkeypatch.setattr(v2_mod, "post_memory", memory)
@@ -806,6 +827,11 @@ async def test_fact_read_path_continues_on_outage_and_replays_without_queries(
             "file": "tests/test_example.py",
             "line": 1,
         }
+    repro_run = next(
+        run for run in backend.runs.values() if run["role"] == "reproducer"
+    )
+    assert repro_run["fact_ids_injected"] == ([] if query_fails else [good_id])
+    assert repro_run["fact_ids_cited"] == ([] if query_fails else [good_id])
     fact_proposals = [
         prop
         for props in backend.proposals.values()
@@ -853,3 +879,60 @@ async def test_fact_read_path_continues_on_outage_and_replays_without_queries(
     assert await v2_mod.run_issue_v2(ctx, request) == first
     assert (len(queries), len(resolutions), len(backend.events)) == calls_before_replay
     assert not backend.prs_opened
+
+
+@pytest.mark.anyio
+async def test_citations_include_native_tool_arguments_and_replay_in_order(
+    monkeypatch, caplog
+):
+    from agentteam_contracts import ModelCallRequest
+
+    first, second, unknown = (
+        "fact-111111111111",
+        "fact-222222222222",
+        "fact-aaaaaaaaaaaa",
+    )
+    calls = []
+
+    def model(request):
+        calls.append(request.step)
+        return ModelOutcome(
+            outcome="completed",
+            request_id="example-" + request.step,
+            decided_at=NOW,
+            model_pinned="qwen/qwen3.8-27b",
+            run_id=request.run_id,
+            step=request.step,
+            text=f"Example relying on [{second}]",
+            tool_calls=[
+                {
+                    "id": "example-call",
+                    "type": "function",
+                    "function": {
+                        "name": "submit",
+                        "arguments": json.dumps(
+                            {"summary": f"[{first}] [{second}] [{unknown}]"}
+                        ),
+                    },
+                }
+            ],
+        )
+
+    monkeypatch.setattr(v2_mod, "call_model", model)
+    ctx = FakeWorkflowCtx("example-workflow")
+    for _ in range(2):
+        journal = v2_mod.RestateStepJournal(ctx)
+        journal.injected_ids["example-run"] = [first, second]
+        for turn in range(2):
+            req = ModelCallRequest(
+                run_id="example-run",
+                step=f"fix:{turn}",
+                role="fixer",
+                messages=[{"role": "user", "content": "Example prompt"}],
+                taint=2,
+                source="github_issue",
+            )
+            await journal.call_model(f"example-model:{turn}", req)
+        assert journal.cited_ids["example-run"] == [second, first]
+    assert calls == ["fix:0", "fix:1"]
+    assert "fact_cite_unknown" in caplog.text
