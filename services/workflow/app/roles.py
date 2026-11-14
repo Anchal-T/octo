@@ -28,12 +28,48 @@ from .sandbox import (
 )
 from .triage import _escape_invalid_backslashes
 
-_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*(.*?)\s*```$", re.DOTALL)
-_TOOL_WRAPPER_START_RE = re.compile(r"^\s*<(?:tool_call|function=[^>]+)>\s*")
-_TOOL_WRAPPER_END_RE = re.compile(r"\s*</(?:tool_call|function)>\s*$")
 _PARAMETER_RE = re.compile(
     r"<parameter=([A-Za-z_][A-Za-z0-9_]*)>(.*?)</parameter>", re.DOTALL
 )
+
+
+def _action_tools(submit_properties: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
+    bash = {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a shell command in the repository sandbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    }
+    submit = {
+        "type": "function",
+        "function": {
+            "name": "submit",
+            "description": "Submit the completed reproduction or fix.",
+            "parameters": {
+                "type": "object",
+                "properties": submit_properties,
+                "required": list(submit_properties),
+                "additionalProperties": False,
+            },
+        },
+    }
+    return [bash, submit]
+
+
+REPRODUCER_TOOLS = _action_tools(
+    {
+        "test_node_id": {"type": "string"},
+        "summary": {"type": "string"},
+    }
+)
+FIXER_TOOLS = _action_tools({"summary": {"type": "string"}})
 
 REPRODUCER_SYSTEM_PROMPT = (
     "You are the Reproducer agent for this repository. "
@@ -42,11 +78,8 @@ REPRODUCER_SYSTEM_PROMPT = (
     "and add or update a minimal pytest test that FAILS on the current code to "
     "reproduce the reported bug. You may ONLY create or edit test files "
     "(under tests/ or test_*.py); any changes to non-test source files are "
-    "automatically reverted. Reply with ONE JSON object and no other text:\n"
-    '- To run a shell command: {"action": "bash", "command": "..."}\n'
-    "- Once a pytest node fails to reproduce the bug: "
-    '{"action": "submit", "test_node_id": "tests/test_x.py::test_name", '
-    '"summary": "one sentence describing the reproduced failure"}'
+    "automatically reverted. Use the bash tool to inspect or edit tests. "
+    "Use submit with test_node_id and summary only after the test fails as expected."
 )
 
 FIXER_SYSTEM_PROMPT = (
@@ -56,10 +89,8 @@ FIXER_SYSTEM_PROMPT = (
     "applied in /workspace. Your job is to make minimal changes to non-test "
     "source files so the reproduction test and the existing test suite pass. "
     "Test files are protected; any edits to test files are automatically reverted. "
-    "Reply with ONE JSON object and no other text:\n"
-    '- To run a shell command: {"action": "bash", "command": "..."}\n'
-    "- Once your source fix makes the tests pass: "
-    '{"action": "submit", "summary": "one sentence describing the fix"}'
+    "Use the bash tool to inspect or edit source. Use submit with a summary "
+    "only once your source fix makes the tests pass."
 )
 
 TESTER_SYSTEM_PROMPT = (
@@ -252,73 +283,115 @@ def quote_untrusted_issue(title: str, body: str, *, max_body_chars: int = 2400) 
     return f"Reported by users, not verified (taint 2):\n{quoted}"
 
 
-def estimate_messages_tokens(messages: Sequence[dict[str, str]]) -> int:
-    encoded = json.dumps(list(messages), sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
+def estimate_messages_tokens(
+    messages: Sequence[dict[str, Any]],
+    *,
+    tools: Sequence[dict[str, Any]] | None = None,
+    tool_choice: str | None = None,
+) -> int:
+    payload: dict[str, Any] = {"messages": list(messages)}
+    if tools is not None:
+        payload["tools"] = list(tools)
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
     return math.ceil(len(encoded) / 4)
 
 
 def fit_messages_to_cap(
-    base_messages: Sequence[dict[str, str]],
-    turns: Sequence[tuple[str, str]],
+    base_messages: Sequence[dict[str, Any]],
+    turns: Sequence[tuple[dict[str, Any], dict[str, Any]]],
     *,
     prompt_token_cap: int,
-) -> list[dict[str, str]]:
+    tools: Sequence[dict[str, Any]] | None = None,
+    tool_choice: str | None = None,
+) -> list[dict[str, Any]]:
     base = [dict(item) for item in base_messages]
     if not turns:
-        return _shrink_base_if_needed(base, prompt_token_cap)
+        return _shrink_base_if_needed(
+            base, prompt_token_cap, tools=tools, tool_choice=tool_choice
+        )
 
     for keep_recent in range(len(turns), 0, -1):
         older = turns[: len(turns) - keep_recent]
         recent = turns[len(turns) - keep_recent :]
         candidate = list(base)
         if older:
-            summary_lines = [
-                f"- Turn {idx}: {trim_output(obs.splitlines()[0] if obs else 'done', 100)}"
-                for idx, (_, obs) in enumerate(older)
-            ]
+            summary_lines = []
+            for idx, (_, result) in enumerate(older):
+                observation = result.get("content")
+                first_line = observation.splitlines()[0] if observation else "done"
+                summary_lines.append(f"- Turn {idx}: {trim_output(first_line, 100)}")
             candidate.append(
                 {
                     "role": "user",
                     "content": "Earlier turns summary:\n" + "\n".join(summary_lines),
                 }
             )
-        for assistant_reply, observation in recent:
-            candidate.append(
-                {"role": "assistant", "content": trim_output(assistant_reply, 600)}
-            )
-            candidate.append(
-                {
-                    "role": "user",
-                    "content": f"Observation:\n{trim_output(observation, 1400)}",
-                }
-            )
-        if estimate_messages_tokens(candidate) <= prompt_token_cap:
+        for assistant_message, result_message in recent:
+            candidate.append(_trim_message(assistant_message, 600))
+            candidate.append(_trim_message(result_message, 1400))
+        if (
+            estimate_messages_tokens(candidate, tools=tools, tool_choice=tool_choice)
+            <= prompt_token_cap
+        ):
             return candidate
 
-    # Tight cap fallback: keep base + compressed latest observation only.
-    last_reply, last_obs = turns[-1]
-    for obs_budget in (800, 400, 160, 60):
+    last_assistant, last_result = turns[-1]
+    for result_budget in (800, 400, 160, 60):
         compact = [
-            *_shrink_base_if_needed(base, max(200, prompt_token_cap - 250)),
-            {"role": "assistant", "content": trim_output(last_reply, 200)},
-            {
-                "role": "user",
-                "content": f"Observation:\n{trim_output(last_obs, obs_budget)}",
-            },
+            *_shrink_base_if_needed(
+                base,
+                max(200, prompt_token_cap - 250),
+                tools=tools,
+                tool_choice=tool_choice,
+            ),
+            _trim_message(last_assistant, 200),
+            _trim_message(last_result, result_budget),
         ]
-        if estimate_messages_tokens(compact) <= prompt_token_cap:
+        if (
+            estimate_messages_tokens(compact, tools=tools, tool_choice=tool_choice)
+            <= prompt_token_cap
+        ):
             return compact
-    return _shrink_base_if_needed(base, prompt_token_cap)
+    return _shrink_base_if_needed(
+        base, prompt_token_cap, tools=tools, tool_choice=tool_choice
+    )
+
+
+def _trim_message(message: dict[str, Any], char_limit: int) -> dict[str, Any]:
+    trimmed = dict(message)
+    if isinstance(trimmed.get("content"), str):
+        trimmed["content"] = trim_output(trimmed["content"], char_limit)
+    return trimmed
 
 
 def _shrink_base_if_needed(
-    base: list[dict[str, str]], prompt_token_cap: int
-) -> list[dict[str, str]]:
-    if estimate_messages_tokens(base) <= prompt_token_cap or len(base) < 2:
+    base: list[dict[str, Any]],
+    prompt_token_cap: int,
+    *,
+    tools: Sequence[dict[str, Any]] | None = None,
+    tool_choice: str | None = None,
+) -> list[dict[str, Any]]:
+    if (
+        estimate_messages_tokens(base, tools=tools, tool_choice=tool_choice)
+        <= prompt_token_cap
+        or len(base) < 2
+    ):
         return base
-    char_budget = max(120, (prompt_token_cap * 4) - len(base[0]["content"]) - 200)
+    overhead = len(
+        json.dumps(
+            {"tools": tools, "tool_choice": tool_choice},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    )
+    char_budget = max(
+        120, (prompt_token_cap * 4) - len(base[0]["content"]) - overhead - 200
+    )
     return [
         base[0],
         {
@@ -365,7 +438,12 @@ def reproducer_base_messages(
         if not path.strip():
             continue
         candidate = messages_for("\n".join([*selected_files, path]))
-        if estimate_messages_tokens(candidate) > prompt_token_cap:
+        if (
+            estimate_messages_tokens(
+                candidate, tools=REPRODUCER_TOOLS, tool_choice="required"
+            )
+            > prompt_token_cap
+        ):
             break
         selected_files.append(path)
     if selected_files:
@@ -437,37 +515,71 @@ def tester_messages(
     return _shrink_base_if_needed(msgs, prompt_token_cap)
 
 
+def _first_balanced_json_object(text: str) -> str | None:
+    for start, char in enumerate(text):
+        if char != "{":
+            continue
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ord(char) == 92:
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+    return None
+
+
 def _decode_json_object(text: str | None) -> dict[str, Any] | None:
-    if not text:
+    if not text or not text.strip():
         return None
     candidate = text.strip()
-    fenced = _FENCE_RE.match(candidate)
-    if fenced:
-        candidate = fenced.group(1)
-    while match := _TOOL_WRAPPER_START_RE.match(candidate):
-        candidate = candidate[match.end() :]
-    while match := _TOOL_WRAPPER_END_RE.search(candidate):
-        candidate = candidate[: match.start()]
-    candidate = candidate.strip()
+    if "<tool_call>" in candidate:
+        start = candidate.find("<tool_call>") + len("<tool_call>")
+        end = candidate.find("</tool_call>", start)
+        if end < 0:
+            return None
+        candidate = candidate[start:end]
 
-    start = candidate.find("{")
-    if start != -1:
-        decoder = json.JSONDecoder()
+    function_name = None
+    function = re.search(r"<function=([^>]+)>(.*?)</function>", candidate, re.DOTALL)
+    if "<function=" in candidate and function is None:
+        return None
+    if function is not None:
+        function_name = function.group(1).strip().lower()
+        candidate = function.group(2)
+
+    object_text = _first_balanced_json_object(candidate)
+    if object_text is not None:
         try:
-            data, _ = decoder.raw_decode(candidate, start)
+            data = json.loads(object_text)
         except (RecursionError, ValueError):
-            repaired = _escape_invalid_backslashes(candidate[start:])
             try:
-                data, _ = decoder.raw_decode(repaired)
+                data = json.loads(_escape_invalid_backslashes(object_text))
             except (RecursionError, ValueError):
-                data = None
+                return None
         if isinstance(data, dict):
+            if function_name in {"bash", "submit"} and "action" not in data:
+                data["action"] = function_name
             return data
+        return None
 
     matches = list(_PARAMETER_RE.finditer(candidate))
     if not matches or candidate[: matches[0].start()].strip():
         return None
-    data = {}
+    data: dict[str, Any] = {}
     cursor = 0
     for match in matches:
         if candidate[cursor : match.start()].strip():
@@ -477,11 +589,80 @@ def _decode_json_object(text: str | None) -> dict[str, Any] | None:
             return None
         data[name] = value.strip()
         cursor = match.end()
-    return data if not candidate[cursor:].strip() else None
+    if candidate[cursor:].strip():
+        return None
+    if function_name in {"bash", "submit"} and "action" not in data:
+        data["action"] = function_name
+    return data
 
 
-def parse_repro_action(text: str | None) -> BashAction | SubmitReproAction | None:
-    data = _decode_json_object(text)
+def _first_native_tool_call(
+    tool_calls: Sequence[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not tool_calls or not isinstance(tool_calls[0], dict):
+        return None
+    call = tool_calls[0]
+    function = call.get("function")
+    if (
+        not isinstance(call.get("id"), str)
+        or not call["id"].strip()
+        or not isinstance(function, dict)
+        or not isinstance(function.get("name"), str)
+    ):
+        return None
+    return call
+
+
+def _native_action_data(
+    tool_calls: Sequence[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    call = _first_native_tool_call(tool_calls)
+    if call is None:
+        return None
+    function = call["function"]
+    action = function["name"].strip().lower()
+    if action not in {"bash", "submit"}:
+        return None
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (RecursionError, ValueError):
+            return None
+    if not isinstance(arguments, dict):
+        return None
+    data = dict(arguments)
+    data["action"] = action
+    return data
+
+
+def _action_data(
+    text: str | None, tool_calls: Sequence[dict[str, Any]] | None
+) -> dict[str, Any] | None:
+    if tool_calls:
+        return _native_action_data(tool_calls)
+    return _decode_json_object(text)
+
+
+def _action_turn(
+    text: str | None, tool_calls: Sequence[dict[str, Any]] | None, result: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    call = _first_native_tool_call(tool_calls)
+    if call is not None:
+        return (
+            {"role": "assistant", "content": text, "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": call["id"], "content": result},
+        )
+    return (
+        {"role": "assistant", "content": text or ""},
+        {"role": "user", "content": "Observation:" + chr(10) + result},
+    )
+
+
+def parse_repro_action(
+    text: str | None, tool_calls: Sequence[dict[str, Any]] | None = None
+) -> BashAction | SubmitReproAction | None:
+    data = _action_data(text, tool_calls)
     if data is None:
         return None
     action = str(data.get("action", "")).strip().lower()
@@ -506,8 +687,10 @@ def parse_repro_action(text: str | None) -> BashAction | SubmitReproAction | Non
     return None
 
 
-def parse_fix_action(text: str | None) -> BashAction | SubmitFixAction | None:
-    data = _decode_json_object(text)
+def parse_fix_action(
+    text: str | None, tool_calls: Sequence[dict[str, Any]] | None = None
+) -> BashAction | SubmitFixAction | None:
+    data = _action_data(text, tool_calls)
     if data is None:
         return None
     action = str(data.get("action", "")).strip().lower()
@@ -869,7 +1052,7 @@ async def run_reproducer_step(
         tracked_files=tracked_files,
         prompt_token_cap=prompt_token_cap,
     )
-    turns: list[tuple[str, str]] = []
+    turns: list[tuple[dict[str, Any], dict[str, Any]]] = []
     event_ids: list[str] = []
     tokens_in = 0
     tokens_out = 0
@@ -882,7 +1065,11 @@ async def run_reproducer_step(
     try:
         for turn in range(turn_cap):
             messages = fit_messages_to_cap(
-                base_msgs, turns, prompt_token_cap=prompt_token_cap
+                base_msgs,
+                turns,
+                prompt_token_cap=prompt_token_cap,
+                tools=REPRODUCER_TOOLS,
+                tool_choice="required",
             )
             outcome, provider = await journal.call_model(
                 f"repro-llm:{turn}",
@@ -891,6 +1078,8 @@ async def run_reproducer_step(
                     step=f"repro:{turn}",
                     role="reproducer",
                     messages=messages,
+                    tools=REPRODUCER_TOOLS,
+                    tool_choice="required",
                     sampling=Sampling(),
                     taint=2,
                     source="github_issue",
@@ -939,13 +1128,10 @@ async def run_reproducer_step(
             )
             event_ids.append(llm_ev_id)
 
-            parsed = parse_repro_action(outcome.text)
+            parsed = parse_repro_action(outcome.text, outcome.tool_calls)
             if parsed is None:
-                msg = (
-                    'Invalid reply: respond with one JSON object {"action": "bash", "command": "..."} '
-                    'or {"action": "submit", "test_node_id": "tests/...", "summary": "..."}.'
-                )
-                turns.append((outcome.text or "", msg))
+                msg = "Invalid action. Use bash with a command or submit a failing pytest node."
+                turns.append(_action_turn(outcome.text, outcome.tool_calls, msg))
                 continue
 
             if isinstance(parsed, BashAction):
@@ -980,7 +1166,9 @@ async def run_reproducer_step(
                     ),
                 )
                 event_ids.append(tool_ev_id)
-                turns.append((outcome.text or "", tool_res.observation))
+                turns.append(
+                    _action_turn(outcome.text, outcome.tool_calls, tool_res.observation)
+                )
                 continue
 
             raw_verify = await journal.run_step(
@@ -1028,7 +1216,9 @@ async def run_reproducer_step(
                     started_at=first_started,
                     ended_at=last_ended,
                 )
-            turns.append((outcome.text or "", verify_res.observation))
+            turns.append(
+                _action_turn(outcome.text, outcome.tool_calls, verify_res.observation)
+            )
 
         return ReproStepResult(
             succeeded=False,
@@ -1074,7 +1264,7 @@ async def run_fixer_step(
         repro_diff=repro_diff,
         review_notes=review_notes,
     )
-    turns: list[tuple[str, str]] = []
+    turns: list[tuple[dict[str, Any], dict[str, Any]]] = []
     event_ids: list[str] = []
     tokens_in = 0
     tokens_out = 0
@@ -1088,7 +1278,11 @@ async def run_fixer_step(
     try:
         for turn in range(turn_cap):
             messages = fit_messages_to_cap(
-                base_msgs, turns, prompt_token_cap=prompt_token_cap
+                base_msgs,
+                turns,
+                prompt_token_cap=prompt_token_cap,
+                tools=FIXER_TOOLS,
+                tool_choice="required",
             )
             outcome, provider = await journal.call_model(
                 f"{step_tag}:llm:{turn}",
@@ -1097,6 +1291,8 @@ async def run_fixer_step(
                     step=f"{step_tag}:{turn}",
                     role="fixer",
                     messages=messages,
+                    tools=FIXER_TOOLS,
+                    tool_choice="required",
                     sampling=Sampling(),
                     taint=2,
                     source="github_issue",
@@ -1146,13 +1342,12 @@ async def run_fixer_step(
             )
             event_ids.append(llm_ev_id)
 
-            parsed = parse_fix_action(outcome.text)
+            parsed = parse_fix_action(outcome.text, outcome.tool_calls)
             if parsed is None:
                 msg = (
-                    'Invalid reply: respond with one JSON object {"action": "bash", "command": "..."} '
-                    'or {"action": "submit", "summary": "..."}.'
+                    "Invalid action. Use bash with a command or submit a completed fix."
                 )
-                turns.append((outcome.text or "", msg))
+                turns.append(_action_turn(outcome.text, outcome.tool_calls, msg))
                 continue
 
             if isinstance(parsed, BashAction):
@@ -1188,7 +1383,9 @@ async def run_fixer_step(
                     ),
                 )
                 event_ids.append(tool_ev_id)
-                turns.append((outcome.text or "", tool_res.observation))
+                turns.append(
+                    _action_turn(outcome.text, outcome.tool_calls, tool_res.observation)
+                )
                 continue
 
             raw_verify = await journal.run_step(
@@ -1237,7 +1434,9 @@ async def run_fixer_step(
                     started_at=first_started,
                     ended_at=last_ended,
                 )
-            turns.append((outcome.text or "", verify_res.observation))
+            turns.append(
+                _action_turn(outcome.text, outcome.tool_calls, verify_res.observation)
+            )
 
         return FixStepResult(
             succeeded=False,

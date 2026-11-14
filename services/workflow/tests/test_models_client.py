@@ -205,6 +205,50 @@ def test_duplicate_model_call_returns_cached_completion_and_logs_fields(
     assert "test-only-value" not in caplog.text
 
 
+def test_tool_schemas_are_sent_and_part_of_the_cached_request_identity(tmp_path):
+    bodies = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": MODEL,
+                "choices": [{"message": {"content": "completed"}}],
+            },
+        )
+
+    client, _ = make_client(tmp_path, provider)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    required = model_request().model_copy(
+        update={"tools": tools, "tool_choice": "required"}
+    )
+    auto = required.model_copy(update={"tool_choice": "auto"})
+
+    first = client.call(required)
+    replay = client.call(required)
+    different_choice = client.call(auto)
+
+    assert replay.request_id == first.request_id
+    assert different_choice.request_id != first.request_id
+    assert len(bodies) == 2
+    assert bodies[0]["tools"] == tools
+    assert bodies[0]["tool_choice"] == "required"
+    assert bodies[1]["tool_choice"] == "auto"
+
+
 def test_short_429_retries_once_on_the_same_pinned_model(tmp_path):
     requests = []
     sleeps = []

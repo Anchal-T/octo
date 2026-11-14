@@ -487,6 +487,10 @@ class ModelClient:
             "messages": request.messages,
             **sampling,
         }
+        if request.tools is not None:
+            body["tools"] = request.tools
+        if request.tool_choice is not None:
+            body["tool_choice"] = request.tool_choice
         return self.http.post(
             f"{pool.base_url}/chat/completions",
             json=body,
@@ -821,10 +825,17 @@ def _payload_identity(
 ) -> tuple[str, dict[str, Any], str, int]:
     sampling = request.sampling.model_dump(mode="json", exclude_none=True)
     sampling["max_tokens"] = sampling.get("max_tokens") or pin.max_tokens
-    messages_json = json.dumps(request.messages, sort_keys=True, separators=(",", ":"))
-    prompt_tokens = math.ceil(len(messages_json.encode("utf-8")) / 4)
+    prompt_payload: dict[str, Any] = {"messages": request.messages}
+    if request.tools is not None:
+        prompt_payload["tools"] = request.tools
+    if request.tool_choice is not None:
+        prompt_payload["tool_choice"] = request.tool_choice
+    prompt_json = json.dumps(
+        prompt_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    prompt_tokens = math.ceil(len(prompt_json.encode("utf-8")) / 4)
     payload_json = json.dumps(
-        {"messages": request.messages, "sampling": sampling},
+        {**prompt_payload, "sampling": sampling},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
