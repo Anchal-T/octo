@@ -14,6 +14,7 @@ from services.workflow.app.roles import (
     BashAction,
     CleanCheckResult,
     SandboxSessionManager,
+    _action_turn,
     estimate_messages_tokens,
     finalize_tester_review,
     fit_messages_to_cap,
@@ -242,6 +243,8 @@ def test_reproducer_prompt_lists_tracked_files_within_token_cap():
         prompt_token_cap=600,
     )
 
+    assert "git ls-files | grep" in messages[0]["content"]
+    assert "do not guess paths" in messages[0]["content"]
     assert "Tracked files (git ls-files):" in messages[1]["content"]
     assert "src/module_0.py" in messages[1]["content"]
     assert "src/module_99.py" not in messages[1]["content"]
@@ -251,6 +254,111 @@ def test_reproducer_prompt_lists_tracked_files_within_token_cap():
         )
         <= 600
     )
+
+
+def test_tool_result_is_capped_to_last_8_kb_with_truncation_note():
+    _, tool_message = _action_turn(
+        None,
+        [
+            {
+                "id": "call-output",
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": '{"command":"printf output"}',
+                },
+            }
+        ],
+        "begin" + ("x" * 9000) + "END",
+    )
+
+    output = tool_message["content"]
+    assert len(output.encode("utf-8")) <= 8 * 1024
+    assert output.startswith("[... earlier tool output truncated; showing the end ...]")
+    assert output.endswith("xEND")
+    assert "begin" not in output
+
+
+@pytest.mark.anyio
+async def test_reproducer_turn_two_request_has_groq_compatible_tool_history(tmp_path):
+    repo = tmp_path / "repo"
+    sha = _init_buggy_repo(repo)
+    manager = SandboxSessionManager(
+        lambda base_commit: LocalGitSandbox(
+            repo_path=repo,
+            base_commit=base_commit,
+            work_root=tmp_path / "work",
+        )
+    )
+    replies = [
+        {
+            "tool_calls": [
+                {
+                    "id": f"call-{turn}",
+                    "type": "function",
+                    "index": turn,
+                    "extra": "drop this response field",
+                    "function": {
+                        "name": "bash",
+                        "arguments": json.dumps(
+                            {"command": f"printf 'turn-{turn}\\n'"}
+                        ),
+                        "extra": "drop this function field",
+                    },
+                }
+            ]
+        }
+        for turn in range(3)
+    ]
+    journal = FakeStepJournal(replies)
+
+    result = await run_reproducer_step(
+        journal=journal,
+        sessions=manager,
+        session_key="gh-shape:repro",
+        key_prefix="gh-shape:v2",
+        run_id="run-shape",
+        repo="Anchal-T/demo",
+        base_commit=sha,
+        title="Example issue",
+        body="Example body",
+        triage=None,
+        turn_cap=3,
+        prompt_token_cap=5500,
+    )
+
+    assert result.succeeded is False
+    request = journal.requests[2]
+    assert request.step == "repro:2"
+    assert [message["role"] for message in request.messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool",
+    ]
+    for message in request.messages[:2]:
+        assert set(message) == {"role", "content"}
+    for assistant_index in (2, 4):
+        assistant = request.messages[assistant_index]
+        tool = request.messages[assistant_index + 1]
+        assert set(assistant) == {"role", "content", "tool_calls"}
+        assert assistant["role"] == "assistant"
+        assert assistant["content"] is None or isinstance(assistant["content"], str)
+        assert len(assistant["tool_calls"]) == 1
+        call = assistant["tool_calls"][0]
+        assert set(call) == {"id", "type", "function"}
+        assert isinstance(call["id"], str)
+        assert call["type"] == "function"
+        assert set(call["function"]) == {"name", "arguments"}
+        assert call["function"]["name"] == "bash"
+        assert isinstance(call["function"]["arguments"], str)
+        assert isinstance(json.loads(call["function"]["arguments"]), dict)
+        assert set(tool) == {"role", "tool_call_id", "content"}
+        assert tool["role"] == "tool"
+        assert tool["tool_call_id"] == call["id"]
+        assert isinstance(tool["content"], str)
 
 
 @pytest.mark.anyio
