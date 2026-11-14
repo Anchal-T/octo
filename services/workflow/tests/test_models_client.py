@@ -323,6 +323,47 @@ def test_provider_500_returns_retryable_outcome_and_retries_same_model(tmp_path)
     assert calls == 2
 
 
+def test_provider_400_body_is_redacted_truncated_and_logged(
+    tmp_path, caplog, monkeypatch
+):
+    groq_key = "test-only-groq-key"
+    provider_token = "provider-private-token"
+    monkeypatch.setenv("GROQ_API_KEY", groq_key)
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": (
+                        "invalid tool-call history "
+                        f"Bearer {provider_token} " + ("detail " * 500)
+                    ),
+                    "api_key": groq_key,
+                    "authorization": f"Bearer {provider_token}",
+                }
+            },
+        )
+
+    client, _ = make_client(tmp_path, provider)
+    with caplog.at_level(logging.INFO, logger="services.workflow.app.models.client"):
+        result = client.call(model_request())
+
+    assert result.outcome == "failed"
+    assert result.error_code == "provider_http_400"
+    assert result.reason is not None
+    assert "invalid tool-call history" in result.reason
+    error_body = result.reason.partition("response body: ")[2]
+    assert error_body
+    assert len(error_body.encode("utf-8")) <= 2048
+    assert "truncated" in error_body
+    assert groq_key not in result.reason
+    assert provider_token not in result.reason
+    assert "invalid tool-call history" in caplog.text
+    assert groq_key not in caplog.text
+    assert provider_token not in caplog.text
+
+
 def test_connect_error_returns_retryable_outcome_and_retries_same_model(tmp_path):
     calls = 0
 
