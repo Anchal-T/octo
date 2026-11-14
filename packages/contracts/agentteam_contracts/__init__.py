@@ -38,6 +38,9 @@ from .models import (
     RunStatusV2,
     RunWrite,
     Sampling,
+    SymbolLocation,
+    SymbolsResolve,
+    SymbolsResolveResponse,
     SyncDecisionItem,
     TriageResult,
 )
@@ -83,5 +86,8 @@ __all__ = [
     "RunWrite",
     "Sampling",
     "SyncDecisionItem",
+    "SymbolLocation",
+    "SymbolsResolve",
+    "SymbolsResolveResponse",
     "TriageResult",
 ]

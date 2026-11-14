@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -121,8 +122,22 @@ class ScipIndex:
         return start, end
 
     def resolve(self, name: str) -> str | None:
-        # ponytail: exact SCIP symbols only; add aliases if proposals need short names.
-        return name if self.has_definition(name) else None
+        if self.has_definition(name):
+            return name
+        matches = []
+        for symbol in self.symbols:
+            descriptor = re.fullmatch(
+                r"scip-python python \S+ \S+ `([^`]+)`/(.*)", symbol
+            )
+            if descriptor is None:
+                continue
+            module, members = descriptor.groups()
+            dotted = (
+                module + "." + members.replace("().", ".").replace("#", ".")
+            ).rstrip(".")
+            if dotted == name:
+                matches.append(symbol)
+        return matches[0] if len(matches) == 1 else None
 
     def has_definition(self, symbol: str) -> bool:
         return bool(self.definitions_for(symbol))

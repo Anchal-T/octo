@@ -160,6 +160,35 @@ class RepoPushResponse(Contract):
     main_head: str
 
 
+class SymbolLocation(Contract):
+    file: str
+    line: int = Field(ge=1)
+
+    @field_validator("file")
+    @classmethod
+    def safe_path(cls, value: str) -> str:
+        if not _is_safe_contract_path(value):
+            raise ValueError("file must be a safe repository-relative path")
+        return value
+
+
+class SymbolsResolve(Contract):
+    base_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    names: list[str] = Field(default_factory=list, max_length=200)
+    locations: list[SymbolLocation] = Field(default_factory=list, max_length=200)
+
+    @field_validator("names")
+    @classmethod
+    def valid_names(cls, values: list[str]) -> list[str]:
+        if any("\x00" in value for value in values):
+            raise ValueError("names must not contain NUL")
+        return values
+
+
+class SymbolsResolveResponse(Contract):
+    symbols: list[str]
+
+
 class Sampling(Contract):
     temperature: float = Field(default=0.2, ge=0, le=2)
     top_p: float = Field(default=1, gt=0, le=1)

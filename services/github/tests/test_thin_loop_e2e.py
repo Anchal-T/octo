@@ -302,6 +302,10 @@ class _InMemoryXtdbBridge:
         self.proposals: dict[str, list[dict[str, Any]]] = {}
 
     async def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if path == "/v1/symbols/resolve":
+            return {"symbols": []}
+        if path == "/v1/facts/query":
+            return {"base_commit": payload["base_commit"], "facts": [], "dropped": {}}
         if path == "/v1/rounds":
             rid = stable_id("round", payload["idempotency_key"])
             row = {

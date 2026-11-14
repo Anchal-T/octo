@@ -19,6 +19,8 @@ from agentteam_contracts import (
     RoundWrite,
     RunRecord,
     RunWrite,
+    SymbolsResolve,
+    SymbolsResolveResponse,
 )
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
@@ -336,6 +338,23 @@ def query_facts(request: FactQuery) -> FactQueryResponse:
         facts=fact_views,
         dropped=dropped,
     )
+
+
+@app.post("/v1/symbols/resolve", response_model=SymbolsResolveResponse)
+def resolve_symbols(request: SymbolsResolve) -> SymbolsResolveResponse:
+    if store.scip_indexer is None:
+        raise HTTPException(status_code=503, detail="scip_not_configured")
+    with repo_push_lock:
+        try:
+            index = store.scip_indexer.load(request.base_commit)
+        except (subprocess.SubprocessError, FileNotFoundError) as error:
+            raise HTTPException(status_code=503, detail="index_unavailable") from error
+        symbols = {symbol for name in request.names if (symbol := index.resolve(name))}
+        for location in request.locations:
+            symbol = index.innermost(location.file, location.line - 1, location.line)
+            if symbol:
+                symbols.add(symbol)
+    return SymbolsResolveResponse(symbols=sorted(symbols))
 
 
 @app.post("/v1/facts/close-by-issue", response_model=CloseByIssueResponse)

@@ -223,6 +223,7 @@ async def test_missing_run_and_proposal_reads_return_404(monkeypatch):
 @pytest.mark.anyio
 async def test_1_7_query_facts_unknown_base_returns_404(monkeypatch):
     from services.memory.app.dag import Commit, Dag
+
     c0 = Commit("known-sha", (), datetime(2026, 1, 1, tzinfo=UTC), "main", "test", ())
     dag = Dag.from_commits([c0])
     monkeypatch.setattr(store, "get_dag", lambda: dag)
@@ -255,8 +256,11 @@ async def test_1_7_query_facts_nul_in_symbol_returns_422():
 @pytest.mark.anyio
 async def test_query_facts_success(monkeypatch):
     from services.memory.app.dag import Commit, Dag
+
     c0 = Commit("sha-0", (), datetime(2026, 1, 1, tzinfo=UTC), "main", "test", ())
-    c1 = Commit("sha-1", ("sha-0",), datetime(2026, 1, 2, tzinfo=UTC), "main", "test", ())
+    c1 = Commit(
+        "sha-1", ("sha-0",), datetime(2026, 1, 2, tzinfo=UTC), "main", "test", ()
+    )
     dag = Dag.from_commits([c0, c1])
     fact = {
         "_id": "fact-1a2b3c4d5e6f",
@@ -295,3 +299,55 @@ async def test_query_facts_success(monkeypatch):
     assert data["facts"][0]["id"] == "fact-1a2b3c4d5e6f"
     assert data["facts"][0]["claim"] == "Lexer tokenizes correctly"
     assert data["dropped"] == {"not_ancestor": 0, "closed": 0, "expired": 0}
+
+
+@pytest.mark.anyio
+async def test_resolve_symbols_uses_base_index_and_innermost_location(monkeypatch):
+    from services.memory.app.scip import ScipDefinition, ScipIndex
+
+    base = "a" * 40  # synthetic base
+    symbol = "scip-python python sqlparse 0 `sqlparse.lexer`/Lexer#get_tokens()."
+    class_symbol = "scip-python python sqlparse 0 `sqlparse.lexer`/Lexer#"
+    index = ScipIndex(
+        {
+            symbol: (
+                ScipDefinition(symbol, "sqlparse/lexer.py", (4, 0, 1), (4, 0, 8, 0)),
+            ),
+            class_symbol: (
+                ScipDefinition(
+                    class_symbol, "sqlparse/lexer.py", (0, 0, 1), (0, 0, 10, 0)
+                ),
+            ),
+        },
+        sha=base,
+    )
+    calls = []
+
+    class Indexer:
+        def load(self, sha):
+            calls.append(sha)
+            return index
+
+    monkeypatch.setattr(store, "scip_indexer", Indexer())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/symbols/resolve",
+            json={
+                "base_commit": base,
+                "names": ["sqlparse.lexer.Lexer.get_tokens", "missing"],
+                "locations": [{"file": "sqlparse/lexer.py", "line": 6}],
+            },
+        )
+        hostile = await client.post(
+            "/v1/symbols/resolve",
+            json={
+                "base_commit": base,
+                "locations": [{"file": "../escape.py", "line": 1}],
+            },
+        )
+    assert response.status_code == 200
+    assert response.json() == {"symbols": [symbol]}
+    assert hostile.status_code == 422
+    assert calls == [base]

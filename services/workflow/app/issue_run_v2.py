@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -13,6 +14,8 @@ from agentteam_contracts import (
     CommitStatusRequest,
     EventWrite,
     EvidenceCommentRequest,
+    FactQuery,
+    FactQueryResponse,
     GithubWriteOutcome,
     IssueRunRequestV2,
     IssueRunResultV2,
@@ -30,6 +33,8 @@ from agentteam_contracts import (
     SyncDecisionItem,
 )
 
+from .fact_block import effective_confidence, render_fact_block
+from .fact_symbols import symbol_candidates
 from .models import Ledger, ModelClient, Store
 from .models.pools import pin_for
 from .retries import WaitDecision, decide_delay, decide_wait
@@ -41,6 +46,8 @@ from .roles import (
 )
 from .sandbox import DockerSandbox, Sandbox
 from .triage import parse_triage, triage_messages
+
+logger = logging.getLogger(__name__)
 
 settings = Settings.from_env()
 agentteam_config = load_agentteam_config()
@@ -71,6 +78,101 @@ async def post_memory(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = await client.post(path, json=payload)
         response.raise_for_status()
         return response.json()
+
+
+async def query_fact_block(
+    base_commit: str, text: str, now: datetime, diff: str = ""
+) -> dict[str, Any]:
+    try:
+        candidates = symbol_candidates(base_commit, text, diff)
+        resolved = await post_memory(
+            "/v1/symbols/resolve", candidates.model_dump(mode="json")
+        )
+        raw = await post_memory(
+            "/v1/facts/query",
+            FactQuery(
+                symbols=resolved["symbols"],
+                base_commit=base_commit,
+                ancestry_filter=True,
+            ).model_dump(mode="json"),
+        )
+        facts = FactQueryResponse.model_validate(raw).facts
+        rendered = render_fact_block(
+            facts, now, min_confidence=settings.fact_min_effective_confidence
+        )
+        return {
+            "text": rendered.text,
+            "injected_ids": rendered.injected_ids,
+            "confidence": {
+                f.id: effective_confidence(f, now)
+                for f in facts
+                if f.id in rendered.injected_ids
+            },
+            "failed": False,
+        }
+    except (httpx.HTTPError, ValueError, KeyError) as error:
+        logger.warning("fact_query_failed error_type=%s", type(error).__name__)
+        return {"text": "", "injected_ids": [], "confidence": {}, "failed": True}
+
+
+async def read_facts(
+    journal: RestateStepJournal,
+    *,
+    prefix: str,
+    step: str,
+    round_id: str,
+    base_commit: str,
+    text: str,
+    now: datetime,
+    diff: str = "",
+) -> dict[str, Any]:
+    result = await journal.run_step(
+        f"query-facts:{step}",
+        query_fact_block,
+        base_commit=base_commit,
+        text=text,
+        now=now,
+        diff=diff,
+    )
+    event_ids = []
+    if result["failed"]:
+        event_ids.append(
+            await journal.record_event(
+                f"fact-query-failed:{step}",
+                EventWrite(
+                    idempotency_key=f"{prefix}:fact_query_failed:{step}",
+                    source="agent",
+                    kind="fact_query_failed",
+                    taint=0,
+                    payload={
+                        "run_step": step,
+                        "base_commit": base_commit,
+                        "round_id": round_id,
+                    },
+                ),
+            )
+        )
+    for fact_id in result["injected_ids"]:
+        event_ids.append(
+            await journal.record_event(
+                f"fact-read:{step}:{fact_id}",
+                EventWrite(
+                    idempotency_key=f"{prefix}:fact_read:{step}:{fact_id}",
+                    source="agent",
+                    kind="fact_read",
+                    taint=0,
+                    payload={
+                        "fact_id": fact_id,
+                        "run_step": step,
+                        "base_commit": base_commit,
+                        "round_id": round_id,
+                        "effective_confidence": result["confidence"][fact_id],
+                        "condition": "memory_ancestry",
+                    },
+                ),
+            )
+        )
+    return {**result, "event_ids": event_ids}
 
 
 async def call_github_api(
@@ -452,6 +554,15 @@ async def run_issue_v2(
     )
     repro_run_key = f"{prefix}:repro:1"
     repro_run_id = stable_id("run", repro_run_key)
+    repro_facts = await read_facts(
+        journal,
+        prefix=prefix,
+        step="repro",
+        round_id=r2_id,
+        base_commit=base_commit,
+        text=request.title + "\n" + request.body,
+        now=datetime.fromisoformat(repro_basis_iso),
+    )
     repro = await run_reproducer_step(
         journal=journal,
         sessions=sessions,
@@ -463,6 +574,7 @@ async def run_issue_v2(
         title=request.title,
         body=request.body,
         triage=triage,
+        fact_block=repro_facts["text"],
         turn_cap=settings.reproducer_turn_cap,
         prompt_token_cap=settings.reproducer_prompt_token_cap,
         cmd_timeout_s=settings.sandbox_cmd_timeout_s,
@@ -512,7 +624,7 @@ async def run_issue_v2(
             tokens_in=repro.tokens_in,
             tokens_out=repro.tokens_out,
             outcome="reproduced",
-            event_ids=list(repro.event_ids),
+            event_ids=[*repro.event_ids, *repro_facts["event_ids"]],
             started_at=repro.started_at or read_basis,
             ended_at=repro.ended_at or read_basis,
         ).model_dump(mode="json"),
@@ -597,6 +709,16 @@ async def run_issue_v2(
         )
         fix_run_key = f"{prefix}:fix:{fix_attempt}"
         fix_run_id = stable_id("run", fix_run_key)
+        fix_facts = await read_facts(
+            journal,
+            prefix=prefix,
+            step=f"fix:{fix_attempt}",
+            round_id=fix_round_id,
+            base_commit=base_commit,
+            text=request.title + "\n" + request.body,
+            now=datetime.fromisoformat(fix_basis_iso),
+            diff=repro.patch,
+        )
         fix = await run_fixer_step(
             journal=journal,
             sessions=sessions,
@@ -612,6 +734,7 @@ async def run_issue_v2(
             test_node_id=repro.test_node_id,
             repro_diff=repro.patch,
             review_notes=review_notes,
+            fact_block=fix_facts["text"],
             turn_cap=settings.fixer_turn_cap,
             prompt_token_cap=settings.fixer_prompt_token_cap,
             cmd_timeout_s=settings.sandbox_cmd_timeout_s,
@@ -668,7 +791,7 @@ async def run_issue_v2(
                 tokens_in=fix.tokens_in,
                 tokens_out=fix.tokens_out,
                 outcome="patched",
-                event_ids=list(fix.event_ids),
+                event_ids=[*fix.event_ids, *fix_facts["event_ids"]],
                 started_at=fix.started_at or read_basis,
                 ended_at=fix.ended_at or read_basis,
             ).model_dump(mode="json"),

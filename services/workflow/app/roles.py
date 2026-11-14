@@ -409,6 +409,7 @@ def reproducer_base_messages(
     body: str,
     triage: TriageResult | None,
     *,
+    fact_block: str = "",
     tracked_files: str = "",
     prompt_token_cap: int = 5500,
 ) -> list[dict[str, str]]:
@@ -418,6 +419,8 @@ def reproducer_base_messages(
         else ""
     )
 
+    fact_section = f"{fact_block}\n\n" if fact_block else ""
+
     def messages_for(files: str) -> list[dict[str, str]]:
         tracked_files_line = (
             f"\n\nTracked files (git ls-files):\n{files}" if files else ""
@@ -426,6 +429,7 @@ def reproducer_base_messages(
             f"Repository: {repo}\n"
             f"{triage_line}"
             f"{quote_untrusted_issue(title, body)}\n\n"
+            f"{fact_section}"
             "Start by inspecting the relevant module and existing tests, then create a minimal failing pytest test."
             f"{tracked_files_line}"
         )
@@ -462,6 +466,7 @@ def fixer_base_messages(
     test_node_id: str,
     repro_diff: str,
     review_notes: str | None = None,
+    fact_block: str = "",
 ) -> list[dict[str, str]]:
     triage_line = (
         f"Triaged area: {triage.area} - {triage.summary}\n"
@@ -473,6 +478,7 @@ def fixer_base_messages(
         if review_notes
         else ""
     )
+    fact_section = f"\n\n{fact_block}" if fact_block else ""
     user = (
         f"Repository: {repo}\n"
         f"{triage_line}"
@@ -480,6 +486,7 @@ def fixer_base_messages(
         f"Reproduction test diff:\n{trim_output(repro_diff, 1200)}\n"
         f"{review_block}\n"
         f"{quote_untrusted_issue(title, body, max_body_chars=1500)}"
+        f"{fact_section}"
     )
     return [
         {"role": "system", "content": FIXER_SYSTEM_PROMPT},
@@ -1065,6 +1072,7 @@ async def run_reproducer_step(
     turn_cap: int,
     prompt_token_cap: int,
     cmd_timeout_s: float = 60.0,
+    fact_block: str = "",
 ) -> ReproStepResult:
     tracked_files = await journal.run_step(
         "repro-tracked-files",
@@ -1078,6 +1086,7 @@ async def run_reproducer_step(
         title,
         body,
         triage,
+        fact_block=fact_block,
         tracked_files=tracked_files,
         prompt_token_cap=prompt_token_cap,
     )
@@ -1283,6 +1292,7 @@ async def run_fixer_step(
     turn_cap: int,
     prompt_token_cap: int,
     cmd_timeout_s: float = 60.0,
+    fact_block: str = "",
 ) -> FixStepResult:
     base_msgs = fixer_base_messages(
         repo,
@@ -1292,6 +1302,7 @@ async def run_fixer_step(
         test_node_id=test_node_id,
         repro_diff=repro_diff,
         review_notes=review_notes,
+        fact_block=fact_block,
     )
     turns: list[tuple[dict[str, Any], dict[str, Any]]] = []
     event_ids: list[str] = []

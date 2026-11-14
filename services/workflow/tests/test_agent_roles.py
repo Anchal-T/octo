@@ -762,3 +762,34 @@ async def test_tester_clean_checkout_approves_valid_fix_and_blocks_broken_suite(
     assert parse_tester_review("not json at all") is None
     fallback = finalize_tester_review(None, ok_check)
     assert fallback.verdict == "changes_requested"
+
+
+@pytest.mark.parametrize("role", ["reproducer", "fixer"])
+def test_fact_block_is_optional_and_appears_once_after_quoted_issue(role):
+    kwargs = dict(
+        repo="example/fork", title="Example title", body="Example body", triage=None
+    )
+    if role == "fixer":
+        kwargs.update(
+            test_node_id="tests/test_example.py::test_example",
+            repro_diff="example diff",
+        )
+    build = reproducer_base_messages if role == "reproducer" else fixer_base_messages
+    original = build(**kwargs)
+    assert build(**kwargs, fact_block="") == original
+    quoted = "Reported by users, not verified (taint 2):\n> Title: Example title\n>\n> Example body"
+    expected = (
+        "Repository: example/fork\n" + quoted + "\n\n"
+        "Start by inspecting the relevant module and existing tests, then create a minimal failing pytest test."
+        if role == "reproducer"
+        else "Repository: example/fork\nFailing reproduction pytest node: tests/test_example.py::test_example\n"
+        "Reproduction test diff:\nexample diff\n\n" + quoted
+    )
+    assert original[1]["content"] == expected
+    block = "[fact-123456789abc, checked at aaaaaaa, confidence 0.8] Example fact"
+    with_facts = build(**kwargs, fact_block=block)
+    assert with_facts[0] == original[0]
+    assert with_facts[1]["content"].count(block) == 1
+    assert with_facts[1]["content"].index(block) > with_facts[1]["content"].index(
+        "Example body"
+    )

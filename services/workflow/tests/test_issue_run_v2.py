@@ -154,6 +154,10 @@ class FakeMemoryAndGithubBackend:
         self.statuses_set: list[tuple[str, dict[str, Any]]] = []
 
     async def post_memory(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if path == "/v1/symbols/resolve":
+            return {"symbols": []}
+        if path == "/v1/facts/query":
+            return {"base_commit": self.base_sha, "facts": [], "dropped": {}}
         if path == "/v1/rounds":
             rid = stable_id("round", payload["idempotency_key"])
             row = {
@@ -652,3 +656,133 @@ def test_cli_approve_and_reject_fallback_calls_v2_approve_endpoint(capsys):
     assert received[-1]["reason"] == "Missing whitespace test"
     assert "closed" in capsys.readouterr().out
     assert hasattr(workflow_main, "issue_run_v2")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("query_fails", [False, True])
+async def test_fact_read_path_continues_on_outage_and_replays_without_queries(
+    monkeypatch, query_fails
+):
+    from agentteam_contracts import EventWrite, FactView
+
+    from services.workflow.app.roles import FixStepResult, ReproStepResult
+
+    base = "a" * 40  # synthetic base
+    backend = FakeMemoryAndGithubBackend(base_sha=base)
+    queries, role_blocks, resolutions = [], [], []
+    good_id, low_id = "fact-123456789abc", "fact-000000000001"
+    facts = [
+        FactView(
+            id=fid,
+            claim="Example claim",
+            confidence=confidence,
+            valid_from_commit=base,
+            last_confirmed_at=NOW,
+        ).model_dump(mode="json")
+        for fid, confidence in [(good_id, 0.8), (low_id, 0.3)]
+    ]
+
+    async def memory(path, payload):
+        if path == "/v1/symbols/resolve":
+            resolutions.append(payload)
+            if query_fails:
+                raise httpx.ConnectError("example outage")
+            return {"symbols": ["example-symbol"]}
+        if path == "/v1/facts/query":
+            queries.append(payload)
+            return {"base_commit": base, "facts": facts, "dropped": {}}
+        return await backend.post_memory(path, payload)
+
+    async def repro(**kwargs):
+        role_blocks.append(kwargs["fact_block"])
+        event_id = await kwargs["journal"].record_event(
+            "example-repro-test",
+            EventWrite(
+                idempotency_key="example-repro-test",
+                source="tool",
+                kind="observation",
+                taint=0,
+                payload={"tool": "pytest", "verified": True},
+            ),
+        )
+        return ReproStepResult(
+            succeeded=True,
+            patch="--- a/tests/test_example.py\n+++ b/tests/test_example.py\n@@ -1 +1 @@\n",
+            files=["tests/test_example.py"],
+            test_node_id="tests/test_example.py::test_example",
+            event_ids=(event_id,),
+        )
+
+    async def fix(**kwargs):
+        role_blocks.append(kwargs["fact_block"])
+        return FixStepResult(
+            succeeded=False, failure_reason="example stop before GitHub writes"
+        )
+
+    model, _ = _scripted_model(
+        {
+            "triager": [
+                json.dumps(
+                    {
+                        "kind": "bug",
+                        "priority": "high",
+                        "area": "lexer-keywords",
+                        "summary": "Example summary",
+                    }
+                )
+            ]
+        }
+    )
+    monkeypatch.setattr(v2_mod, "post_memory", memory)
+    monkeypatch.setattr(v2_mod, "call_model", model)
+    monkeypatch.setattr(v2_mod, "current_basis", lambda: NOW.isoformat())
+    monkeypatch.setattr(v2_mod, "run_reproducer_step", repro)
+    monkeypatch.setattr(v2_mod, "run_fixer_step", fix)
+    request = IssueRunRequestV2(
+        issue_id="gh-1-7",
+        repo="Anchal-T/sqlparse",
+        title="Example sqlparse.lexer.Lexer failure",
+        body="sqlparse/lexer.py:42",
+        base_commit=base,
+        read_basis=NOW,
+    )
+    ctx = FakeWorkflowCtx("gh-1-7")
+    first = await v2_mod.run_issue_v2(ctx, request)
+    read_events = [
+        event for event in backend.events.values() if event["kind"] == "fact_read"
+    ]
+    failure_events = [
+        event
+        for event in backend.events.values()
+        if event["kind"] == "fact_query_failed"
+    ]
+    assert first.failure_reason == "example stop before GitHub writes"
+    steps = ["repro", "fix:1", "fix:2"]
+    if query_fails:
+        assert role_blocks == ["", "", ""]
+        assert not read_events
+        assert len(failure_events) == 3
+    else:
+        assert len(read_events) == 3
+        assert not failure_events
+        assert all(good_id in block and low_id not in block for block in role_blocks)
+        assert [event["payload"]["run_step"] for event in read_events] == steps
+        assert all(
+            event["taint"] == 0 and event["payload"]["base_commit"] == base
+            for event in read_events
+        )
+        assert all(
+            event["payload"]["effective_confidence"] == 0.8 for event in read_events
+        )
+        assert all(
+            query["base_commit"] == base and query["ancestry_filter"]
+            for query in queries
+        )
+        assert resolutions[1]["locations"][-1] == {
+            "file": "tests/test_example.py",
+            "line": 1,
+        }
+    calls_before_replay = (len(queries), len(resolutions), len(backend.events))
+    assert await v2_mod.run_issue_v2(ctx, request) == first
+    assert (len(queries), len(resolutions), len(backend.events)) == calls_before_replay
+    assert not backend.prs_opened
