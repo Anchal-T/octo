@@ -437,6 +437,8 @@ async def test_reproducer_rejects_passing_or_broken_tests_and_accepts_failing_re
                 {
                     "action": "submit",
                     "test_node_id": "tests/test_repro.py::test_zero_divisor_returns_none",
+                    "fact_claim": "Zero divisor reaches division without a guard",
+                    "anchor_names": ["pkg.calc.safe_divide"],
                     "summary": "safe_divide raises ZeroDivisionError when b is 0",
                 }
             ),
@@ -459,6 +461,9 @@ async def test_reproducer_rejects_passing_or_broken_tests_and_accepts_failing_re
     )
 
     assert result.succeeded is True
+    assert result.fact_claim == "Zero divisor reaches division without a guard"
+    assert result.anchor_names == ("pkg.calc.safe_divide",)
+    assert result.evidence_event_id in result.event_ids
     assert result.test_node_id == "tests/test_repro.py::test_zero_divisor_returns_none"
     assert result.files == ["tests/test_repro.py"]
     assert "pkg/calc.py" not in result.patch
@@ -793,3 +798,24 @@ def test_fact_block_is_optional_and_appears_once_after_quoted_issue(role):
     assert with_facts[1]["content"].index(block) > with_facts[1]["content"].index(
         "Example body"
     )
+
+
+def test_reproducer_optional_fact_fields_survive_submission_parsing():
+    action = parse_repro_action(
+        json.dumps(
+            {
+                "action": "submit",
+                "test_node_id": "tests/test_example.py::test_example",
+                "summary": "Example reproduction",
+                "fact_claim": "Example cause",
+                "anchor_names": ["sqlparse.lexer.Lexer.get_tokens"],
+            }
+        )
+    )
+    assert action is not None
+    assert action.fact_claim == "Example cause"
+    assert action.anchor_names == ("sqlparse.lexer.Lexer.get_tokens",)
+    schema = REPRODUCER_TOOLS[1]["function"]["parameters"]
+    assert schema["properties"]["anchor_names"]["items"] == {"type": "string"}
+    assert "fact_claim" not in schema["required"]
+    assert "anchor_names" not in schema["required"]

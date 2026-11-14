@@ -186,10 +186,14 @@ class MemoryStore:
         facts = self.facts_for_issue(issue_ref)
         if not facts:
             return []
-        fact_ids = [f.get("_id") or f.get("id") for f in facts if "_id" in f or "id" in f]
+        fact_ids = [
+            f.get("_id") or f.get("id") for f in facts if "_id" in f or "id" in f
+        ]
         existing_closures = self.closures_for_facts(fact_ids)
         already_closed = {
-            c["fact_id"] for c in existing_closures if c["closing_commit"] == closing_commit
+            c["fact_id"]
+            for c in existing_closures
+            if c["closing_commit"] == closing_commit
         }
         for fid in fact_ids:
             if fid not in already_closed:
@@ -208,7 +212,7 @@ class MemoryStore:
             query = (
                 "SELECT _id, valid_from_commit, anchors, evidence_test, "
                 "claim, kind, area, confidence, decay_half_life_days, "
-                "last_confirmed_at, taint, supersedes "
+                "last_confirmed_at, taint, supersedes, source_issue "
                 "FROM facts FOR ALL VALID_TIME WHERE source_issue = %s"
             )
             return list(conn.execute(query, (issue_ref,)).fetchall())
@@ -253,13 +257,12 @@ class MemoryStore:
                 cols = (
                     "SELECT _id, valid_from_commit, anchors, evidence_test, "
                     "claim, kind, area, confidence, decay_half_life_days, "
-                    "last_confirmed_at, taint, supersedes "
+                    "last_confirmed_at, taint, supersedes, source_issue "
                     if full
                     else "SELECT _id, valid_from_commit, anchors, evidence_test "
                 )
                 query = sql.SQL(
-                    cols
-                    + "FROM facts FOR ALL VALID_TIME "
+                    cols + "FROM facts FOR ALL VALID_TIME "
                     "WHERE EXISTS (SELECT 1 FROM UNNEST(anchors) AS a(anc) "
                     "WHERE (a.anc).symbol IN ({}))"
                 ).format(placeholders)
@@ -657,8 +660,8 @@ class MemoryStore:
                                 "_id, _valid_from, claim, kind, area, anchors, "
                                 "provenance_event_ids, confidence, decay_half_life_days, "
                                 "last_confirmed_at, taint, valid_from_commit, supersedes, "
-                                "evidence_test, created_in_round, proposal_id"
-                                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                                "evidence_test, created_in_round, proposal_id, source_issue"
+                                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                                 (
                                     fact["_id"],
                                     fact["_valid_from"],
@@ -676,6 +679,7 @@ class MemoryStore:
                                     fact["evidence_test"],
                                     fact["created_in_round"],
                                     fact["proposal_id"],
+                                    fact["source_issue"],
                                 ),
                             )
                     conn.execute(

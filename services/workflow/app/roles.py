@@ -33,7 +33,11 @@ _PARAMETER_RE = re.compile(
 )
 
 
-def _action_tools(submit_properties: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
+def _action_tools(
+    submit_properties: dict[str, dict[str, Any]],
+    *,
+    optional: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
     bash = {
         "type": "function",
         "function": {
@@ -55,7 +59,9 @@ def _action_tools(submit_properties: dict[str, dict[str, str]]) -> list[dict[str
             "parameters": {
                 "type": "object",
                 "properties": submit_properties,
-                "required": list(submit_properties),
+                "required": [
+                    name for name in submit_properties if name not in optional
+                ],
                 "additionalProperties": False,
             },
         },
@@ -67,7 +73,17 @@ REPRODUCER_TOOLS = _action_tools(
     {
         "test_node_id": {"type": "string"},
         "summary": {"type": "string"},
-    }
+        "fact_claim": {
+            "type": "string",
+            "description": "Optional one-sentence bug cause supported by the failing test.",
+        },
+        "anchor_names": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Exact SCIP symbols or fully qualified Python names for the cause at the base commit.",
+        },
+    },
+    optional=("fact_claim", "anchor_names"),
 )
 FIXER_TOOLS = _action_tools({"summary": {"type": "string"}})
 
@@ -127,6 +143,8 @@ class BashAction:
 class SubmitReproAction:
     test_node_id: str
     summary: str
+    fact_claim: str | None = None
+    anchor_names: tuple[str, ...] = ()
     kind: Literal["submit"] = "submit"
 
 
@@ -169,6 +187,9 @@ class CleanCheckResult(Contract):
 @dataclass(frozen=True)
 class ReproStepResult:
     succeeded: bool
+    fact_claim: str | None = None
+    anchor_names: tuple[str, ...] = ()
+    evidence_event_id: str | None = None
     patch: str = ""
     files: list[str] | None = None
     test_node_id: str = ""
@@ -719,7 +740,21 @@ def parse_repro_action(
         if not is_test_path(validated_node.split("::", 1)[0]):
             return None
         clean_summary = " ".join(summary.split())[:300].strip() or "Reproduced issue."
-        return SubmitReproAction(test_node_id=validated_node, summary=clean_summary)
+        claim = data.get("fact_claim")
+        anchors = data.get("anchor_names", [])
+        if (
+            not isinstance(claim, str)
+            or not claim.strip()
+            or not isinstance(anchors, list)
+            or any(not isinstance(name, str) for name in anchors)
+        ):
+            claim, anchors = None, []
+        return SubmitReproAction(
+            test_node_id=validated_node,
+            summary=clean_summary,
+            fact_claim=claim.strip()[:400] if claim else None,
+            anchor_names=tuple(anchors),
+        )
     return None
 
 
@@ -1242,6 +1277,9 @@ async def run_reproducer_step(
             if verify_res.verified:
                 return ReproStepResult(
                     succeeded=True,
+                    fact_claim=parsed.fact_claim,
+                    anchor_names=parsed.anchor_names,
+                    evidence_event_id=verify_ev_id,
                     patch=verify_res.git_diff,
                     files=list(verify_res.changed_files),
                     test_node_id=parsed.test_node_id,

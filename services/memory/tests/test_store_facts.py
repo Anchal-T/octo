@@ -126,7 +126,10 @@ def test_commit_round_persists_normalized_facts_with_proposal_verdicts():
     round_id = _new_round(store, base_commit)
     run_id, evidence_ids = _new_run_and_evidence(store, round_id)
 
-    accepted = _proposal(store, round_id, run_id, evidence_ids, payload=_payload())
+    issue_ref = f"example/fork#{uuid4().int}"
+    accepted = _proposal(
+        store, round_id, run_id, evidence_ids, payload=_payload(source_issue=issue_ref)
+    )
     empty_anchor = _proposal(
         store,
         round_id,
@@ -172,6 +175,11 @@ def test_commit_round_persists_normalized_facts_with_proposal_verdicts():
     assert fact["valid_from_commit"] == base_commit
     assert fact["created_in_round"] == round_id
     assert fact["proposal_id"] == accepted["_id"]
+    assert store.facts_for_issue(issue_ref)[0]["source_issue"] == issue_ref
+    assert store.facts_for_symbols([SYMBOL], full=True)[0].keys() >= {
+        "source_issue",
+        "claim",
+    }
     empty_fact_id = (
         "fact-" + hashlib.sha1(empty_anchor["_id"].encode()).hexdigest()[:12]
     )

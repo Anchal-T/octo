@@ -138,6 +138,9 @@ def validate_proposal(
 
     evidence_test = payload.get("evidence_test")
     supersedes = payload.get("supersedes")
+    source_issue = payload.get("source_issue")
+    if source_issue is not None and not isinstance(source_issue, str):
+        return "rejected", "source_issue must be a string", None
     if (evidence_test is not None and not isinstance(evidence_test, str)) or (
         supersedes is not None and not isinstance(supersedes, str)
     ):
@@ -183,6 +186,7 @@ def validate_proposal(
         "taint": max(event["taint"] for event in evidence_rows),
         "valid_from_commit": base_commit,
         "supersedes": supersedes,
+        "source_issue": source_issue,
         "evidence_test": evidence_test,
         "created_in_round": round_id,
         "proposal_id": proposal["_id"],

@@ -409,3 +409,95 @@ def test_resolve_edit_conflicts_keeps_deterministic_winner_per_file():
     by_id = {prop["_id"]: (status, reason) for prop, status, reason, _ in resolved}
     assert by_id["prop-a"] == ("accepted", "supported fixer edit_file proposal")
     assert by_id["prop-b"] == ("rejected", "conflict: requeued")
+
+
+def test_user_report_preserves_source_issue_and_inherits_untrusted_taint():
+    index = ScipIndex({}, sha="a" * 40)  # synthetic base
+    proposal = {
+        "_id": "prop-example",
+        "round_id": "round-example",
+        "agent_id": "triager",
+        "run_id": "run-example",
+        "op": "assert_fact",
+        "evidence_event_ids": ["ev-example"],
+        "payload": {
+            "kind": "user_report",
+            "claim": "Example reported failure",
+            "area": "lexer-keywords",
+            "anchor_names": [],
+            "confidence": 0.8,
+            "decay_half_life_days": 30,
+            "source_issue": "example/fork#7",
+        },
+    }
+    run = {
+        "round_id": "round-example",
+        "agent_id": "triager",
+        "role": "triager",
+        "event_ids": ["ev-example"],
+    }
+    evidence = {"ev-example": {"taint": 2}}
+    options = dict(
+        index=index,
+        base_commit=index.sha,
+        committed_at=datetime(2026, 11, 15, tzinfo=UTC),
+    )
+    status, _, fact = validate_proposal(
+        "round-example", proposal, run, evidence, **options
+    )
+    assert status == "accepted"
+    assert fact["source_issue"] == "example/fork#7"
+    assert fact["taint"] == 2
+    assert fact["anchors"] == []
+    proposal["payload"]["source_issue"] = 7
+    assert validate_proposal("round-example", proposal, run, evidence, **options) == (
+        "rejected",
+        "source_issue must be a string",
+        None,
+    )
+
+
+def test_bug_cause_rejects_unknown_anchor_or_missing_scip_without_throwing():
+    base = "a" * 40  # synthetic base
+    proposal = {
+        "_id": "prop-example",
+        "round_id": "round-example",
+        "agent_id": "reproducer",
+        "run_id": "run-example",
+        "op": "assert_fact",
+        "evidence_event_ids": ["ev-example"],
+        "payload": {
+            "kind": "bug_cause",
+            "claim": "Example cause",
+            "area": "lexer-keywords",
+            "anchor_names": ["sqlparse.unknown.function"],
+            "confidence": 0.7,
+            "decay_half_life_days": 90,
+            "evidence_test": "tests/test_example.py::test_example",
+        },
+    }
+    run = {
+        "round_id": "round-example",
+        "agent_id": "reproducer",
+        "role": "reproducer",
+        "event_ids": ["ev-example"],
+    }
+    evidence = {"ev-example": {"taint": 0}}
+    assert validate_proposal(
+        "round-example",
+        proposal,
+        run,
+        evidence,
+        index=ScipIndex({}, sha=base),
+        base_commit=base,
+        committed_at=datetime(2026, 11, 15, tzinfo=UTC),
+    ) == (
+        "rejected",
+        "fact anchors could not be resolved at the base commit",
+        None,
+    )
+    assert validate_proposal("round-example", proposal, run, evidence) == (
+        "rejected",
+        "fact requires a matching index and base commit",
+        None,
+    )

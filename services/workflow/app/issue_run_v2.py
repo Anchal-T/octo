@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -516,6 +517,33 @@ async def run_issue_v2(
     triage_prop_id = str(
         triage_prop_raw.get("id") or stable_id("prop", triage_prop_key)
     )
+    if triage is not None and (
+        issue_match := re.fullmatch(r"gh-\d+-(\d+)", request.issue_id)
+    ):
+        await ctx.run_typed(
+            "write-user-report-proposal",
+            post_memory,
+            path=f"/v1/rounds/{r1_id}/proposals",
+            payload=ProposalWrite(
+                idempotency_key=f"{prefix}:user-report-proposal:1",
+                round_id=r1_id,
+                agent_id="triager",
+                run_id=triage_run_id,
+                op="assert_fact",
+                evidence_event_ids=[issue_ev_id],
+                payload={
+                    "kind": "user_report",
+                    "claim": triage.summary,
+                    "area": area,
+                    "anchor_names": [],
+                    "confidence": settings.fact_user_report_initial_confidence,
+                    "decay_half_life_days": settings.fact_user_report_half_life_days,
+                    "evidence_test": None,
+                    "supersedes": None,
+                    "source_issue": f"{request.repo}#{issue_match[1]}",
+                },
+            ).model_dump(mode="json"),
+        )
     r1_commit_raw = await ctx.run_typed(
         "commit-round:1",
         post_memory,
@@ -651,6 +679,30 @@ async def run_issue_v2(
         ).model_dump(mode="json"),
     )
     repro_prop_id = str(repro_prop_raw.get("id") or stable_id("prop", repro_prop_key))
+    if repro.fact_claim and repro.evidence_event_id:
+        await ctx.run_typed(
+            "write-bug-cause-proposal",
+            post_memory,
+            path=f"/v1/rounds/{r2_id}/proposals",
+            payload=ProposalWrite(
+                idempotency_key=f"{prefix}:bug-cause-proposal:1",
+                round_id=r2_id,
+                agent_id="reproducer",
+                run_id=repro_run_id,
+                op="assert_fact",
+                evidence_event_ids=[repro.evidence_event_id],
+                payload={
+                    "kind": "bug_cause",
+                    "claim": repro.fact_claim,
+                    "area": area,
+                    "anchor_names": list(repro.anchor_names),
+                    "confidence": 0.7,
+                    "decay_half_life_days": 90,
+                    "evidence_test": repro.test_node_id,
+                    "supersedes": None,
+                },
+            ).model_dump(mode="json"),
+        )
     r2_commit_raw = await ctx.run_typed(
         "commit-round:2",
         post_memory,
