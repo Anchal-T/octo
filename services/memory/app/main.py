@@ -207,7 +207,7 @@ def query_facts(request: FactQuery) -> FactQueryResponse:
         raise HTTPException(status_code=404, detail="unknown base_commit")
 
     try:
-        raw_facts = store.facts_for_symbols(request.symbols)
+        raw_facts = store.facts_for_symbols(request.symbols, full=True)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 

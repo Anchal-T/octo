@@ -238,7 +238,9 @@ class MemoryStore:
             for row in rows
         ]
 
-    def facts_for_symbols(self, symbols: list[str]) -> list[dict[str, Any]]:
+    def facts_for_symbols(
+        self, symbols: list[str], *, full: bool = False
+    ) -> list[dict[str, Any]]:
         if any("\x00" in symbol for symbol in symbols):
             raise ValueError("symbol names must not contain NUL characters")
         symbols = list(dict.fromkeys(symbols))
@@ -248,15 +250,24 @@ class MemoryStore:
         with self._connect() as conn:
             for chunk in _chunks(symbols, _MAX_QUERY_PARAMS):
                 placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in chunk)
-                query = sql.SQL(
+                cols = (
                     "SELECT _id, valid_from_commit, anchors, evidence_test, "
                     "claim, kind, area, confidence, decay_half_life_days, "
                     "last_confirmed_at, taint, supersedes "
-                    "FROM facts FOR ALL VALID_TIME "
+                    if full
+                    else "SELECT _id, valid_from_commit, anchors, evidence_test "
+                )
+                query = sql.SQL(
+                    cols
+                    + "FROM facts FOR ALL VALID_TIME "
                     "WHERE EXISTS (SELECT 1 FROM UNNEST(anchors) AS a(anc) "
                     "WHERE (a.anc).symbol IN ({}))"
                 ).format(placeholders)
                 for row in conn.execute(query, chunk).fetchall():
+                    if full:
+                        row = {
+                            k: v for k, v in row.items() if not k.startswith("_column_")
+                        }
                     rows_by_id.setdefault(row["_id"], row)
         return list(rows_by_id.values())
 

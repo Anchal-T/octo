@@ -272,7 +272,7 @@ async def test_query_facts_success(monkeypatch):
         "evidence_test": "tests/test_x.py::test_y",
     }
     monkeypatch.setattr(store, "get_dag", lambda: dag)
-    monkeypatch.setattr(store, "facts_for_symbols", lambda symbols: [fact])
+    monkeypatch.setattr(store, "facts_for_symbols", lambda symbols, **kwargs: [fact])
     monkeypatch.setattr(store, "closures_for_facts", lambda ids: [])
 
     async with httpx.AsyncClient(
