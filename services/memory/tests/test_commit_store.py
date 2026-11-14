@@ -65,3 +65,29 @@ def test_commit_records_preserve_parent_diffs_and_are_idempotent():
         )
     with pytest.raises(UnknownCommit):
         store.record_commit(_commit("e" * 40, ("f" * 40,)))
+
+
+def test_metadata_bootstrap_can_upgrade_without_losing_valid_time():
+    from dataclasses import replace
+    from uuid import uuid4
+
+    store = MemoryStore()
+    root = replace(_commit(uuid4().hex + "0" * 8), symbols_indexed=False)
+    base = replace(_commit(uuid4().hex + "0" * 8, (root.sha,)), symbols_indexed=False)
+    store.record_commit_metadata([root, base])
+    store.record_commit_metadata([root, base])
+    assert not store.get_dag().commits[base.sha].symbols_indexed
+    with pytest.raises(ValueError, match="not indexed"):
+        store.get_dag().commits[base.sha].symbols_vs(root.sha)
+    indexed = replace(base, symbols_indexed=True, changed_symbols=("example.symbol",))
+    store.record_commit(indexed)
+    assert store.record_commit(indexed)["changed_symbols"] == ["example.symbol"]
+    store.record_commit_metadata([root, base])
+    assert store.get_dag().commits[base.sha] == indexed
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT _valid_from FROM commits WHERE _id = %s", (base.sha,)
+        ).fetchone()
+    assert row["_valid_from"] == COMMITTED_AT
+    with pytest.raises(IdempotencyConflict):
+        store.record_commit_metadata([replace(base, author="different")])

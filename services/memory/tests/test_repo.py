@@ -18,6 +18,10 @@ class FakeStore:
         self.get_commits_calls += 1
         return list(self.commits.values())
 
+    def record_commit_metadata(self, commits):
+        for commit in commits:
+            self.commits.setdefault(commit.sha, commit)
+
     def record_commit(self, commit):
         self.commits[commit.sha] = commit
 
@@ -182,3 +186,52 @@ def test_on_push_orders_a_shuffled_commit_batch_parents_first(tmp_path):
         child,
     ]
     assert list(store.commits) == [root, child]
+
+
+def test_bootstrap_indexes_only_base_then_new_pushes(tmp_path):
+    path = tmp_path / "bounded-repo"
+    path.mkdir()
+    _git(path, "init", "--quiet")
+    _git(path, "config", "user.name", "Test")
+    _git(path, "config", "user.email", "test@example.com")
+    shas = []
+    for value in (1, 2, 3, 4):
+        (path / "module.py").write_text(
+            f"def f():\n    return {value}\ndef g():\n    return 1\n"
+        )
+        _git(path, "add", ".")
+        _git(path, "commit", "--quiet", "-m", f"example revision {value}")
+        shas.append(_git(path, "rev-parse", "HEAD"))
+    root, parent, base, child = shas
+    store = FakeStore([])
+    indexer = FakeIndexer(
+        {
+            sha: _index(sha, "module.f().", "module.g().")
+            for sha in (parent, base, child)
+        }
+    )
+    processor = Repo(store, GitRepo(path), indexer)
+    processor.bootstrap(base)
+    assert set(store.commits) == {root, parent, base}
+    assert not store.commits[root].symbols_indexed
+    assert store.commits[base].symbols_indexed
+    assert indexer.calls == [parent, base]
+    processor.bootstrap(base)
+    assert indexer.calls == [parent, base]
+    store.facts.append(
+        {
+            "_id": "fact-example",
+            "valid_from_commit": base,
+            "anchors": [{"symbol": "module.f().", "sha": base}],
+            "evidence_test": None,
+        }
+    )
+    processor.on_push([child], "main")
+    assert store.commits[child].changed_symbols == ("module.f().",)
+    assert {(row["fact_id"], row["closing_commit"]) for row in store.closures} == {
+        ("fact-example", child)
+    }
+    assert root not in indexer.calls
+    indexer.indexes[root] = _index(root, "module.f().", "module.g().")
+    processor.replay(shas, main_head=child)
+    assert all(commit.symbols_indexed for commit in store.commits.values())

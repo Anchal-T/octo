@@ -18,12 +18,15 @@ class Commit:
     author: str | None
     changed_symbols: tuple[str, ...]
     merge_side_symbols: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    symbols_indexed: bool = True
 
     def __post_init__(self) -> None:
         if self.committed_at.tzinfo is None or self.committed_at.utcoffset() is None:
             raise ValueError("committed_at must be timezone-aware")
 
     def symbols_vs(self, parent: str) -> tuple[str, ...]:
+        if not self.symbols_indexed:
+            raise ValueError(f"symbol diffs are not indexed for {self.sha}")
         if not self.parents or parent not in self.parents:
             raise KeyError(parent)
         if parent == self.parents[0]:
