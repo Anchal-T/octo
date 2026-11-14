@@ -4,6 +4,9 @@ from agentteam_contracts import (
     CommitRound,
     EventRecord,
     EventWrite,
+    FactQuery,
+    FactQueryResponse,
+    FactView,
     ProposalRecord,
     ProposalWrite,
     RoundRecord,
@@ -16,6 +19,8 @@ from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from .dag import UnknownCommit
+from .fact_query import filter_valid
 from .store import IdempotencyConflict, MemoryStore, RoundConflict
 
 app = FastAPI(title="Agent Team Memory")
@@ -187,3 +192,73 @@ def commit_round(round_id: str, request: CommitRound) -> RoundRecord:
         return _round(store.commit_round(round_id))
     except RoundConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/v1/facts/query", response_model=FactQueryResponse)
+def query_facts(request: FactQuery) -> FactQueryResponse:
+    try:
+        dag = store.get_dag()
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="commit DAG unavailable") from error
+
+    if request.base_commit not in dag.commits:
+        raise HTTPException(status_code=404, detail="unknown base_commit")
+
+    try:
+        raw_facts = store.facts_for_symbols(request.symbols)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    fact_ids = [f["_id"] for f in raw_facts if "_id" in f or "id" in f]
+    closures_rows = store.closures_for_facts(fact_ids)
+    closures: dict[str, set[str]] = {fid: set() for fid in fact_ids}
+    for row in closures_rows:
+        closures[row["fact_id"]].add(row["closing_commit"])
+
+    try:
+        valid_facts, dropped = filter_valid(
+            raw_facts,
+            closures,
+            dag,
+            request.base_commit,
+            ancestry_filter=request.ancestry_filter,
+        )
+    except (UnknownCommit, KeyError) as error:
+        raise HTTPException(status_code=404, detail="unknown base_commit") from error
+
+    if request.limit is not None and request.limit > 0:
+        valid_facts = valid_facts[: request.limit]
+
+    fact_views = [
+        FactView(
+            id=f.get("_id") or f.get("id"),
+            claim=f.get("claim") or "",
+            kind=f.get("kind") or "",
+            area=f.get("area") or "",
+            anchors=f.get("anchors") or [],
+            valid_from_commit=f["valid_from_commit"],
+            closing_commits=sorted(
+                closures.get(f.get("_id") or f.get("id"))
+                or f.get("closing_commits")
+                or []
+            ),
+            confidence=float(f.get("confidence") if f.get("confidence") is not None else 1.0),
+            decay_half_life_days=float(
+                f.get("decay_half_life_days")
+                if f.get("decay_half_life_days") is not None
+                else 90.0
+            ),
+            last_confirmed_at=f.get("last_confirmed_at"),
+            taint=int(f.get("taint", 0)),
+            evidence_test=f.get("evidence_test"),
+            source_issue=f.get("source_issue"),
+            supersedes=f.get("supersedes"),
+        )
+        for f in valid_facts
+    ]
+
+    return FactQueryResponse(
+        base_commit=request.base_commit,
+        facts=fact_views,
+        dropped=dropped,
+    )

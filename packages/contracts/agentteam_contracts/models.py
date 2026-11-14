@@ -495,3 +495,40 @@ class IssueRunResultV2(Contract):
     decided_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+class FactQuery(Contract):
+    symbols: list[str] = Field(default_factory=list)
+    base_commit: str = Field(min_length=1, max_length=64)
+    ancestry_filter: bool = True
+    limit: int = Field(default=50, ge=1, le=1000)
+
+    @field_validator("symbols")
+    @classmethod
+    def validate_symbols(cls, symbols: list[str]) -> list[str]:
+        if any("\x00" in s for s in symbols):
+            raise ValueError("symbol names must not contain NUL characters")
+        return symbols
+
+
+class FactView(Contract):
+    id: str
+    claim: str = ""
+    kind: str = ""
+    area: str = ""
+    anchors: list[dict[str, Any]] = Field(default_factory=list)
+    valid_from_commit: str
+    closing_commits: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    decay_half_life_days: float = Field(default=90.0, gt=0.0)
+    last_confirmed_at: datetime | None = None
+    taint: int = Field(default=0, ge=0, le=3)
+    evidence_test: str | None = None
+    source_issue: str | None = None
+    supersedes: str | None = None
+
+
+class FactQueryResponse(Contract):
+    base_commit: str
+    facts: list[FactView] = Field(default_factory=list)
+    dropped: dict[str, int] = Field(default_factory=dict)

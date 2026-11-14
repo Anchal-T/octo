@@ -15,7 +15,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg.types.string import StrDumperVarchar
 
-from .dag import Commit, UnknownCommit
+from .dag import Commit, Dag, UnknownCommit
 from .scip_indexer import ScipIndexer
 from .sync import resolve_edit_conflicts, validate_proposal
 
@@ -177,6 +177,9 @@ class MemoryStore:
         with self._connect() as conn:
             return self._fetch(conn, "commits", sha)
 
+    def get_dag(self) -> Dag:
+        return Dag.from_commits(self.get_commits())
+
     def get_commits(self) -> list[Commit]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -210,7 +213,9 @@ class MemoryStore:
             for chunk in _chunks(symbols, _MAX_QUERY_PARAMS):
                 placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in chunk)
                 query = sql.SQL(
-                    "SELECT _id, valid_from_commit, anchors, evidence_test "
+                    "SELECT _id, valid_from_commit, anchors, evidence_test, "
+                    "claim, kind, area, confidence, decay_half_life_days, "
+                    "last_confirmed_at, taint, supersedes "
                     "FROM facts FOR ALL VALID_TIME "
                     "WHERE EXISTS (SELECT 1 FROM UNNEST(anchors) AS a(anc) "
                     "WHERE (a.anc).symbol IN ({}))"

@@ -218,3 +218,80 @@ async def test_missing_run_and_proposal_reads_return_404(monkeypatch):
 
     assert run_response.status_code == 404
     assert proposal_response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_1_7_query_facts_unknown_base_returns_404(monkeypatch):
+    from services.memory.app.dag import Commit, Dag
+    c0 = Commit("known-sha", (), datetime(2026, 1, 1, tzinfo=UTC), "main", "test", ())
+    dag = Dag.from_commits([c0])
+    monkeypatch.setattr(store, "get_dag", lambda: dag)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/facts/query",
+            json={"symbols": ["my_symbol"], "base_commit": "unknown-sha"},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "unknown base_commit"}
+
+
+@pytest.mark.anyio
+async def test_1_7_query_facts_nul_in_symbol_returns_422():
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/facts/query",
+            json={"symbols": ["bad\x00symbol"], "base_commit": "known-sha"},
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_query_facts_success(monkeypatch):
+    from services.memory.app.dag import Commit, Dag
+    c0 = Commit("sha-0", (), datetime(2026, 1, 1, tzinfo=UTC), "main", "test", ())
+    c1 = Commit("sha-1", ("sha-0",), datetime(2026, 1, 2, tzinfo=UTC), "main", "test", ())
+    dag = Dag.from_commits([c0, c1])
+    fact = {
+        "_id": "fact-1a2b3c4d5e6f",
+        "valid_from_commit": "sha-0",
+        "claim": "Lexer tokenizes correctly",
+        "kind": "bug_cause",
+        "area": "lexer",
+        "anchors": [{"symbol": "my_symbol"}],
+        "confidence": 0.8,
+        "decay_half_life_days": 90.0,
+        "last_confirmed_at": "2026-11-10T12:00:00Z",
+        "taint": 0,
+        "evidence_test": "tests/test_x.py::test_y",
+    }
+    monkeypatch.setattr(store, "get_dag", lambda: dag)
+    monkeypatch.setattr(store, "facts_for_symbols", lambda symbols: [fact])
+    monkeypatch.setattr(store, "closures_for_facts", lambda ids: [])
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/facts/query",
+            json={
+                "symbols": ["my_symbol"],
+                "base_commit": "sha-1",
+                "ancestry_filter": True,
+                "limit": 50,
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["base_commit"] == "sha-1"
+    assert len(data["facts"]) == 1
+    assert data["facts"][0]["id"] == "fact-1a2b3c4d5e6f"
+    assert data["facts"][0]["claim"] == "Lexer tokenizes correctly"
+    assert data["dropped"] == {"not_ancestor": 0, "closed": 0, "expired": 0}
