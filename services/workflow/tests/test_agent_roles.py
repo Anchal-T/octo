@@ -9,11 +9,15 @@ import pytest
 from agentteam_contracts import ModelCallRequest, ModelOutcome, TriageResult
 
 from services.workflow.app.roles import (
+    BashAction,
     CleanCheckResult,
     SandboxSessionManager,
+    estimate_messages_tokens,
     finalize_tester_review,
     fit_messages_to_cap,
     fixer_base_messages,
+    parse_fix_action,
+    parse_repro_action,
     parse_tester_review,
     reproducer_base_messages,
     run_clean_checkout_check,
@@ -147,6 +151,62 @@ def test_fit_messages_to_cap_keeps_prompt_within_budget_and_quotes_issue():
     assert estimated_tokens <= 1500
     assert fitted[0]["role"] == "system"
     assert fitted[-1]["role"] == "user"
+
+
+def test_repro_and_fix_parsers_accept_wrapped_json_tool_call():
+    reply = (
+        "<tool_call>\n<function=action>\n"
+        '{"action": "bash", "command": "ls"}\n'
+        "</parameter>\n</function>\n</tool_call>"
+    )
+
+    assert parse_repro_action(reply) == BashAction(command="ls")
+    assert parse_fix_action(reply) == BashAction(command="ls")
+
+
+def test_repro_and_fix_parsers_accept_parameter_tool_call():
+    reply = (
+        "<tool_call>\n<function=action>\n"
+        "<parameter=action>\nbash\n</parameter>\n"
+        "<parameter=command>\nls -la\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    tester_reply = (
+        "<tool_call>\n<function=review>\n"
+        "<parameter=verdict>\napprove\n</parameter>\n"
+        "<parameter=summary>\nLooks good\n</parameter>\n"
+        "<parameter=notes>\n\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+
+    assert parse_repro_action(reply) == BashAction(command="ls -la")
+    assert parse_fix_action(reply) == BashAction(command="ls -la")
+    tester_review = parse_tester_review(tester_reply)
+    assert tester_review is not None
+    assert tester_review.verdict == "approve"
+
+
+def test_repro_and_fix_parsers_reject_truncated_or_garbage_replies():
+    assert parse_repro_action('{"action": "bash", "</parameter>...') is None
+    assert parse_fix_action('{"action": "bash", "</parameter>...') is None
+    assert parse_repro_action("not a tool call") is None
+    assert parse_fix_action("not a tool call") is None
+
+
+def test_reproducer_prompt_lists_tracked_files_within_token_cap():
+    messages = reproducer_base_messages(
+        "Anchal-T/demo",
+        "Issue title",
+        "Issue body",
+        None,
+        tracked_files="\n".join(f"src/module_{index}.py" for index in range(100)),
+        prompt_token_cap=300,
+    )
+
+    assert "Tracked files (git ls-files):" in messages[1]["content"]
+    assert "src/module_0.py" in messages[1]["content"]
+    assert "src/module_99.py" not in messages[1]["content"]
+    assert estimate_messages_tokens(messages) <= 300
 
 
 @pytest.mark.anyio

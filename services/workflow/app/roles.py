@@ -29,6 +29,11 @@ from .sandbox import (
 from .triage import _escape_invalid_backslashes
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*(.*?)\s*```$", re.DOTALL)
+_TOOL_WRAPPER_START_RE = re.compile(r"^\s*<(?:tool_call|function=[^>]+)>\s*")
+_TOOL_WRAPPER_END_RE = re.compile(r"\s*</(?:tool_call|function)>\s*$")
+_PARAMETER_RE = re.compile(
+    r"<parameter=([A-Za-z_][A-Za-z0-9_]*)>(.*?)</parameter>", re.DOTALL
+)
 
 REPRODUCER_SYSTEM_PROMPT = (
     "You are the Reproducer agent for this repository. "
@@ -328,22 +333,44 @@ def reproducer_base_messages(
     title: str,
     body: str,
     triage: TriageResult | None,
+    *,
+    tracked_files: str = "",
+    prompt_token_cap: int = 5500,
 ) -> list[dict[str, str]]:
     triage_line = (
         f"Triaged area: {triage.area} ({triage.kind}, priority {triage.priority}) - {triage.summary}\n\n"
         if triage is not None
         else ""
     )
-    user = (
-        f"Repository: {repo}\n"
-        f"{triage_line}"
-        f"{quote_untrusted_issue(title, body)}\n\n"
-        "Start by inspecting the relevant module and existing tests, then create a minimal failing pytest test."
-    )
-    return [
-        {"role": "system", "content": REPRODUCER_SYSTEM_PROMPT},
-        {"role": "user", "content": user},
-    ]
+
+    def messages_for(files: str) -> list[dict[str, str]]:
+        tracked_files_line = (
+            f"\n\nTracked files (git ls-files):\n{files}" if files else ""
+        )
+        user = (
+            f"Repository: {repo}\n"
+            f"{triage_line}"
+            f"{quote_untrusted_issue(title, body)}\n\n"
+            "Start by inspecting the relevant module and existing tests, then create a minimal failing pytest test."
+            f"{tracked_files_line}"
+        )
+        return [
+            {"role": "system", "content": REPRODUCER_SYSTEM_PROMPT},
+            {"role": "user", "content": user},
+        ]
+
+    messages = messages_for("")
+    selected_files: list[str] = []
+    for path in tracked_files.splitlines():
+        if not path.strip():
+            continue
+        candidate = messages_for("\n".join([*selected_files, path]))
+        if estimate_messages_tokens(candidate) > prompt_token_cap:
+            break
+        selected_files.append(path)
+    if selected_files:
+        messages = messages_for("\n".join(selected_files))
+    return messages
 
 
 def fixer_base_messages(
@@ -417,19 +444,40 @@ def _decode_json_object(text: str | None) -> dict[str, Any] | None:
     fenced = _FENCE_RE.match(candidate)
     if fenced:
         candidate = fenced.group(1)
+    while match := _TOOL_WRAPPER_START_RE.match(candidate):
+        candidate = candidate[match.end() :]
+    while match := _TOOL_WRAPPER_END_RE.search(candidate):
+        candidate = candidate[: match.start()]
+    candidate = candidate.strip()
+
     start = candidate.find("{")
-    if start == -1:
-        return None
-    decoder = json.JSONDecoder()
-    try:
-        data, _ = decoder.raw_decode(candidate, start)
-    except (RecursionError, ValueError):
-        repaired = _escape_invalid_backslashes(candidate[start:])
+    if start != -1:
+        decoder = json.JSONDecoder()
         try:
-            data, _ = decoder.raw_decode(repaired)
+            data, _ = decoder.raw_decode(candidate, start)
         except (RecursionError, ValueError):
+            repaired = _escape_invalid_backslashes(candidate[start:])
+            try:
+                data, _ = decoder.raw_decode(repaired)
+            except (RecursionError, ValueError):
+                data = None
+        if isinstance(data, dict):
+            return data
+
+    matches = list(_PARAMETER_RE.finditer(candidate))
+    if not matches or candidate[: matches[0].start()].strip():
+        return None
+    data = {}
+    cursor = 0
+    for match in matches:
+        if candidate[cursor : match.start()].strip():
             return None
-    return data if isinstance(data, dict) else None
+        name, value = match.groups()
+        if name in data:
+            return None
+        data[name] = value.strip()
+        cursor = match.end()
+    return data if not candidate[cursor:].strip() else None
 
 
 def parse_repro_action(text: str | None) -> BashAction | SubmitReproAction | None:
@@ -780,6 +828,16 @@ def run_clean_checkout_check(
         sb.close()
 
 
+def _read_tracked_files(
+    sessions: SandboxSessionManager, *, session_key: str, base_commit: str
+) -> str:
+    sandbox = sessions.ensure(session_key, base_commit=base_commit)
+    result = sandbox.exec("git ls-files")
+    if result.exit_code != 0 or result.timed_out:
+        return ""
+    return result.stdout_trimmed
+
+
 async def run_reproducer_step(
     *,
     journal: StepJournal,
@@ -796,7 +854,21 @@ async def run_reproducer_step(
     prompt_token_cap: int,
     cmd_timeout_s: float = 60.0,
 ) -> ReproStepResult:
-    base_msgs = reproducer_base_messages(repo, title, body, triage)
+    tracked_files = await journal.run_step(
+        "repro-tracked-files",
+        _read_tracked_files,
+        sessions,
+        session_key=session_key,
+        base_commit=base_commit,
+    )
+    base_msgs = reproducer_base_messages(
+        repo,
+        title,
+        body,
+        triage,
+        tracked_files=tracked_files,
+        prompt_token_cap=prompt_token_cap,
+    )
     turns: list[tuple[str, str]] = []
     event_ids: list[str] = []
     tokens_in = 0
