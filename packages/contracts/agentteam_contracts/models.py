@@ -159,6 +159,8 @@ class ModelCallRequest(Contract):
     step: str = Field(min_length=1, max_length=128)
     role: ModelRole
     messages: list[dict[str, Any]] = Field(min_length=1)
+    tools: list[dict[str, Any]] | None = Field(default=None, min_length=1)
+    tool_choice: Literal["auto", "required"] | None = None
     sampling: Sampling = Field(default_factory=Sampling)
     taint: int = Field(ge=0, le=3)
     source: Literal["github_issue", "user_feedback"]

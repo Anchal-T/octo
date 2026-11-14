@@ -205,6 +205,50 @@ def test_duplicate_model_call_returns_cached_completion_and_logs_fields(
     assert "test-only-value" not in caplog.text
 
 
+def test_tool_schemas_are_sent_and_part_of_the_cached_request_identity(tmp_path):
+    bodies = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": MODEL,
+                "choices": [{"message": {"content": "completed"}}],
+            },
+        )
+
+    client, _ = make_client(tmp_path, provider)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    required = model_request().model_copy(
+        update={"tools": tools, "tool_choice": "required"}
+    )
+    auto = required.model_copy(update={"tool_choice": "auto"})
+
+    first = client.call(required)
+    replay = client.call(required)
+    different_choice = client.call(auto)
+
+    assert replay.request_id == first.request_id
+    assert different_choice.request_id != first.request_id
+    assert len(bodies) == 2
+    assert bodies[0]["tools"] == tools
+    assert bodies[0]["tool_choice"] == "required"
+    assert bodies[1]["tool_choice"] == "auto"
+
+
 def test_short_429_retries_once_on_the_same_pinned_model(tmp_path):
     requests = []
     sleeps = []
@@ -277,6 +321,47 @@ def test_provider_500_returns_retryable_outcome_and_retries_same_model(tmp_path)
     assert second.retry_count == 1
     assert models == [MODEL, MODEL]
     assert calls == 2
+
+
+def test_provider_400_body_is_redacted_truncated_and_logged(
+    tmp_path, caplog, monkeypatch
+):
+    groq_key = "test-only-groq-key"
+    provider_token = "provider-private-token"
+    monkeypatch.setenv("GROQ_API_KEY", groq_key)
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": (
+                        "invalid tool-call history "
+                        f"Bearer {provider_token} " + ("detail " * 500)
+                    ),
+                    "api_key": groq_key,
+                    "authorization": f"Bearer {provider_token}",
+                }
+            },
+        )
+
+    client, _ = make_client(tmp_path, provider)
+    with caplog.at_level(logging.INFO, logger="services.workflow.app.models.client"):
+        result = client.call(model_request())
+
+    assert result.outcome == "failed"
+    assert result.error_code == "provider_http_400"
+    assert result.reason is not None
+    assert "invalid tool-call history" in result.reason
+    error_body = result.reason.partition("response body: ")[2]
+    assert error_body
+    assert len(error_body.encode("utf-8")) <= 2048
+    assert "truncated" in error_body
+    assert groq_key not in result.reason
+    assert provider_token not in result.reason
+    assert "invalid tool-call history" in caplog.text
+    assert groq_key not in caplog.text
+    assert provider_token not in caplog.text
 
 
 def test_connect_error_returns_retryable_outcome_and_retries_same_model(tmp_path):

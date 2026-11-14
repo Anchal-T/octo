@@ -9,11 +9,18 @@ import pytest
 from agentteam_contracts import ModelCallRequest, ModelOutcome, TriageResult
 
 from services.workflow.app.roles import (
+    FIXER_TOOLS,
+    REPRODUCER_TOOLS,
+    BashAction,
     CleanCheckResult,
     SandboxSessionManager,
+    _action_turn,
+    estimate_messages_tokens,
     finalize_tester_review,
     fit_messages_to_cap,
     fixer_base_messages,
+    parse_fix_action,
+    parse_repro_action,
     parse_tester_review,
     reproducer_base_messages,
     run_clean_checkout_check,
@@ -65,23 +72,31 @@ def _init_buggy_repo(path: Path) -> str:
 class FakeStepJournal:
     def __init__(
         self,
-        replies: list[str],
+        replies: list[str | dict[str, Any]],
         *,
         recorded: dict[str, Any] | None = None,
     ) -> None:
         self.replies = list(replies)
         self.recorded: dict[str, Any] = dict(recorded or {})
         self.model_calls = 0
+        self.requests: list[ModelCallRequest] = []
         self.events: list[dict[str, Any]] = []
         self.sleeps: list[tuple[str, float]] = []
 
     async def call_model(
         self, name: str, request: ModelCallRequest
     ) -> tuple[ModelOutcome, str]:
+        self.requests.append(request)
         if name in self.recorded:
             return ModelOutcome.model_validate(self.recorded[name]), "groq"
         self.model_calls += 1
-        text = self.replies.pop(0)
+        reply = self.replies.pop(0)
+        if isinstance(reply, dict):
+            text = reply.get("text")
+            tool_calls = reply.get("tool_calls", [])
+        else:
+            text = reply
+            tool_calls = []
         outcome = ModelOutcome(
             outcome="completed",
             request_id=f"mc-{self.model_calls}",
@@ -91,6 +106,7 @@ class FakeStepJournal:
             run_id=request.run_id,
             step=request.step,
             text=text,
+            tool_calls=tool_calls,
             tokens_in=50,
             tokens_out=25,
             started_at=NOW,
@@ -136,8 +152,8 @@ def test_fit_messages_to_cap_keeps_prompt_within_budget_and_quotes_issue():
 
     turns = [
         (
-            '{"action": "bash", "command": "pytest"}',
-            "output-" + ("x" * 3000),
+            {"role": "assistant", "content": '{"action": "bash", "command": "pytest"}'},
+            {"role": "user", "content": "Observation:\n" + ("x" * 3000)},
         )
         for _ in range(8)
     ]
@@ -147,6 +163,202 @@ def test_fit_messages_to_cap_keeps_prompt_within_budget_and_quotes_issue():
     assert estimated_tokens <= 1500
     assert fitted[0]["role"] == "system"
     assert fitted[-1]["role"] == "user"
+
+
+def test_repro_and_fix_parsers_accept_wrapped_json_tool_call():
+    reply = (
+        "<tool_call>\n<function=action>\n"
+        '{"action": "bash", "command": "ls"}\n'
+        "</parameter>\n</function>\n</tool_call>"
+    )
+
+    assert parse_repro_action(reply) == BashAction(command="ls")
+    assert parse_fix_action(reply) == BashAction(command="ls")
+
+
+def test_repro_and_fix_parsers_accept_parameter_tool_call():
+    reply = (
+        "<tool_call>\n<function=action>\n"
+        "<parameter=action>\nbash\n</parameter>\n"
+        "<parameter=command>\nls -la\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    tester_reply = (
+        "<tool_call>\n<function=review>\n"
+        "<parameter=verdict>\napprove\n</parameter>\n"
+        "<parameter=summary>\nLooks good\n</parameter>\n"
+        "<parameter=notes>\n\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+
+    assert parse_repro_action(reply) == BashAction(command="ls -la")
+    assert parse_fix_action(reply) == BashAction(command="ls -la")
+    tester_review = parse_tester_review(tester_reply)
+    assert tester_review is not None
+    assert tester_review.verdict == "approve"
+
+
+def test_repro_and_fix_parsers_accept_r2_tool_call_after_prose():
+    reply = (
+        "I'll look...\n"
+        "<tool_call>\n<function=bash>\n<parameter=command>\n"
+        'cd /workspace && grep -rn "def split" sqlparse/\n'
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    expected = BashAction(command='cd /workspace && grep -rn "def split" sqlparse/')
+
+    assert parse_repro_action(reply) == expected
+    assert parse_fix_action(reply) == expected
+
+
+def test_repro_and_fix_parsers_accept_native_tool_calls():
+    tool_calls = [
+        {
+            "id": "call-bash-1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"command":"ls -la"}'},
+        }
+    ]
+    assert parse_repro_action(None, tool_calls) == BashAction(command="ls -la")
+    assert parse_fix_action(None, tool_calls) == BashAction(command="ls -la")
+
+
+def test_repro_and_fix_parsers_reject_truncated_or_garbage_replies():
+    truncated = '{"action": "bash", "</parameter>...'
+    assert parse_repro_action(truncated) is None
+    assert parse_fix_action(truncated) is None
+    assert parse_repro_action("<tool_call><function=bash>truncated") is None
+    assert parse_fix_action("<tool_call><function=bash>truncated") is None
+    assert parse_repro_action("not a tool call") is None
+    assert parse_fix_action("not a tool call") is None
+
+
+def test_reproducer_prompt_lists_tracked_files_within_token_cap():
+    messages = reproducer_base_messages(
+        "Anchal-T/demo",
+        "Issue title",
+        "Issue body",
+        None,
+        tracked_files="\n".join(f"src/module_{index}.py" for index in range(100)),
+        prompt_token_cap=600,
+    )
+
+    assert "git ls-files | grep" in messages[0]["content"]
+    assert "do not guess paths" in messages[0]["content"]
+    assert "Tracked files (git ls-files):" in messages[1]["content"]
+    assert "src/module_0.py" in messages[1]["content"]
+    assert "src/module_99.py" not in messages[1]["content"]
+    assert (
+        estimate_messages_tokens(
+            messages, tools=REPRODUCER_TOOLS, tool_choice="required"
+        )
+        <= 600
+    )
+
+
+def test_tool_result_is_capped_to_last_8_kb_with_truncation_note():
+    _, tool_message = _action_turn(
+        None,
+        [
+            {
+                "id": "call-output",
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": '{"command":"printf output"}',
+                },
+            }
+        ],
+        "begin" + ("x" * 9000) + "END",
+    )
+
+    output = tool_message["content"]
+    assert len(output.encode("utf-8")) <= 8 * 1024
+    assert output.startswith("[... earlier tool output truncated; showing the end ...]")
+    assert output.endswith("xEND")
+    assert "begin" not in output
+
+
+@pytest.mark.anyio
+async def test_reproducer_turn_two_request_has_groq_compatible_tool_history(tmp_path):
+    repo = tmp_path / "repo"
+    sha = _init_buggy_repo(repo)
+    manager = SandboxSessionManager(
+        lambda base_commit: LocalGitSandbox(
+            repo_path=repo,
+            base_commit=base_commit,
+            work_root=tmp_path / "work",
+        )
+    )
+    replies = [
+        {
+            "tool_calls": [
+                {
+                    "id": f"call-{turn}",
+                    "type": "function",
+                    "index": turn,
+                    "extra": "drop this response field",
+                    "function": {
+                        "name": "bash",
+                        "arguments": json.dumps(
+                            {"command": f"printf 'turn-{turn}\\n'"}
+                        ),
+                        "extra": "drop this function field",
+                    },
+                }
+            ]
+        }
+        for turn in range(3)
+    ]
+    journal = FakeStepJournal(replies)
+
+    result = await run_reproducer_step(
+        journal=journal,
+        sessions=manager,
+        session_key="gh-shape:repro",
+        key_prefix="gh-shape:v2",
+        run_id="run-shape",
+        repo="Anchal-T/demo",
+        base_commit=sha,
+        title="Example issue",
+        body="Example body",
+        triage=None,
+        turn_cap=3,
+        prompt_token_cap=5500,
+    )
+
+    assert result.succeeded is False
+    request = journal.requests[2]
+    assert request.step == "repro:2"
+    assert [message["role"] for message in request.messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "tool",
+    ]
+    for message in request.messages[:2]:
+        assert set(message) == {"role", "content"}
+    for assistant_index in (2, 4):
+        assistant = request.messages[assistant_index]
+        tool = request.messages[assistant_index + 1]
+        assert set(assistant) == {"role", "content", "tool_calls"}
+        assert assistant["role"] == "assistant"
+        assert assistant["content"] is None or isinstance(assistant["content"], str)
+        assert len(assistant["tool_calls"]) == 1
+        call = assistant["tool_calls"][0]
+        assert set(call) == {"id", "type", "function"}
+        assert isinstance(call["id"], str)
+        assert call["type"] == "function"
+        assert set(call["function"]) == {"name", "arguments"}
+        assert call["function"]["name"] == "bash"
+        assert isinstance(call["function"]["arguments"], str)
+        assert isinstance(json.loads(call["function"]["arguments"]), dict)
+        assert set(tool) == {"role", "tool_call_id", "content"}
+        assert tool["role"] == "tool"
+        assert tool["tool_call_id"] == call["id"]
+        assert isinstance(tool["content"], str)
 
 
 @pytest.mark.anyio
@@ -165,15 +377,26 @@ async def test_reproducer_rejects_passing_or_broken_tests_and_accepts_failing_re
     journal = FakeStepJournal(
         [
             # Turn 0: writes a passing test AND touches pkg/calc.py (should revert pkg/calc.py)
-            json.dumps(
-                {
-                    "action": "bash",
-                    "command": (
-                        "echo 'def test_ok(): assert 1 == 1' > tests/test_repro.py && "
-                        "echo '# bad' >> pkg/calc.py"
-                    ),
-                }
-            ),
+            {
+                "text": "I will inspect and create a minimal test.",
+                "tool_calls": [
+                    {
+                        "id": "call-repro-0",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": json.dumps(
+                                {
+                                    "command": (
+                                        "echo 'def test_ok(): assert 1 == 1' > tests/test_repro.py && "
+                                        "echo '# bad' >> pkg/calc.py"
+                                    )
+                                }
+                            ),
+                        },
+                    }
+                ],
+            },
             # Turn 1: tries to submit passing test -> rejected (exit 0 != 1)
             json.dumps(
                 {
@@ -240,6 +463,26 @@ async def test_reproducer_rejects_passing_or_broken_tests_and_accepts_failing_re
     assert result.files == ["tests/test_repro.py"]
     assert "pkg/calc.py" not in result.patch
     assert "assert safe_divide(5, 0) is None" in result.patch
+    first_request, second_request = journal.requests[:2]
+    assert first_request.tool_choice == second_request.tool_choice == "required"
+    assert {tool["function"]["name"] for tool in first_request.tools} == {
+        "bash",
+        "submit",
+    }
+    assistant_call = second_request.messages[-2]
+    assert assistant_call["role"] == "assistant"
+    assert assistant_call["content"] == "I will inspect and create a minimal test."
+    assert assistant_call["tool_calls"][0]["id"] == "call-repro-0"
+    assert second_request.messages[-1]["role"] == "tool"
+    assert second_request.messages[-1]["tool_call_id"] == "call-repro-0"
+    assert (
+        estimate_messages_tokens(
+            second_request.messages,
+            tools=second_request.tools,
+            tool_choice=second_request.tool_choice,
+        )
+        <= 5500
+    )
 
 
 @pytest.mark.anyio
@@ -281,7 +524,18 @@ async def test_fixer_rebuilds_lost_sandbox_on_replay_without_repeating_model_cal
     )
     partial_journal = FakeStepJournal(
         [
-            json.dumps({"action": "bash", "command": turn0_cmd}),
+            {
+                "tool_calls": [
+                    {
+                        "id": "call-fix-0",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": json.dumps({"command": turn0_cmd}),
+                        },
+                    }
+                ]
+            }
         ]
     )
     # Run with turn_cap=1 to capture recorded journal entries after Turn 0, then close W1's sandboxes.
@@ -341,6 +595,24 @@ async def test_fixer_rebuilds_lost_sandbox_on_replay_without_repeating_model_cal
     assert resumed.succeeded is True
     # Only Turn 1 called the model; Turn 0 was replayed from the journal!
     assert replay_journal.model_calls == 1
+    first_request, second_request = replay_journal.requests
+    assert first_request.role == second_request.role == "fixer"
+    assert first_request.tool_choice == second_request.tool_choice == "required"
+    assert {tool["function"]["name"] for tool in first_request.tools} == {
+        "bash",
+        "submit",
+    }
+    assert second_request.messages[-2]["tool_calls"][0]["id"] == "call-fix-0"
+    assert second_request.messages[-1]["role"] == "tool"
+    assert second_request.messages[-1]["tool_call_id"] == "call-fix-0"
+    assert (
+        estimate_messages_tokens(
+            second_request.messages,
+            tools=FIXER_TOOLS,
+            tool_choice=second_request.tool_choice,
+        )
+        <= 5500
+    )
     assert resumed.files == ["pkg/calc.py"]
     assert "tests/test_repro.py" not in resumed.patch
 

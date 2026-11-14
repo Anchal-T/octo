@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import re
 import sqlite3
 import time
 from collections.abc import Callable
@@ -19,6 +20,14 @@ from .pools import Pin, Pool, pin_for, pool_for
 from .store import Store
 
 logger = logging.getLogger(__name__)
+
+_PROVIDER_ERROR_BODY_MAX_BYTES = 2048
+_PROVIDER_SECRET_FIELD_RE = re.compile(
+    r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|"
+    r"client[_-]?secret|password|secret|authorization)[\"']?\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
+)
+_PROVIDER_BEARER_RE = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+")
 
 
 def retry_fits(
@@ -330,7 +339,12 @@ class ModelClient:
                     finished=finished,
                     http_status=status,
                     error_code=_provider_error_code(status),
-                    reason="provider rejected the model call",
+                    reason=(
+                        f"provider rejected the model call; response body: "
+                        f"{_provider_error_body(response.text, self.settings.groq_api_key)}"
+                        if status == 400 and response.text
+                        else "provider rejected the model call"
+                    ),
                 )
                 state = (
                     "refused"
@@ -487,6 +501,10 @@ class ModelClient:
             "messages": request.messages,
             **sampling,
         }
+        if request.tools is not None:
+            body["tools"] = request.tools
+        if request.tool_choice is not None:
+            body["tool_choice"] = request.tool_choice
         return self.http.post(
             f"{pool.base_url}/chat/completions",
             json=body,
@@ -821,10 +839,17 @@ def _payload_identity(
 ) -> tuple[str, dict[str, Any], str, int]:
     sampling = request.sampling.model_dump(mode="json", exclude_none=True)
     sampling["max_tokens"] = sampling.get("max_tokens") or pin.max_tokens
-    messages_json = json.dumps(request.messages, sort_keys=True, separators=(",", ":"))
-    prompt_tokens = math.ceil(len(messages_json.encode("utf-8")) / 4)
+    prompt_payload: dict[str, Any] = {"messages": request.messages}
+    if request.tools is not None:
+        prompt_payload["tools"] = request.tools
+    if request.tool_choice is not None:
+        prompt_payload["tool_choice"] = request.tool_choice
+    prompt_json = json.dumps(
+        prompt_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    prompt_tokens = math.ceil(len(prompt_json.encode("utf-8")) / 4)
     payload_json = json.dumps(
-        {"messages": request.messages, "sampling": sampling},
+        {**prompt_payload, "sampling": sampling},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -959,6 +984,20 @@ def _provider_error_code(status: int) -> str:
     return f"provider_http_{status}"
 
 
+def _provider_error_body(body: str, groq_api_key: str) -> str:
+    redacted = body.replace(groq_api_key, "[REDACTED]") if groq_api_key else body
+    redacted = _PROVIDER_SECRET_FIELD_RE.sub(r'\1"[REDACTED]"', redacted)
+    redacted = _PROVIDER_BEARER_RE.sub(r"\1[REDACTED]", redacted)
+    encoded = redacted.encode("utf-8")
+    if len(encoded) <= _PROVIDER_ERROR_BODY_MAX_BYTES:
+        return redacted
+
+    marker = " [... provider error body truncated]"
+    content_limit = _PROVIDER_ERROR_BODY_MAX_BYTES - len(marker.encode("utf-8"))
+    prefix = encoded[:content_limit].decode("utf-8", errors="ignore").rstrip()
+    return prefix + marker
+
+
 def _log_extra(
     outcome: ModelOutcome, *, decision: str, retry_ordinal: int
 ) -> dict[str, Any]:
@@ -980,6 +1019,7 @@ def _log_extra(
         "http_status": outcome.http_status,
         "scope": outcome.scope,
         "error_code": outcome.error_code,
+        "reason": outcome.reason,
     }
 
 

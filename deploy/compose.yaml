@@ -47,7 +47,7 @@ services:
       REPRODUCER_PROMPT_TOKEN_CAP: ${REPRODUCER_PROMPT_TOKEN_CAP:-5500}
       REPRODUCER_TIMEOUT_S: ${REPRODUCER_TIMEOUT_S:-60}
       REPRODUCER_EXPECTED_GENERATION_S: ${REPRODUCER_EXPECTED_GENERATION_S:-15}
-      REPRODUCER_TURN_CAP: ${REPRODUCER_TURN_CAP:-6}
+      REPRODUCER_TURN_CAP: ${REPRODUCER_TURN_CAP:-10}
       FIXER_MODEL: ${FIXER_MODEL:-qwen/qwen3.8-27b}
       FIXER_MAX_TOKENS: ${FIXER_MAX_TOKENS:-1500}
       FIXER_PROMPT_TOKEN_CAP: ${FIXER_PROMPT_TOKEN_CAP:-5500}
@@ -102,13 +102,21 @@ services:
     image: docker.restate.dev/restatedev/restate:1.8.1
     entrypoint: ["restate"]
     command:
-      ["deployments", "register", "--force", "--yes", "http://workflow:8002/restate/v1"]
+      [
+        "deployments",
+        "register",
+        "--force",
+        "--yes",
+        "http://workflow:8002/restate/v1",
+      ]
     environment:
       RESTATE_ADMIN_URL: http://restate:9070
     depends_on:
-      - restate
-      - workflow
-    restart: "no"
+      restate:
+        condition: service_started
+      workflow:
+        condition: service_healthy
+    restart: "on-failure:3"
 
   github:
     profiles: ["github"]
