@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -176,6 +176,42 @@ class MemoryStore:
     def get_commit(self, sha: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             return self._fetch(conn, "commits", sha)
+
+    def close_facts_by_issue(
+        self,
+        issue_ref: str,
+        closing_commit: str,
+        reason: str,
+    ) -> list[str]:
+        facts = self.facts_for_issue(issue_ref)
+        if not facts:
+            return []
+        fact_ids = [f.get("_id") or f.get("id") for f in facts if "_id" in f or "id" in f]
+        existing_closures = self.closures_for_facts(fact_ids)
+        already_closed = {
+            c["fact_id"] for c in existing_closures if c["closing_commit"] == closing_commit
+        }
+        for fid in fact_ids:
+            if fid not in already_closed:
+                self.record_fact_closure(
+                    fact_id=fid,
+                    closing_commit=closing_commit,
+                    branch="main",
+                    closed_by_agent="github_poller",
+                    reason=reason,
+                    committed_at=datetime.now(UTC),
+                )
+        return fact_ids
+
+    def facts_for_issue(self, issue_ref: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            query = (
+                "SELECT _id, valid_from_commit, anchors, evidence_test, "
+                "claim, kind, area, confidence, decay_half_life_days, "
+                "last_confirmed_at, taint, supersedes "
+                "FROM facts FOR ALL VALID_TIME WHERE source_issue = %s"
+            )
+            return list(conn.execute(query, (issue_ref,)).fetchall())
 
     def get_dag(self) -> Dag:
         return Dag.from_commits(self.get_commits())

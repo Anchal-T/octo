@@ -532,3 +532,13 @@ class FactQueryResponse(Contract):
     base_commit: str
     facts: list[FactView] = Field(default_factory=list)
     dropped: dict[str, int] = Field(default_factory=dict)
+
+
+class CloseByIssueRequest(Contract):
+    issue_ref: str = Field(min_length=1, max_length=200)
+    closing_commit: str = Field(min_length=1, max_length=64)
+    reason: Literal["linked_fix", "issue_closed", "issue_closed_not_planned"]
+
+
+class CloseByIssueResponse(Contract):
+    closed_fact_ids: list[str] = Field(default_factory=list)

@@ -1,3 +1,4 @@
+from typing import Any
 import asyncio
 import logging
 from dataclasses import replace
@@ -49,6 +50,7 @@ class Poller:
         clock: Clock,
         sleep: Sleep,
         holder: str,
+        memory: Any | None = None,
     ) -> None:
         self.settings = settings
         self.github = github
@@ -57,6 +59,7 @@ class Poller:
         self.clock = clock
         self.sleep = sleep
         self.holder = holder
+        self.memory = memory
         self.self_login = ""
         self.approvers: tuple[str, ...] = ()
         self.repo_info: RepoInfo | None = None
@@ -212,6 +215,30 @@ class Poller:
             if issue.is_pull_request:
                 current.pop(row.number, None)
             elif issue.state == "closed" or GITHUB_LABEL not in issue.labels:
+                if self.memory is not None and issue.state == "closed":
+                    reason = (
+                        "issue_closed_not_planned"
+                        if getattr(issue, "state_reason", None) == "not_planned"
+                        else "issue_closed"
+                    )
+                    closing_commit = (
+                        getattr(self, "latest_head_sha", None)
+                        or (
+                            getattr(self.repo_info, "default_branch_sha", None)
+                            if self.repo_info
+                            else None
+                        )
+                        or "HEAD"
+                    )
+                    issue_ref = f"{self.settings.repo}#{row.number}"
+                    try:
+                        await self.memory.close_by_issue(
+                            issue_ref=issue_ref,
+                            closing_commit=closing_commit,
+                            reason=reason,
+                        )
+                    except Exception:
+                        pass
                 self.store.upsert_issue(
                     replace(
                         row,

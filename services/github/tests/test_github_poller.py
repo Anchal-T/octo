@@ -1397,3 +1397,43 @@ async def test_daily_cap_defers_attempt_2_with_one_queued_comment(tmp_path):
     assert fake_workflow.accepted_starts == {}
     assert store.get_issue(ISSUE_KEY).attempt == 2
     assert store.get_issue(ISSUE_KEY).state == "pending_start"
+
+
+@pytest.mark.anyio
+async def test_issue_state_change_calls_close_by_issue(tmp_path):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    fake_github.add_issue(
+        7,
+        state="closed",
+        labels=("agent-team",),
+        created_at=NOW - timedelta(days=2),
+        updated_at=NOW - timedelta(hours=1),
+    )
+    fake_workflow = FakeWorkflow()
+    closed_calls = []
+
+    class FakeMemory:
+        async def close_by_issue(self, *, issue_ref: str, closing_commit: str, reason: str):
+            closed_calls.append({
+                "issue_ref": issue_ref,
+                "closing_commit": closing_commit,
+                "reason": reason,
+            })
+            return ["fact-1"]
+
+    poller, store, github_http, workflow_http, _, _, _, _ = make_poller(
+        tmp_path, fake_github, fake_workflow
+    )
+    poller.memory = FakeMemory()
+    store.upsert_issue(make_row())
+
+    try:
+        await poller.prepare()
+        await poller.run_cycle()
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    assert len(closed_calls) == 1
+    assert closed_calls[0]["issue_ref"] == "agent-bot/fork#7"
+    assert closed_calls[0]["reason"] == "issue_closed"

@@ -1,6 +1,8 @@
 from typing import Any
 
 from agentteam_contracts import (
+    CloseByIssueRequest,
+    CloseByIssueResponse,
     CommitRound,
     EventRecord,
     EventWrite,
@@ -20,7 +22,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .dag import UnknownCommit
-from .fact_query import filter_valid
+from .fact_query import FactExpiryConfig, filter_valid
 from .store import IdempotencyConflict, MemoryStore, RoundConflict
 
 app = FastAPI(title="Agent Team Memory")
@@ -215,6 +217,13 @@ def query_facts(request: FactQuery) -> FactQueryResponse:
     for row in closures_rows:
         closures[row["fact_id"]].add(row["closing_commit"])
 
+    cfg = FactExpiryConfig(
+        user_report_ttl_commits=store.settings.fact_user_report_ttl_commits,
+        user_report_half_life_days=store.settings.fact_user_report_half_life_days,
+        min_effective_confidence=store.settings.fact_min_effective_confidence,
+        user_report_initial_confidence=store.settings.fact_user_report_initial_confidence,
+    )
+    base_time = dag.commits[request.base_commit].committed_at
     try:
         valid_facts, dropped = filter_valid(
             raw_facts,
@@ -222,6 +231,8 @@ def query_facts(request: FactQuery) -> FactQueryResponse:
             dag,
             request.base_commit,
             ancestry_filter=request.ancestry_filter,
+            cfg=cfg,
+            base_time=base_time,
         )
     except (UnknownCommit, KeyError) as error:
         raise HTTPException(status_code=404, detail="unknown base_commit") from error
@@ -262,3 +273,16 @@ def query_facts(request: FactQuery) -> FactQueryResponse:
         facts=fact_views,
         dropped=dropped,
     )
+
+
+@app.post("/v1/facts/close-by-issue", response_model=CloseByIssueResponse)
+def close_by_issue(request: CloseByIssueRequest) -> CloseByIssueResponse:
+    try:
+        closed_fact_ids = store.close_facts_by_issue(
+            issue_ref=request.issue_ref,
+            closing_commit=request.closing_commit,
+            reason=request.reason,
+        )
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    return CloseByIssueResponse(closed_fact_ids=closed_fact_ids)
