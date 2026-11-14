@@ -35,12 +35,35 @@ services:
     environment:
       MEMORY_URL: http://memory:8001
       RESTATE_INGRESS: http://restate:8080
+      GITHUB_URL: http://github:8003
       TRIAGER_MODEL: ${TRIAGER_MODEL:-openai/gpt-oss-20b}
       TRIAGER_MAX_TOKENS: ${TRIAGER_MAX_TOKENS:-1024}
       TRIAGER_PROMPT_TOKEN_CAP: ${TRIAGER_PROMPT_TOKEN_CAP:-6000}
       TRIAGER_TIMEOUT_S: ${TRIAGER_TIMEOUT_S:-60}
       TRIAGER_EXPECTED_GENERATION_S: ${TRIAGER_EXPECTED_GENERATION_S:-15}
       TRIAGER_WAIT_CAP_S: ${TRIAGER_WAIT_CAP_S:-7200}
+      REPRODUCER_MODEL: ${REPRODUCER_MODEL:-qwen/qwen3.8-27b}
+      REPRODUCER_MAX_TOKENS: ${REPRODUCER_MAX_TOKENS:-1200}
+      REPRODUCER_PROMPT_TOKEN_CAP: ${REPRODUCER_PROMPT_TOKEN_CAP:-5500}
+      REPRODUCER_TIMEOUT_S: ${REPRODUCER_TIMEOUT_S:-60}
+      REPRODUCER_EXPECTED_GENERATION_S: ${REPRODUCER_EXPECTED_GENERATION_S:-15}
+      REPRODUCER_TURN_CAP: ${REPRODUCER_TURN_CAP:-6}
+      FIXER_MODEL: ${FIXER_MODEL:-qwen/qwen3.8-27b}
+      FIXER_MAX_TOKENS: ${FIXER_MAX_TOKENS:-1500}
+      FIXER_PROMPT_TOKEN_CAP: ${FIXER_PROMPT_TOKEN_CAP:-5500}
+      FIXER_TIMEOUT_S: ${FIXER_TIMEOUT_S:-60}
+      FIXER_EXPECTED_GENERATION_S: ${FIXER_EXPECTED_GENERATION_S:-15}
+      FIXER_TURN_CAP: ${FIXER_TURN_CAP:-8}
+      FIXER_MAX_ATTEMPTS: ${FIXER_MAX_ATTEMPTS:-2}
+      TESTER_MODEL: ${TESTER_MODEL:-qwen/qwen3.8-27b}
+      TESTER_MAX_TOKENS: ${TESTER_MAX_TOKENS:-1024}
+      TESTER_PROMPT_TOKEN_CAP: ${TESTER_PROMPT_TOKEN_CAP:-5500}
+      TESTER_TIMEOUT_S: ${TESTER_TIMEOUT_S:-60}
+      TESTER_EXPECTED_GENERATION_S: ${TESTER_EXPECTED_GENERATION_S:-15}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-agentteam-sandbox:py312}
+      SANDBOX_REPO_PATH: /repos/sandbox-repo
+      SANDBOX_NETWORK: ${SANDBOX_NETWORK:-none}
+      SANDBOX_CMD_TIMEOUT_S: ${SANDBOX_CMD_TIMEOUT_S:-60}
       GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
       GROQ_API_KEY: ${GROQ_API_KEY:?GROQ_API_KEY must be set}
       GROQ_RESET_TZ: ${GROQ_RESET_TZ:-UTC}
@@ -53,6 +76,8 @@ services:
       MODELS_BUSY_TIMEOUT_MS: ${MODELS_BUSY_TIMEOUT_MS:-5000}
     volumes:
       - models-data:/var/lib/agent-team/models
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SANDBOX_REPO_HOST_PATH:-../repos/sqlparse}:/repos/sandbox-repo:ro
     depends_on:
       - memory
       - restate
@@ -69,6 +94,21 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
+
+  # Registers the workflow services with Restate. The workflow service mounts
+  # its handlers at /restate/v1, but Restate only calls a service that has been
+  # registered, so this runs on every start to pick up new or changed handlers.
+  restate-deploy:
+    image: docker.restate.dev/restatedev/restate:1.8.1
+    entrypoint: ["restate"]
+    command:
+      ["deployments", "register", "--force", "--yes", "http://workflow:8002/restate/v1"]
+    environment:
+      RESTATE_ADMIN_URL: http://restate:9070
+    depends_on:
+      - restate
+      - workflow
+    restart: "no"
 
   github:
     profiles: ["github"]

@@ -7,3 +7,5 @@ __pycache__/
 !.env.example
 .zed/settings.json
 eval/.cache/
+repos/
+.playwright-mcp/
