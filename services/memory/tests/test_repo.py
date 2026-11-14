@@ -158,3 +158,27 @@ def test_on_push_records_parent_specific_symbols_and_closes_facts(tmp_path):
     assert docs not in indexer.calls
     assert (main, docs) in indexer.reuses
     assert store.get_commits_calls == 1
+
+
+def test_on_push_orders_a_shuffled_commit_batch_parents_first(tmp_path):
+    path = tmp_path / "example-repo"
+    path.mkdir()
+    _git(path, "init", "--quiet")
+    _git(path, "config", "user.name", "Test")
+    _git(path, "config", "user.email", "test@example.com")
+    (path / "module.py").write_text("def f():\n    return 1\ndef g():\n    return 1\n")
+    _git(path, "add", ".")
+    _git(path, "commit", "--quiet", "-m", "example root")
+    root = _git(path, "rev-parse", "HEAD")
+    (path / "module.py").write_text("def f():\n    return 2\ndef g():\n    return 1\n")
+    _git(path, "commit", "--quiet", "-am", "example child")
+    child = _git(path, "rev-parse", "HEAD")
+    store = FakeStore([])
+    indexer = FakeIndexer(
+        {sha: _index(sha, "module.f().", "module.g().") for sha in (root, child)}
+    )
+    assert Repo(store, GitRepo(path), indexer).on_push([child, root], "main") == [
+        root,
+        child,
+    ]
+    assert list(store.commits) == [root, child]

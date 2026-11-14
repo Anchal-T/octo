@@ -22,7 +22,9 @@ class Repo:
         shas = list(dict.fromkeys(shas))
         if not shas:
             return []
-        git_commits = self.git_repo.rev_list_parents(shas[-1])
+        git_commits = self.git_repo.rev_list_parents(shas)
+        requested = set(shas)
+        shas = [sha for sha in git_commits if sha in requested]
         branches = {sha: branch for sha in shas}
         main_head = shas[-1] if branch == "main" else None
         return self._process(shas, branches, git_commits, main_head)

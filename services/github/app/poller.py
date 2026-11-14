@@ -1,9 +1,10 @@
-from typing import Any
 import asyncio
 import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+import httpx
 from agentteam_common.ids import workflow_key
 from agentteam_contracts import ApprovalRequest, IssueRunResult, IssueRunResultV2
 
@@ -183,6 +184,7 @@ class Poller:
                 task.result()
 
     async def _run_locked(self, summary: CycleSummary) -> None:
+        await self._sync_memory_push()
         watermark = self.store.get_meta("watermark")
         since = None
         if watermark is not None:
@@ -272,6 +274,36 @@ class Poller:
             if watermark is not None:
                 latest = max(latest, self._datetime(watermark))
             self.store.set_meta("watermark", self._iso(latest))
+
+    async def _sync_memory_push(self) -> None:
+        if self.memory is None or self.repo_info is None:
+            return
+        try:
+            after = await self.github.get_branch_head(self.repo_info.default_branch)
+            self.latest_head_sha = after
+            before = self.store.get_meta("memory_push_head")
+            if after == before and self.store.get_meta("memory_push_reset") != "1":
+                return
+            if self.store.get_meta("memory_push_reset") == "1":
+                before = None
+            response = await self.memory.push(before=before, after=after)
+            if (
+                response.status_code == 409
+                and response.json().get("detail") == "non_fast_forward"
+            ):
+                logger.warning(
+                    "memory_push_non_fast_forward before=%s after=%s", before, after
+                )
+                self.store.set_meta("memory_push_head", after)
+                self.store.set_meta("memory_push_reset", "1")
+                return
+            if response.status_code == 200:
+                self.store.set_meta("memory_push_head", after)
+                self.store.set_meta("memory_push_reset", "0")
+            else:
+                logger.warning("memory_push_failed status=%s", response.status_code)
+        except httpx.HTTPError as error:
+            logger.warning("memory_push_failed error_type=%s", type(error).__name__)
 
     async def _process_issue(
         self, issue: GithubIssue, baseline: datetime, summary: CycleSummary

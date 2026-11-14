@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 
 from .auth import GithubAppTokenSource, StaticTokenSource, TokenSource
 from .client import GithubClient, GithubFailure
+from .memory_client import MemoryClient
 from .poller import Poller
 from .pr_service import (
     fetch_repo_head,
@@ -94,6 +95,7 @@ def build_runtime(
         clock=clock,
         sleep=sleep,
         holder=uuid.uuid4().hex,
+        memory=MemoryClient(base_url=settings.memory_url, http=workflow_http),
     )
     return Runtime(
         settings=settings,

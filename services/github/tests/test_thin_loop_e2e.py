@@ -448,6 +448,8 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             if request.url.host == "api.github.com":
                 return fake_gh.handle(request)
+            if request.url.host == "memory":
+                return httpx.Response(503, json={"detail": "scip_not_configured"})
             return await handle_workflow_http(request)
 
     settings = GithubSettings(

@@ -134,3 +134,24 @@ def test_git_revision_arguments_reject_options_before_subprocess(monkeypatch):
     ):
         with pytest.raises(ValueError, match="commit SHA"):
             call()
+
+
+def test_shared_clone_fetches_new_commits_and_checks_ancestry(tmp_path):
+    source = tmp_path / "source"
+    _repo(source)
+    (source / "module.py").write_text("before\n")
+    parent = _commit(source, "parent")
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", "--shared", "--no-checkout", str(source), str(clone))
+    repo = GitRepo(clone)
+    # Example missing SHA, not a real repo commit.
+    assert not repo.has_commit("f" * 40)
+    assert repo.has_commit(parent)
+    (source / "module.py").write_text("after\n")
+    child = _commit(source, "child")
+    repo.fetch()
+    assert repo.has_commit(child)
+    assert repo.is_ancestor(parent, child)
+    assert not repo.is_ancestor(child, parent)
+    assert repo.rev_list(child, before=parent) == [child]
+    assert repo.rev_list(child) == [parent, child]

@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,12 +30,70 @@ class GitRepo:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).resolve()
 
-    def rev_list_parents(self, rev: str | None = None) -> dict[str, tuple[str, ...]]:
+    def has_commit(self, sha: str) -> bool:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{_require_commit_sha(sha)}^{{commit}}"],
+            cwd=self.path,
+            capture_output=True,
+            check=False,
+        )
+        return result.returncode == 0
+
+    def fetch(self, remote: str = "origin") -> None:
+        subprocess.run(
+            ["git", "fetch", "--", remote],
+            cwd=self.path,
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+
+    def is_ancestor(self, before: str, after: str) -> bool:
+        result = subprocess.run(
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                _require_commit_sha(before),
+                _require_commit_sha(after),
+            ],
+            cwd=self.path,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode not in (0, 1):
+            result.check_returncode()
+        return result.returncode == 0
+
+    def rev_list(self, after: str, *, before: str | None = None) -> list[str]:
+        revision = _require_commit_sha(after)
+        if before is not None:
+            revision = f"{_require_commit_sha(before)}..{revision}"
+        result = subprocess.run(
+            [
+                "git",
+                "rev-list",
+                "--topo-order",
+                "--reverse",
+                "--end-of-options",
+                revision,
+            ],
+            cwd=self.path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.splitlines()
+
+    def rev_list_parents(
+        self, rev: str | Iterable[str] | None = None
+    ) -> dict[str, tuple[str, ...]]:
         command = ["git", "rev-list", "--parents", "--topo-order", "--reverse"]
         if rev is None:
             command.append("--all")
         else:
-            command.extend(("--end-of-options", _require_commit_sha(rev)))
+            revisions = [rev] if isinstance(rev, str) else list(rev)
+            command.extend(("--end-of-options", *map(_require_commit_sha, revisions)))
         result = subprocess.run(
             command,
             cwd=self.path,

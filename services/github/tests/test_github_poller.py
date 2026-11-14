@@ -1413,12 +1413,19 @@ async def test_issue_state_change_calls_close_by_issue(tmp_path):
     closed_calls = []
 
     class FakeMemory:
-        async def close_by_issue(self, *, issue_ref: str, closing_commit: str, reason: str):
-            closed_calls.append({
-                "issue_ref": issue_ref,
-                "closing_commit": closing_commit,
-                "reason": reason,
-            })
+        async def push(self, **kwargs):
+            return httpx.Response(200, json={})
+
+        async def close_by_issue(
+            self, *, issue_ref: str, closing_commit: str, reason: str
+        ):
+            closed_calls.append(
+                {
+                    "issue_ref": issue_ref,
+                    "closing_commit": closing_commit,
+                    "reason": reason,
+                }
+            )
             return ["fact-1"]
 
     poller, store, github_http, workflow_http, _, _, _, _ = make_poller(
@@ -1437,3 +1444,80 @@ async def test_issue_state_change_calls_close_by_issue(tmp_path):
     assert len(closed_calls) == 1
     assert closed_calls[0]["issue_ref"] == "agent-bot/fork#7"
     assert closed_calls[0]["reason"] == "issue_closed"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", [503, 409, "network"])
+async def test_memory_push_failure_retries_without_blocking_intake(tmp_path, failure):
+    fake = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    fake.add_issue(7, created_at=NOW, updated_at=NOW)
+    poller, store, github_http, workflow_http, *_ = make_poller(
+        tmp_path, fake, FakeWorkflow()
+    )
+    calls = []
+
+    class Memory:
+        async def push(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                if failure == "network":
+                    raise httpx.ConnectError("test unavailable")
+                return httpx.Response(
+                    failure,
+                    json={
+                        "detail": "unknown_sha"
+                        if failure == 409
+                        else "scip_not_configured"
+                    },
+                )
+            return httpx.Response(200, json={})
+
+    poller.memory = Memory()
+    try:
+        await poller.prepare()
+        await poller.run_cycle()
+        assert store.get_meta("memory_push_head") is None
+        assert store.get_issue(ISSUE_KEY) is not None
+        await poller.run_cycle()
+        assert store.get_meta("memory_push_head") == fake.refs["heads/main"]
+        await poller.run_cycle()
+        assert len(calls) == 2
+        assert (
+            calls[0] == calls[1] == {"before": None, "after": fake.refs["heads/main"]}
+        )
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+
+@pytest.mark.anyio
+async def test_memory_force_push_recovers_with_null_before_next_cycle(tmp_path):
+    fake = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    poller, store, github_http, workflow_http, *_ = make_poller(
+        tmp_path, fake, FakeWorkflow()
+    )
+    calls = []
+    old = "a" * 40  # synthetic previous head
+    store.set_meta("memory_push_head", old)
+
+    class Memory:
+        async def push(self, **kwargs):
+            calls.append(kwargs)
+            return httpx.Response(
+                409 if len(calls) == 1 else 200, json={"detail": "non_fast_forward"}
+            )
+
+    poller.memory = Memory()
+    try:
+        await poller.prepare()
+        await poller.run_cycle()
+        assert store.get_meta("memory_push_head") == fake.refs["heads/main"]
+        await poller.run_cycle()
+        await poller.run_cycle()
+        assert calls == [
+            {"before": old, "after": fake.refs["heads/main"]},
+            {"before": None, "after": fake.refs["heads/main"]},
+        ]
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()

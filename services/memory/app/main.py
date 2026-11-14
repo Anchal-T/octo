@@ -1,3 +1,5 @@
+import subprocess
+from threading import Lock
 from typing import Any
 
 from agentteam_contracts import (
@@ -11,6 +13,8 @@ from agentteam_contracts import (
     FactView,
     ProposalRecord,
     ProposalWrite,
+    RepoPush,
+    RepoPushResponse,
     RoundRecord,
     RoundWrite,
     RunRecord,
@@ -23,10 +27,13 @@ from fastapi.responses import JSONResponse
 
 from .dag import UnknownCommit
 from .fact_query import FactExpiryConfig, filter_valid
+from .git_repo import GitRepo
+from .repo import Repo
 from .store import IdempotencyConflict, MemoryStore, RoundConflict
 
 app = FastAPI(title="Agent Team Memory")
 store = MemoryStore()
+repo_push_lock = Lock()
 
 
 @app.exception_handler(RequestValidationError)
@@ -119,6 +126,60 @@ def health() -> dict[str, str]:
     except Exception as error:
         raise HTTPException(status_code=503, detail="XTDB is unavailable") from error
     return {"status": "ok"}
+
+
+@app.post("/v1/repo/push", response_model=RepoPushResponse)
+def repo_push(request: RepoPush):
+    if not store.settings.scip_repo_path or store.scip_indexer is None:
+        raise HTTPException(status_code=503, detail="scip_not_configured")
+    with repo_push_lock:
+        git = GitRepo(store.settings.scip_repo_path)
+        required = [sha for sha in (request.before, request.after) if sha]
+        if any(not git.has_commit(sha) for sha in required):
+            try:
+                git.fetch()
+            except (subprocess.SubprocessError, OSError) as error:
+                raise HTTPException(status_code=503, detail="fetch_failed") from error
+            for sha in required:
+                if not git.has_commit(sha):
+                    return JSONResponse(
+                        status_code=409, content={"detail": "unknown_sha", "sha": sha}
+                    )
+        if request.before and not git.is_ancestor(request.before, request.after):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "non_fast_forward",
+                    "before": request.before,
+                    "after": request.after,
+                },
+            )
+        recorded = {commit.sha for commit in store.get_commits()}
+        # A fresh memory store must include the boundary's ancestry as well.
+        before = request.before if request.before in recorded else None
+        shas = git.rev_list(request.after, before=before)
+        old_closures = {
+            (row["fact_id"], row["closing_commit"]) for row in store.all_fact_closures()
+        }
+        processor = Repo(store, git, store.scip_indexer)
+        # Repo skips recorded commits' indexing, but retries their idempotent
+        # closures so a crash after record_commit cannot lose invalidations.
+        processor.on_push(shas, request.branch)
+        if not shas:
+            processor.advance_main(request.after)
+        closed = sorted(
+            {
+                row["fact_id"]
+                for row in store.all_fact_closures()
+                if (row["fact_id"], row["closing_commit"]) not in old_closures
+            }
+        )
+        return RepoPushResponse(
+            processed=[sha for sha in shas if sha not in recorded],
+            already_recorded=[sha for sha in shas if sha in recorded],
+            closed_fact_ids=closed,
+            main_head=request.after,
+        )
 
 
 @app.post("/v1/events", response_model=EventRecord)
@@ -253,7 +314,9 @@ def query_facts(request: FactQuery) -> FactQueryResponse:
                 or f.get("closing_commits")
                 or []
             ),
-            confidence=float(f.get("confidence") if f.get("confidence") is not None else 1.0),
+            confidence=float(
+                f.get("confidence") if f.get("confidence") is not None else 1.0
+            ),
             decay_half_life_days=float(
                 f.get("decay_half_life_days")
                 if f.get("decay_half_life_days") is not None

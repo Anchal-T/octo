@@ -147,6 +147,19 @@ class CommitRound(Contract):
     pass
 
 
+class RepoPush(Contract):
+    branch: Literal["main"] = "main"
+    before: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    after: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
+class RepoPushResponse(Contract):
+    processed: list[str]
+    already_recorded: list[str]
+    closed_fact_ids: list[str]
+    main_head: str
+
+
 class Sampling(Contract):
     temperature: float = Field(default=0.2, ge=0, le=2)
     top_p: float = Field(default=1, gt=0, le=1)

@@ -8,6 +8,13 @@ class MemoryClient:
         self.base_url = base_url.rstrip("/")
         self.http = http
 
+    async def push(self, *, before: str | None, after: str) -> httpx.Response:
+        return await self.http.post(
+            f"{self.base_url}/v1/repo/push",
+            json={"branch": "main", "before": before, "after": after},
+            timeout=120.0,
+        )
+
     async def close_by_issue(
         self,
         *,
