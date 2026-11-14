@@ -1,4 +1,5 @@
 import math
+import re
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Literal, Self
@@ -544,10 +545,21 @@ class IssueRunResultV2(Contract):
 
 
 class FactQuery(Contract):
+    issue_refs: list[str] = Field(default_factory=list, max_length=100)
     symbols: list[str] = Field(default_factory=list)
     base_commit: str = Field(min_length=1, max_length=64)
     ancestry_filter: bool = True
     limit: int = Field(default=50, ge=1, le=1000)
+
+    @field_validator("issue_refs")
+    @classmethod
+    def validate_issue_refs(cls, values: list[str]) -> list[str]:
+        if any(
+            re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*", value) is None
+            for value in values
+        ):
+            raise ValueError("issue references must use owner/repo#number")
+        return list(dict.fromkeys(value.lower() for value in values))
 
     @field_validator("symbols")
     @classmethod

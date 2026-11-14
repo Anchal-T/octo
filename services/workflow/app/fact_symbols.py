@@ -44,3 +44,24 @@ def symbol_candidates(base_commit: str, text: str, diff: str = "") -> SymbolsRes
             for offset in range(min(length, 200)):
                 add_location(file, start + offset)
     return SymbolsResolve(base_commit=base_commit, names=names, locations=locations)
+
+
+_ISSUE_REF = re.compile(
+    r"https?://github\.com/([\w.-]+/[\w.-]+)/issues/([1-9]\d*)\b"
+    r"|(?<![\w/])([\w.-]+/[\w.-]+)#([1-9]\d*)\b"
+    r"|(?<![\w/#])#([1-9]\d*)\b"
+)
+
+
+def issue_references(repo: str, text: str, *, issue_id: str = "") -> list[str]:
+    references = []
+    if match := re.fullmatch(r"gh-\d+-(\d+)", issue_id):
+        references.append(f"{repo.lower()}#{int(match[1])}")
+    for match in _ISSUE_REF.finditer(text):
+        url_repo, url_number, full_repo, full_number, number = match.groups()
+        reference = f"{(url_repo or full_repo or repo).lower()}#{int(url_number or full_number or number)}"
+        if reference not in references:
+            references.append(reference)
+        if len(references) >= 100:
+            break
+    return references

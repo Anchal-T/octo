@@ -386,3 +386,72 @@ async def test_run_write_and_read_expose_injected_and_cited_fact_ids(monkeypatch
     assert read.status_code == 200
     assert read.json()["fact_ids_injected"] == payload["fact_ids_injected"]
     assert read.json()["fact_ids_cited"] == payload["fact_ids_cited"]
+
+
+@pytest.mark.anyio
+async def test_issue_scoped_reports_share_validity_filters_and_deduplicate(monkeypatch):
+    from datetime import timedelta
+
+    from services.memory.app.dag import Commit, Dag
+
+    now = datetime(2026, 11, 15, tzinfo=UTC)
+    shas = [f"{i:040x}" for i in range(51)]  # synthetic linear main history
+    side = "f" * 40
+    dag = Dag(
+        [
+            Commit(sha, () if i == 0 else (shas[i - 1],), now, "main", None, ())
+            for i, sha in enumerate(shas)
+        ]
+        + [Commit(side, (shas[0],), now, "side", None, ())]
+    )
+
+    def report(fid, **overrides):
+        return {
+            "_id": fid,
+            "claim": "Example user report",
+            "kind": "user_report",
+            "area": "lexer",
+            "anchors": [],
+            "valid_from_commit": shas[-1],
+            "confidence": 0.8,
+            "decay_half_life_days": 30,
+            "last_confirmed_at": now,
+            "taint": 2,
+            "source_issue": "example/fork#7",
+            **overrides,
+        }
+
+    reports = [
+        report("fact-111111111111"),
+        report("fact-222222222222", valid_from_commit=side),
+        report("fact-333333333333"),
+        report("fact-444444444444", valid_from_commit=shas[0]),
+        report("fact-555555555555", last_confirmed_at=now - timedelta(days=13)),
+    ]
+    requested = []
+
+    def for_issue(ref):
+        requested.append(ref)
+        return reports + [report("not-a-report", kind="bug_cause")]
+
+    monkeypatch.setattr(store, "get_dag", lambda: dag)
+    monkeypatch.setattr(
+        store, "facts_for_symbols", lambda *_args, **_kwargs: [reports[0]]
+    )
+    monkeypatch.setattr(store, "facts_for_issue", for_issue)
+    monkeypatch.setattr(
+        store,
+        "closures_for_facts",
+        lambda _ids: [{"fact_id": reports[2]["_id"], "closing_commit": shas[-1]}],
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/facts/query",
+            json={"base_commit": shas[-1], "issue_refs": ["example/fork#7"]},
+        )
+    assert response.status_code == 200
+    assert requested == ["example/fork#7"]
+    assert [fact["id"] for fact in response.json()["facts"]] == [reports[0]["_id"]]
+    assert response.json()["dropped"] == {"not_ancestor": 1, "closed": 1, "expired": 2}

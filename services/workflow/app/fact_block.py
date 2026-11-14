@@ -55,8 +55,12 @@ def render_fact_block(
     capped = eligible[:max_facts]
 
     # Partition into trusted (taint < 2) and untrusted (taint >= 2)
-    trusted = [item for item in capped if item[0].taint < 2]
-    untrusted = [item for item in capped if item[0].taint >= 2]
+    trusted = [
+        item for item in capped if item[0].taint < 2 and item[0].kind != "user_report"
+    ]
+    untrusted = [
+        item for item in capped if item[0].taint >= 2 or item[0].kind == "user_report"
+    ]
 
     def _format_line(fact: FactView, eff: float) -> str:
         claim = fact.claim.replace('"""', "")

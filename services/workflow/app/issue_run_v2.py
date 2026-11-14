@@ -36,7 +36,7 @@ from agentteam_contracts import (
 )
 
 from .fact_block import effective_confidence, parse_citations, render_fact_block
-from .fact_symbols import symbol_candidates
+from .fact_symbols import issue_references, symbol_candidates
 from .models import Ledger, ModelClient, Store
 from .models.pools import pin_for
 from .retries import WaitDecision, decide_delay, decide_wait
@@ -83,7 +83,12 @@ async def post_memory(path: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 async def query_fact_block(
-    base_commit: str, text: str, now: datetime, diff: str = ""
+    base_commit: str,
+    text: str,
+    now: datetime,
+    diff: str = "",
+    repo: str = "",
+    issue_id: str = "",
 ) -> dict[str, Any]:
     try:
         candidates = symbol_candidates(base_commit, text, diff)
@@ -94,6 +99,9 @@ async def query_fact_block(
             "/v1/facts/query",
             FactQuery(
                 symbols=resolved["symbols"],
+                issue_refs=issue_references(repo, text, issue_id=issue_id)
+                if repo
+                else [],
                 base_commit=base_commit,
                 ancestry_filter=True,
             ).model_dump(mode="json"),
@@ -127,6 +135,8 @@ async def read_facts(
     text: str,
     now: datetime,
     diff: str = "",
+    repo: str = "",
+    issue_id: str = "",
 ) -> dict[str, Any]:
     result = await journal.run_step(
         f"query-facts:{step}",
@@ -135,6 +145,8 @@ async def read_facts(
         text=text,
         now=now,
         diff=diff,
+        repo=repo,
+        issue_id=issue_id,
     )
     event_ids = []
     if result["failed"]:
@@ -609,6 +621,8 @@ async def run_issue_v2(
         round_id=r2_id,
         base_commit=base_commit,
         text=request.title + "\n" + request.body,
+        repo=request.repo,
+        issue_id=request.issue_id,
         now=datetime.fromisoformat(repro_basis_iso),
     )
     journal.injected_ids[repro_run_id] = repro_facts["injected_ids"]
@@ -791,6 +805,8 @@ async def run_issue_v2(
             round_id=fix_round_id,
             base_commit=base_commit,
             text=request.title + "\n" + request.body,
+            repo=request.repo,
+            issue_id=request.issue_id,
             now=datetime.fromisoformat(fix_basis_iso),
             diff=repro.patch,
         )

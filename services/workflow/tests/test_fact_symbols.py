@@ -17,3 +17,20 @@ def test_candidates_cover_dotted_names_stack_traces_and_old_diff_locations():
         {"file": "tests/test_lexer.py", "line": 4},
         {"file": "tests/test_lexer.py", "line": 5},
     ]
+
+
+def test_issue_references_are_explicit_scoped_and_deduplicated():
+    from services.workflow.app.fact_symbols import issue_references
+
+    assert issue_references(
+        "Anchal-T/sqlparse",
+        "Related: #7, ANCHAL-T/sqlparse#7 and other/repo#8. "
+        "https://github.com/Anchal-T/sqlparse/issues/9#issuecomment-42 "
+        "Do not follow https://example.com/other/repo/issues/10 or commit deadbeef.",
+        issue_id="gh-100-6",
+    ) == [
+        "anchal-t/sqlparse#6",
+        "anchal-t/sqlparse#7",
+        "other/repo#8",
+        "anchal-t/sqlparse#9",
+    ]

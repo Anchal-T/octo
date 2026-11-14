@@ -213,7 +213,7 @@ class MemoryStore:
                 "SELECT _id, valid_from_commit, anchors, evidence_test, "
                 "claim, kind, area, confidence, decay_half_life_days, "
                 "last_confirmed_at, taint, supersedes, source_issue "
-                "FROM facts FOR ALL VALID_TIME WHERE source_issue = %s"
+                "FROM facts FOR ALL VALID_TIME WHERE LOWER(source_issue) = LOWER(%s)"
             )
             return list(conn.execute(query, (issue_ref,)).fetchall())
 

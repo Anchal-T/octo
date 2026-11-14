@@ -273,6 +273,13 @@ def query_facts(request: FactQuery) -> FactQueryResponse:
 
     try:
         raw_facts = store.facts_for_symbols(request.symbols, full=True)
+        for issue_ref in request.issue_refs:
+            raw_facts.extend(
+                fact
+                for fact in store.facts_for_issue(issue_ref)
+                if fact.get("kind") == "user_report"
+            )
+        raw_facts = list({fact["_id"]: fact for fact in raw_facts}.values())
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
