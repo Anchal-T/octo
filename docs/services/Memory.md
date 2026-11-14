@@ -13,3 +13,8 @@ The query combines SCIP symbol matches with `user_report` facts whose `source_is
 Related: [Workflow](Workflow.md), [locked P1 plan](../plans/P1-memory-wiring.md).
 
 Back to [[Agent Team - Overview]].
+
+
+## R2 history ingestion repair
+
+Git diff bodies can contain non-UTF-8 fixture data in historical sqlparse commits. The hunk parser needs ASCII headers only, so diff body decoding replaces invalid bytes. Paths still come from the separate NUL-delimited byte stream and retain their existing decoding. A regression test covers a Python change alongside legacy-encoded fixture text.

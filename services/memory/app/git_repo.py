@@ -151,6 +151,8 @@ class GitRepo:
             check=True,
             capture_output=True,
             text=True,
+            # Only ASCII hunk headers are parsed; fixture bodies may use legacy encodings.
+            errors="replace",
         )
         paths = subprocess.run(
             ["git", "diff", "--no-renames", "--name-only", "-z", a, b, "--"],

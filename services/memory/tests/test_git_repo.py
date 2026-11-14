@@ -155,3 +155,19 @@ def test_shared_clone_fetches_new_commits_and_checks_ancestry(tmp_path):
     assert not repo.is_ancestor(child, parent)
     assert repo.rev_list(child, before=parent) == [child]
     assert repo.rev_list(child) == [parent, child]
+
+
+def test_diff_u0_handles_non_utf8_fixture_contents(tmp_path):
+    path = tmp_path / "repo"
+    repo = _repo(path)
+    (path / "module.py").write_text("before\n")
+    (path / "legacy.txt").write_bytes(b"caf\xe9\n")
+    parent = _commit(path, "legacy fixture")
+    (path / "module.py").write_text("after\n")
+    (path / "legacy.txt").write_bytes(b"\xcf updated\n")
+    child = _commit(path, "edit Python and legacy fixture")
+    assert repo.changed_py(parent, child)
+    assert repo.diff_u0(parent, child) == [
+        Hunk("legacy.txt", 1, 1, 1, 1),
+        Hunk("module.py", 1, 1, 1, 1),
+    ]
