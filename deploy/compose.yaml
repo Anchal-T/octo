@@ -102,13 +102,21 @@ services:
     image: docker.restate.dev/restatedev/restate:1.8.1
     entrypoint: ["restate"]
     command:
-      ["deployments", "register", "--force", "--yes", "http://workflow:8002/restate/v1"]
+      [
+        "deployments",
+        "register",
+        "--force",
+        "--yes",
+        "http://workflow:8002/restate/v1",
+      ]
     environment:
       RESTATE_ADMIN_URL: http://restate:9070
     depends_on:
-      - restate
-      - workflow
-    restart: "no"
+      restate:
+        condition: service_started
+      workflow:
+        condition: service_healthy
+    restart: "on-failure:3"
 
   github:
     profiles: ["github"]
