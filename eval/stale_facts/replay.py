@@ -54,6 +54,8 @@ def evaluate(dag, facts, closures, seeds, queries, time_snapshots):
             "query_points": 0,
             "injected": 0,
             "stale_injected": 0,
+            "useful_injected": 0,
+            "useful_available": 0,
             "points_with_stale": 0,
             "expired_withheld": 0,
         }
@@ -74,6 +76,7 @@ def evaluate(dag, facts, closures, seeds, queries, time_snapshots):
             )
 
         candidates = [f for f in facts if matching(f)]
+        useful_available = sum(oracle.truth(f, base) == "valid" for f in candidates)
         for condition, row in metrics.items():
             row["query_points"] += 1
             source = (
@@ -101,8 +104,11 @@ def evaluate(dag, facts, closures, seeds, queries, time_snapshots):
             if condition == "C2":
                 kept[(base, q.get("seed_id"))] = ids
             stale = sum(oracle.truth(by_id[fid], base) == "stale" for fid in ids)
+            useful = sum(oracle.truth(by_id[fid], base) == "valid" for fid in ids)
             row["injected"] += len(ids)
             row["stale_injected"] += stale
+            row["useful_injected"] += useful
+            row["useful_available"] += useful_available
             row["points_with_stale"] += bool(stale)
             row["expired_withheld"] += dropped["expired"]
             points[base][condition].update(injected=len(ids), stale=stale, queries=1)
@@ -119,6 +125,11 @@ def evaluate(dag, facts, closures, seeds, queries, time_snapshots):
         row["points_with_stale_share"] = (
             row["points_with_stale"] / row["query_points"]
             if row["query_points"]
+            else None
+        )
+        row["useful_recall"] = (
+            row["useful_injected"] / row["useful_available"]
+            if row["useful_available"]
             else None
         )
     expected = {(s["fact_ids"][0], s["change"]) for s in seeds if s.get("change")}

@@ -58,16 +58,22 @@ def markdown(result):
         f"Repo: Anchal-T/sqlparse. Window: {len(window.get('main', []))} first-parent + {len(window.get('side', []))} natural side commits.",
         f"Harness commit: `{result.get('harness_commit', 'test fixture')}`. Seed: {result.get('seed', 1)}. Model requests: **0**.",
         "",
-        "| Condition | Queries | Injected | Stale | Stale usage | Points with stale | Expired withheld |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Condition | Queries | Injected | Useful facts (injected / available) | Stale | Stale usage | Points with stale | Expired withheld |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, row in result["conditions"].items():
         rate = (
             "n/a" if row["stale_usage"] is None else f"{100 * row['stale_usage']:.2f}%"
         )
+        useful = row.get("useful_recall")
+        useful_rate = "n/a" if useful is None else f"{100 * useful:.2f}%"
         lines.append(
-            f"| {name} | {row['query_points']} | {row['injected']} | {row['stale_injected']} | {rate} | {row['points_with_stale']} | {row['expired_withheld']} |"
+            f"| {name} | {row['query_points']} | {row['injected']} | {row.get('useful_injected', 0)} / {row.get('useful_available', 0)} ({useful_rate}) | {row['stale_injected']} | {rate} | {row['points_with_stale']} | {row['expired_withheld']} |"
         )
+    lines += [
+        "",
+        "Useful facts are oracle-valid matching facts injected / available in the shared pool, before condition-specific filtering and rendering; rendering still applies decay and the fact cap.",
+    ]
     lines += [
         "",
         "| Type | Logical seeds | Closures | Truly stale transitions | Precision | Recall | Delay median / p90 |",

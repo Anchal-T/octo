@@ -84,6 +84,17 @@ def test_ten_commit_replay_matches_hand_computed_metrics_and_never_calls_models(
     assert result["conditions"]["C2"]["stale_injected"] == 0
     assert result["conditions"]["C3"]["injected"] == 5
     assert result["conditions"]["C3"]["stale_injected"] == 1
+    assert [
+        (
+            result["conditions"][condition]["useful_injected"],
+            result["conditions"][condition]["useful_available"],
+        )
+        for condition in ("C0", "C1", "C2", "C3")
+    ] == [(0, 4), (4, 4), (4, 4), (4, 4)]
+    assert result["conditions"]["C2"]["useful_recall"] == 1
+    from eval.stale_facts.report import markdown
+
+    assert "Useful facts (injected / available)" in markdown(result)
     assert result["invalidation"]["precision"] == 1
     assert result["invalidation"]["recall"] == 1
     assert result["invalidation"]["delay_median"] == 0
