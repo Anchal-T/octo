@@ -347,6 +347,19 @@ class RunStatus(Contract):
 
 class IssueRunRequestV2(IssueRunRequest):
     base_commit: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{7,64}$")
+    fact_condition: Literal["C0", "C2"] | None = None
+    fact_snapshot: list[dict[str, Any]] | None = Field(default=None, max_length=500)
+    pr_branch_suffix: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9._-]{1,20}$"
+    )
+
+    @model_validator(mode="after")
+    def validate_fact_condition(self) -> Self:
+        if self.fact_condition == "C2" and self.fact_snapshot is None:
+            raise ValueError("C2 requires a frozen fact snapshot")
+        if self.fact_condition == "C0" and self.fact_snapshot is not None:
+            raise ValueError("C0 cannot carry a fact snapshot")
+        return self
 
 
 class RepoHeadResponse(Contract):
@@ -376,6 +389,7 @@ class OpenPrRequest(Contract):
     title: str = Field(min_length=1, max_length=256)
     body: str = Field(default="", max_length=60_000)
     files: list[PrFileChange] = Field(min_length=1, max_length=100)
+    branch_suffix: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._-]{1,20}$")
 
 
 class EvidenceFactItem(Contract):

@@ -18,6 +18,7 @@ from agentteam_contracts import (
     EvidenceCommentRequest,
     FactQuery,
     FactQueryResponse,
+    FactView,
     GithubWriteOutcome,
     IssueRunRequestV2,
     IssueRunResultV2,
@@ -82,6 +83,22 @@ async def post_memory(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         return response.json()
 
 
+def _render_fact_views(facts: list[FactView], now: datetime) -> dict[str, Any]:
+    rendered = render_fact_block(
+        facts, now, min_confidence=settings.fact_min_effective_confidence
+    )
+    return {
+        "text": rendered.text,
+        "injected_ids": rendered.injected_ids,
+        "confidence": {
+            fact.id: effective_confidence(fact, now)
+            for fact in facts
+            if fact.id in rendered.injected_ids
+        },
+        "failed": False,
+    }
+
+
 async def query_fact_block(
     base_commit: str,
     text: str,
@@ -89,7 +106,13 @@ async def query_fact_block(
     diff: str = "",
     repo: str = "",
     issue_id: str = "",
+    fact_snapshot: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if fact_snapshot is not None:
+        return _render_fact_views(
+            [FactView.model_validate(fact) for fact in fact_snapshot], now
+        )
+
     try:
         candidates = symbol_candidates(base_commit, text, diff)
         resolved = await post_memory(
@@ -106,20 +129,7 @@ async def query_fact_block(
                 ancestry_filter=True,
             ).model_dump(mode="json"),
         )
-        facts = FactQueryResponse.model_validate(raw).facts
-        rendered = render_fact_block(
-            facts, now, min_confidence=settings.fact_min_effective_confidence
-        )
-        return {
-            "text": rendered.text,
-            "injected_ids": rendered.injected_ids,
-            "confidence": {
-                f.id: effective_confidence(f, now)
-                for f in facts
-                if f.id in rendered.injected_ids
-            },
-            "failed": False,
-        }
+        return _render_fact_views(FactQueryResponse.model_validate(raw).facts, now)
     except (httpx.HTTPError, ValueError, KeyError) as error:
         logger.warning("fact_query_failed error_type=%s", type(error).__name__)
         return {"text": "", "injected_ids": [], "confidence": {}, "failed": True}
@@ -137,7 +147,19 @@ async def read_facts(
     diff: str = "",
     repo: str = "",
     issue_id: str = "",
+    fact_condition: str | None = None,
+    fact_snapshot: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if fact_condition == "C0":
+        return {
+            "text": "",
+            "injected_ids": [],
+            "confidence": {},
+            "failed": False,
+            "event_ids": [],
+        }
+    if fact_condition == "C2" and fact_snapshot is None:
+        raise ValueError("C2 requires a frozen fact snapshot")
     result = await journal.run_step(
         f"query-facts:{step}",
         query_fact_block,
@@ -147,6 +169,7 @@ async def read_facts(
         diff=diff,
         repo=repo,
         issue_id=issue_id,
+        fact_snapshot=fact_snapshot if fact_condition == "C2" else None,
     )
     event_ids = []
     if result["failed"]:
@@ -181,7 +204,7 @@ async def read_facts(
                         "base_commit": base_commit,
                         "round_id": round_id,
                         "effective_confidence": result["confidence"][fact_id],
-                        "condition": "memory_ancestry",
+                        "condition": fact_condition or "memory_ancestry",
                     },
                 ),
             )
@@ -631,6 +654,8 @@ async def run_issue_v2(
         repo=request.repo,
         issue_id=request.issue_id,
         now=datetime.fromisoformat(repro_basis_iso),
+        fact_condition=request.fact_condition,
+        fact_snapshot=request.fact_snapshot,
     )
     journal.injected_ids[repro_run_id] = repro_facts["injected_ids"]
     repro = await run_reproducer_step(
@@ -817,6 +842,8 @@ async def run_issue_v2(
             issue_id=request.issue_id,
             now=datetime.fromisoformat(fix_basis_iso),
             diff=repro.patch,
+            fact_condition=request.fact_condition,
+            fact_snapshot=request.fact_snapshot,
         )
         journal.injected_ids[fix_run_id] = fix_facts["injected_ids"]
         fix = await run_fixer_step(
@@ -1133,6 +1160,7 @@ async def run_issue_v2(
             title=pr_title,
             body=pr_body,
             files=list(approved_test.resulting_files),
+            branch_suffix=request.pr_branch_suffix,
         ).model_dump(mode="json"),
     )
     if pr_out.pr_number is None or not pr_out.head_sha:

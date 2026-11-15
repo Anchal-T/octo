@@ -184,6 +184,25 @@ async def test_open_pr_is_idempotent_authors_as_app_bot_and_rerequests_review_on
             assert pr_out_2["head_sha"] != sha1
             # Review was re-requested on the new push!
             assert fake_gh.review_requests[pr_num] == [["Anchal-T"], ["Anchal-T"]]
+
+            eval_response = await client.post(
+                "/v1/prs",
+                json=OpenPrRequest(
+                    idempotency_key="gh-1450220110-7:p1:c0",
+                    issue_id="gh-1450220110-7",
+                    attempt=90,
+                    base_commit=BASE_SHA,
+                    title="P1 C0 comparison run",
+                    files=[
+                        PrFileChange(path="sqlparse/lexer.py", content="C0 = True\n")
+                    ],
+                    branch_suffix="p1-c0",
+                ).model_dump(mode="json"),
+            )
+            assert eval_response.status_code == 200
+            assert eval_response.json()["branch"] == "agent/gh-1450220110-7-p1-c0"
+            assert eval_response.json()["pr_number"] != pr_num
+            assert fake_gh.pulls[eval_response.json()["pr_number"]]["draft"] is True
     finally:
         await close_runtime(runtime)
 

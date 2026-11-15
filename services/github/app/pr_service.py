@@ -96,7 +96,8 @@ async def open_draft_pull_request(
         )
 
     try:
-        branch = validate_agent_branch(f"agent/{request.issue_id}")
+        suffix = f"-{request.branch_suffix}" if request.branch_suffix else ""
+        branch = validate_agent_branch(f"agent/{request.issue_id}{suffix}")
     except ValueError as error:
         return GithubWriteOutcome(
             outcome="failed",
