@@ -245,6 +245,7 @@ class ModelOutcome(Contract):
     http_status: int | None = None
     error_code: str | None = None
     reason: str | None = None
+    provider_error_body: str | None = None
 
     @model_validator(mode="after")
     def validate_outcome_fields(self) -> Self:

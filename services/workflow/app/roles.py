@@ -1100,6 +1100,65 @@ def _read_tracked_files(
     return result.stdout_trimmed
 
 
+async def _call_repo_model(
+    journal: StepJournal,
+    name: str,
+    request: ModelCallRequest,
+    *,
+    key_prefix: str,
+    event_ids: list[str],
+) -> tuple[ModelOutcome, str]:
+    messages = list(request.messages)
+    for retry in range(3):
+        suffix = f":tool-retry:{retry}" if retry else ""
+        outcome, provider = await journal.call_model(
+            name + suffix,
+            request.model_copy(
+                update={"step": request.step + suffix, "messages": list(messages)}
+            ),
+        )
+        if (
+            not (
+                outcome.outcome == "failed"
+                and outcome.http_status == 400
+                and outcome.error_code == "tool_call_validation_failed"
+            )
+            or retry == 2
+        ):
+            return outcome, provider
+        event_ids.append(
+            await journal.record_event(
+                name + f":tool-call-retry:{retry + 1}",
+                EventWrite(
+                    idempotency_key=f"{key_prefix}:{request.step}:tool_call_retry:{retry + 1}",
+                    source="agent",
+                    kind="tool_call_retry",
+                    taint=1,
+                    payload={
+                        "run_id": request.run_id,
+                        "role": request.role,
+                        "step": request.step,
+                        "retry_count": retry + 1,
+                        "request_id": outcome.request_id,
+                        "model": outcome.model_pinned,
+                        "reason": outcome.reason,
+                        "provider_error_body": outcome.provider_error_body,
+                    },
+                ),
+            )
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Your last tool call was invalid: {outcome.reason}. "
+                    "Call `bash` with a `command` string, or `submit`."
+                ),
+            }
+        )
+    raise AssertionError("unreachable tool retry state")
+
+
 async def run_reproducer_step(
     *,
     journal: StepJournal,
@@ -1152,7 +1211,8 @@ async def run_reproducer_step(
                 tools=REPRODUCER_TOOLS,
                 tool_choice="required",
             )
-            outcome, provider = await journal.call_model(
+            outcome, provider = await _call_repo_model(
+                journal,
                 f"repro-llm:{turn}",
                 ModelCallRequest(
                     run_id=run_id,
@@ -1165,6 +1225,8 @@ async def run_reproducer_step(
                     taint=2,
                     source="github_issue",
                 ),
+                key_prefix=key_prefix,
+                event_ids=event_ids,
             )
             provider_used = provider
             model_used = outcome.model_reported or outcome.model_pinned
@@ -1370,7 +1432,8 @@ async def run_fixer_step(
                 tools=FIXER_TOOLS,
                 tool_choice="required",
             )
-            outcome, provider = await journal.call_model(
+            outcome, provider = await _call_repo_model(
+                journal,
                 f"{step_tag}:llm:{turn}",
                 ModelCallRequest(
                     run_id=run_id,
@@ -1383,6 +1446,8 @@ async def run_fixer_step(
                     taint=2,
                     source="github_issue",
                 ),
+                key_prefix=key_prefix,
+                event_ids=event_ids,
             )
             provider_used = provider
             model_used = outcome.model_reported or outcome.model_pinned

@@ -364,6 +364,54 @@ def test_provider_400_body_is_redacted_truncated_and_logged(
     assert provider_token not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "code, message, expected",
+    [
+        (
+            "tool_use_failed",
+            "tool call validation failed: missing command",
+            "tool_call_validation_failed",
+        ),
+        ("invalid_request_error", "unsupported request parameter", "provider_http_400"),
+        ("invalid_request_error", "tool call validation failed", "provider_http_400"),
+        ("tool_use_failed", "unrelated request error", "provider_http_400"),
+    ],
+)
+def test_groq_tool_validation_failure_preserves_sanitized_body(
+    tmp_path, code, message, expected
+):
+    def provider(request):
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": code,
+                    "message": message + "; Bearer private-token",
+                    "failed_generation": "invalid generated tool call",
+                }
+            },
+        )
+
+    client, _ = make_client(tmp_path, provider)
+    result = client.call(
+        model_request().model_copy(
+            update={
+                "role": "reproducer",
+                "tools": [{"type": "function"}],
+            }
+        )
+    )
+
+    assert result.error_code == expected
+    assert result.http_status == 400
+    assert message in result.reason
+    assert "private-token" not in result.reason
+    if expected == "tool_call_validation_failed":
+        assert "invalid generated tool call" not in result.reason
+        assert "invalid generated tool call" in result.provider_error_body
+        assert "private-token" not in result.provider_error_body
+
+
 def test_connect_error_returns_retryable_outcome_and_retries_same_model(tmp_path):
     calls = 0
 

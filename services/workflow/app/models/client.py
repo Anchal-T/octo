@@ -329,6 +329,23 @@ class ModelClient:
                 return outcome
 
             if status < 200 or status >= 300:
+                tool_error = None
+                if status == 400 and request.tools:
+                    try:
+                        error = response.json().get("error", {})
+                        message = error.get("message", "")
+                        if (
+                            error.get("code") == "tool_use_failed"
+                            and isinstance(message, str)
+                            and "tool call validation failed" in message.lower()
+                        ):
+                            tool_error = " ".join(
+                                _provider_error_body(
+                                    message, self.settings.groq_api_key
+                                ).split()
+                            )[:512]
+                    except (ValueError, AttributeError):
+                        pass
                 outcome = self._result(
                     "failed",
                     request,
@@ -338,9 +355,18 @@ class ModelClient:
                     started=overall_started,
                     finished=finished,
                     http_status=status,
-                    error_code=_provider_error_code(status),
+                    error_code="tool_call_validation_failed"
+                    if tool_error
+                    else _provider_error_code(status),
+                    provider_error_body=(
+                        _provider_error_body(response.text, self.settings.groq_api_key)
+                        if tool_error
+                        else None
+                    ),
                     reason=(
-                        f"provider rejected the model call; response body: "
+                        tool_error
+                        if tool_error
+                        else f"provider rejected the model call; response body: "
                         f"{_provider_error_body(response.text, self.settings.groq_api_key)}"
                         if status == 400 and response.text
                         else "provider rejected the model call"

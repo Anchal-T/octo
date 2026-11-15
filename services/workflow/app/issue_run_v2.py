@@ -257,6 +257,11 @@ class RestateStepJournal:
                 previous.extend(fact_id for fact_id in cited if fact_id not in previous)
                 return outcome, provider
             if outcome.outcome in ("failed", "ledger_unavailable"):
+                if (
+                    outcome.http_status == 400
+                    and outcome.error_code == "tool_call_validation_failed"
+                ):
+                    return outcome, provider
                 raise restate.TerminalError(
                     f"{request.role} {outcome.outcome}: {outcome.error_code or 'unspecified'}"
                 )
@@ -380,6 +385,8 @@ def _retryable_result_v2(
     base_commit: str | None,
     area: str = "unknown",
 ) -> IssueRunResultV2:
+    if outcome.outcome == "failed":
+        raise restate.TerminalError(f"repo agent failed: {outcome.error_code}")
     status = "quota_exhausted" if outcome.outcome == "quota_exhausted" else "throttled"
     return IssueRunResultV2(
         issue_id=request.issue_id,

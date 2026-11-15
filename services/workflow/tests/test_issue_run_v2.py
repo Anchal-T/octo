@@ -941,3 +941,83 @@ async def test_citations_include_native_tool_arguments_and_replay_in_order(
         assert journal.cited_ids["example-run"] == [second, first]
     assert calls == ["fix:0", "fix:1"]
     assert "fact_cite_unknown" in caplog.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "error_code,retries",
+    [
+        ("tool_call_validation_failed", 2),
+        ("provider_http_400", 0),
+    ],
+)
+async def test_repo_tool_retry_exhaustion_is_terminal_and_replay_safe(
+    monkeypatch,
+    tmp_path,
+    error_code,
+    retries,
+):
+    import restate
+
+    base = _init_sqlparse_like_repo(tmp_path / "repo")
+    backend = FakeMemoryAndGithubBackend(base_sha=base)
+    triage, _ = _scripted_model(
+        {
+            "triager": [
+                json.dumps(
+                    {
+                        "kind": "bug",
+                        "priority": "medium",
+                        "summary": "Example bug",
+                        "area": "lexer-keywords",
+                    }
+                )
+            ]
+        }
+    )
+    calls = []
+
+    def model(request):
+        calls.append(request)
+        if request.role == "triager":
+            return triage(request)
+        return ModelOutcome(
+            outcome="failed",
+            request_id="bad-" + request.step,
+            decided_at=NOW,
+            model_pinned="qwen/qwen3.8-27b",
+            run_id=request.run_id,
+            step=request.step,
+            http_status=400,
+            error_code=error_code,
+            reason="missing command",
+            provider_error_body='{"error":{"failed_generation":"INVALID"}}',
+        )
+
+    monkeypatch.setattr(v2_mod, "call_model", model)
+    monkeypatch.setattr(v2_mod, "post_memory", backend.post_memory)
+    monkeypatch.setattr(
+        v2_mod,
+        "make_sandbox",
+        lambda sha: LocalGitSandbox(
+            repo_path=tmp_path / "repo",
+            base_commit=sha,
+            work_root=tmp_path / "sb",
+        ),
+    )
+    ctx = FakeWorkflowCtx("example-retry")
+    request = IssueRunRequestV2(
+        issue_id="example-retry",
+        repo="Anchal-T/sqlparse",
+        title="Example",
+        base_commit=base,
+        read_basis=NOW,
+    )
+    for _ in range(2):
+        with pytest.raises(restate.TerminalError, match=error_code):
+            await v2_mod.run_issue_v2(ctx, request)
+        events = [e for e in backend.events.values() if e["kind"] == "tool_call_retry"]
+        assert len(events) == retries
+        assert len(calls) == 2 + retries
+    assert not ctx.sleeps
+    assert not backend.prs_opened

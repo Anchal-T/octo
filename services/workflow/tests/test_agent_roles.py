@@ -91,6 +91,12 @@ class FakeStepJournal:
             return ModelOutcome.model_validate(self.recorded[name]), "groq"
         self.model_calls += 1
         reply = self.replies.pop(0)
+        if isinstance(reply, ModelOutcome):
+            outcome = reply.model_copy(
+                update={"run_id": request.run_id, "step": request.step}
+            )
+            self.recorded[name] = outcome.model_dump(mode="json")
+            return outcome, "groq"
         if isinstance(reply, dict):
             text = reply.get("text")
             tool_calls = reply.get("tool_calls", [])
@@ -133,6 +139,98 @@ class FakeStepJournal:
             self.events.append(payload)
             self.recorded[name] = f"ev-{len(self.events)}"
         return self.recorded[name]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", ["reproducer", "fixer"])
+@pytest.mark.parametrize("invalid_calls", [0, 1, 2, 3])
+async def test_repo_agent_retries_invalid_tool_call_same_turn(
+    tmp_path, role, invalid_calls
+):
+    repo = tmp_path / "repo"
+    sha = _init_buggy_repo(repo)
+    manager = SandboxSessionManager(
+        lambda base: LocalGitSandbox(
+            repo_path=repo,
+            base_commit=base,
+            work_root=tmp_path / "work",
+        )
+    )
+    failed = ModelOutcome(
+        outcome="failed",
+        request_id="invalid-call",
+        decided_at=NOW,
+        model_pinned="qwen/qwen3.8-27b",
+        run_id="run-retry",
+        step="unused",
+        http_status=400,
+        error_code="tool_call_validation_failed"
+        if invalid_calls
+        else "provider_http_400",
+        reason="tool call validation failed: missing command",
+        provider_error_body='{"error":{"failed_generation":"BAD_GENERATION"}}',
+    )
+    journal = FakeStepJournal(
+        [failed] * max(1, invalid_calls)
+        + [
+            json.dumps({"action": "bash", "command": "printf recovered"}),
+        ]
+    )
+    args = {
+        "journal": journal,
+        "sessions": manager,
+        "session_key": "retry-session",
+        "key_prefix": "retry-prefix",
+        "run_id": "run-retry",
+        "repo": "Anchal-T/demo",
+        "base_commit": sha,
+        "title": "Example issue",
+        "body": "Example body",
+        "triage": None,
+        "turn_cap": 1,
+        "prompt_token_cap": 5500,
+    }
+    if role == "reproducer":
+        result = await run_reproducer_step(**args)
+    else:
+        result = await run_fixer_step(
+            **args,
+            fix_attempt=1,
+            test_node_id="tests/test_calc.py::test_safe_divide_positive",
+            repro_diff="",
+            review_notes=None,
+        )
+    assert journal.model_calls == min(invalid_calls + 1, 3)
+    events = [event for event in journal.events if event["kind"] == "tool_call_retry"]
+    assert len(events) == min(invalid_calls, 2)
+    assert [e["payload"]["retry_count"] for e in events] == list(
+        range(1, len(events) + 1)
+    )
+    assert all(
+        e["payload"]["provider_error_body"] == failed.provider_error_body
+        for e in events
+    )
+    assert len({e["idempotency_key"] for e in events}) == len(events)
+    assert set(result.event_ids) == {
+        f"ev-{n}" for n in range(1, len(journal.events) + 1)
+    }
+    for retry, request in enumerate(journal.requests[1:], 1):
+        assert request.step == journal.requests[0].step + f":tool-retry:{retry}"
+        assert request.messages[-1] == {
+            "role": "user",
+            "content": "Your last tool call was invalid: tool call validation failed: missing command. "
+            "Call `bash` with a `command` string, or `submit`.",
+        }
+        assert "BAD_GENERATION" not in json.dumps(request.messages)
+    if 0 < invalid_calls < 3:
+        assert any(e["kind"] == "model_output" for e in journal.events)
+        assert any(
+            e["payload"].get("summary") == "exit_code=0\nrecovered"
+            for e in journal.events
+        )
+    else:
+        assert result.retry_outcome.error_code == failed.error_code
+        assert not any(e["kind"] == "model_output" for e in journal.events)
 
 
 def test_fit_messages_to_cap_keeps_prompt_within_budget_and_quotes_issue():
