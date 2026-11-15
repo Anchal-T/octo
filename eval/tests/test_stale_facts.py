@@ -199,3 +199,138 @@ def test_revert_reassertion_and_ttl_probes_do_not_change_shared_pool():
     assert result["lifecycle_checks"]["natural_ttl49_already_decayed"] == 1
     assert result["thresholds"]["T8"]["status"] == "PASS"
     assert report == before
+
+
+def test_ten_real_git_commits_replay_closures_and_temporal_baseline(
+    tmp_path, monkeypatch
+):
+    import os
+    import subprocess
+
+    from services.memory.app.git_repo import GitRepo
+    from services.memory.app.repo import Repo
+    from services.memory.app.time_linear_projector import TimeLinearProjector
+    from services.memory.tests.test_repo import FakeIndexer, FakeStore, _index
+    from services.workflow.app.models.client import ModelClient
+
+    def no_model(*args, **kwargs):
+        raise AssertionError("model call in retrieval-only git replay")
+
+    monkeypatch.setattr(ModelClient, "call", no_model)
+    path = tmp_path / "repo"
+    path.mkdir()
+
+    def git(*args, second=1):
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+            "GIT_AUTHOR_DATE": f"2020-01-01T00:00:{second:02}+00:00",
+            "GIT_COMMITTER_DATE": f"2020-01-01T00:00:{second:02}+00:00",
+        }
+        return subprocess.run(
+            ["git", *args],
+            cwd=path,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init", "--quiet", "--initial-branch=main")
+    main = []
+    for n in range(1, 10):
+        if n in (1, 3):
+            (path / "module.py").write_text(
+                f"def f():\n    return {1 if n == 1 else 2}\ndef g():\n    return 1\n"
+            )
+        (path / "README").write_text(f"Fixture commit {n}\n")
+        git("add", ".")
+        git(
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            f"Fixture {n}",
+            second=n,
+        )
+        main.append(git("rev-parse", "HEAD"))
+    git("switch", "--quiet", "-c", "side", main[1])
+    (path / "README").write_text("Unmerged side fixture\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Side", second=2)
+    side = git("rev-parse", "HEAD")
+    source = GitRepo(path)
+    ordered = list(source.rev_list_parents())
+    assert len(ordered) == 10
+    facts = []
+    for i, (origin, symbol) in enumerate(
+        [(main[1], "example.f()."), (side, "example.f()."), (main[1], "example.g().")],
+        1,
+    ):
+        facts.append(
+            {
+                "_id": f"fact-{i:012x}",
+                "kind": "bug_cause",
+                "claim": "Example seeded claim",
+                "anchors": [{"symbol": symbol}],
+                "valid_from_commit": origin,
+                "confidence": 0.9,
+                "decay_half_life_days": 90,
+                "last_confirmed_at": source.committer_date(origin),
+            }
+        )
+    store = FakeStore(facts)
+    indexer = FakeIndexer(
+        {sha: _index(sha, "example.f().", "example.g().") for sha in ordered}
+    )
+    Repo(store, source, indexer).replay(ordered, main_head=main[-1])
+    dag = Dag.from_commits(store.get_commits())
+    assert store.closures[0]["closing_commit"] == main[2]
+    assert len(store.closures) == 1
+    TimeLinearProjector(dag, store).end_for(facts[0]["_id"], main[2], main[-1])
+    ends = {fid: when for ids, when in store.ended for fid in ids}
+    snapshots = {
+        base: [
+            f
+            for f in facts
+            if dag.commits[f["valid_from_commit"]].committed_at
+            <= dag.commits[base].committed_at
+            and (
+                f["_id"] not in ends or dag.commits[base].committed_at < ends[f["_id"]]
+            )
+        ]
+        for base in [main[-1], side]
+    }
+    seeds = [
+        {
+            "id": str(i),
+            "type": ty,
+            "fact_ids": [facts[i - 1]["_id"]],
+            "origin": facts[i - 1]["valid_from_commit"],
+            "change": main[2] if i == 1 else None,
+            "restore": None,
+        }
+        for i, ty in [(1, "behavior"), (2, "nonancestor"), (3, "control")]
+    ]
+    queries = [
+        {"base": base, "symbols": ["example.f().", "example.g()."], "issue_refs": []}
+        for base in snapshots
+    ]
+    result = evaluate(
+        dag, facts, {facts[0]["_id"]: {main[2]}}, seeds, queries, snapshots
+    )
+    assert [result["conditions"][c]["injected"] for c in ("C1", "C2", "C3")] == [
+        6,
+        4,
+        5,
+    ]
+    assert [result["conditions"][c]["stale_injected"] for c in ("C1", "C2", "C3")] == [
+        2,
+        0,
+        1,
+    ]
+    assert result["invalidation"]["precision"] == result["invalidation"]["recall"] == 1
