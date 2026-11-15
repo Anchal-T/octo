@@ -321,3 +321,38 @@ async def test_evidence_comment_upserts_in_place_quotes_taint2_hides_taint3_and_
             assert fake_gh.statuses[head_sha][0]["context"] == "agent-team"
     finally:
         await close_runtime(runtime)
+
+
+def test_evidence_comment_renders_real_injected_and_cited_ids():
+    from services.github.app.rules import render_evidence_comment
+
+    request = EvidenceCommentRequest(
+        idempotency_key="example-evidence",
+        issue_id="example-issue",
+        base_commit=BASE_SHA,
+        head_sha=BASE_SHA,
+        repro_test_node_id="tests/test_example.py::test_example",
+        repro_failed_before=True,
+        repro_passed_after=True,
+        suite_passed=True,
+        review_verdict="approve",
+        fact_ids_injected=["fact-111111111111", "fact-222222222222"],
+        fact_ids_cited=["fact-222222222222"],
+    )
+    rendered = render_evidence_comment(request, workflow_run_key="example-issue")
+    assert (
+        "### Injected facts\n- `fact-111111111111`\n- `fact-222222222222`" in rendered
+    )
+    assert "### Cited facts\n- `fact-222222222222`" in rendered
+    assert "memory retrieval not active" not in rendered
+    empty = render_evidence_comment(
+        request.model_copy(
+            update={
+                "fact_ids_injected": [],
+                "fact_ids_cited": [],
+            }
+        ),
+        workflow_run_key="example-issue",
+    )
+    assert "### Cited facts\n- None recorded." in empty
+    assert "memory retrieval not active" not in empty

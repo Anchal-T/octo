@@ -678,7 +678,7 @@ async def run_issue_v2(
             provider=repro.provider or triage_provider,
         )
 
-    await ctx.run_typed(
+    repro_run_record = await ctx.run_typed(
         "record-repro-run",
         post_memory,
         path="/v1/runs",
@@ -783,6 +783,7 @@ async def run_issue_v2(
     approved_fix_files: list[str] = []
     approved_test = None
     used_fix_attempts = 0
+    fact_run_records = [repro_run_record]
 
     for fix_attempt in range(1, settings.fixer_max_attempts + 1):
         used_fix_attempts = fix_attempt
@@ -874,7 +875,7 @@ async def run_issue_v2(
                 failure_reason=fix.failure_reason or "fix_not_established",
             )
 
-        await ctx.run_typed(
+        fix_run_record = await ctx.run_typed(
             f"record-fix-run:{fix_attempt}",
             post_memory,
             path="/v1/runs",
@@ -897,6 +898,7 @@ async def run_issue_v2(
                 ended_at=fix.ended_at or read_basis,
             ).model_dump(mode="json"),
         )
+        fact_run_records.append(fix_run_record)
         fix_prop_key = f"{prefix}:fix-proposal:{fix_attempt}"
         fix_prop_raw = await ctx.run_typed(
             f"write-fix-proposal:{fix_attempt}",
@@ -1159,7 +1161,20 @@ async def run_issue_v2(
             repro_files=repro.files,
             fix_files=approved_fix_files,
             sync_decisions=sync_decisions,
-            cited_facts=[],
+            fact_ids_injected=list(
+                dict.fromkeys(
+                    fid
+                    for record in fact_run_records
+                    for fid in record.get("fact_ids_injected", [])
+                )
+            ),
+            fact_ids_cited=list(
+                dict.fromkeys(
+                    fid
+                    for record in fact_run_records
+                    for fid in record.get("fact_ids_cited", [])
+                )
+            ),
             models_used=list(models_used.values()),
         ).model_dump(mode="json"),
     )

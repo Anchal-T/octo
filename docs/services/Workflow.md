@@ -12,6 +12,12 @@ Memory applies the existing ancestry and expiry filters. Workflow retains confid
 
 Related: [Memory](Memory.md), [locked P1 plan](../plans/P1-memory-wiring.md). HTTP routes are documented by [OpenAPI](http://localhost:8002/docs).
 
+The PR evidence payload includes deduplicated `fact_ids_injected` and
+`fact_ids_cited` from the persisted reproducer/fixer run records returned by
+Memory. GitHub renders each list separately, with “None recorded” for an empty
+list. Empty lists do not imply that retrieval was disabled. Older evidence
+requests and claim-bearing `cited_facts` remain supported.
+
 ## Invalid Groq tool calls
 
 The model client distinguishes HTTP 400 `tool_use_failed` responses whose message

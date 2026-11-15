@@ -186,7 +186,7 @@ class FakeMemoryAndGithubBackend:
         if path == "/v1/runs":
             run_id = stable_id("run", payload["idempotency_key"])
             self.runs[run_id] = {**payload, "_id": run_id}
-            return {"id": run_id}
+            return {**self.runs[run_id], "id": run_id}
         if path.endswith("/proposals"):
             round_id = path.split("/")[3]
             pid = stable_id("prop", payload["idempotency_key"])
@@ -381,7 +381,17 @@ async def test_issue_run_v2_happy_path_stale_head_guard_and_duplicate_approve(
     )
 
     monkeypatch.setattr(v2_mod, "call_model", fake_call)
-    monkeypatch.setattr(v2_mod, "post_memory", backend.post_memory)
+
+    async def memory_with_recorded_facts(path, payload):
+        row = await backend.post_memory(path, payload)
+        if path == "/v1/runs" and payload["role"] in ("reproducer", "fixer"):
+            # The persisted record, rather than an in-memory prompt aggregate,
+            # is the source of truth sent to GitHub.
+            row["fact_ids_injected"] = ["fact-111111111111", "fact-222222222222"]
+            row["fact_ids_cited"] = ["fact-222222222222"]
+        return row
+
+    monkeypatch.setattr(v2_mod, "post_memory", memory_with_recorded_facts)
     monkeypatch.setattr(v2_mod, "call_github_api", backend.call_github)
     monkeypatch.setattr(
         v2_mod,
@@ -414,6 +424,11 @@ async def test_issue_run_v2_happy_path_stale_head_guard_and_duplicate_approve(
     assert ctx.state.get("stage") == "awaiting_approval"
     assert len(backend.prs_opened) == 1
     assert len(backend.evidence_upserts) == 1
+    assert backend.evidence_upserts[0]["fact_ids_injected"] == [
+        "fact-111111111111",
+        "fact-222222222222",
+    ]
+    assert backend.evidence_upserts[0]["fact_ids_cited"] == ["fact-222222222222"]
     assert backend.statuses_set[-1][1]["state"] == "pending"
 
     # Stale head SHA is rejected without resolving pr_approval!

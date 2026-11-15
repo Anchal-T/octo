@@ -419,6 +419,8 @@ class EvidenceCommentRequest(Contract):
     fix_files: list[str] = Field(default_factory=list)
     sync_decisions: list[SyncDecisionItem] = Field(default_factory=list)
     cited_facts: list[EvidenceFactItem] = Field(default_factory=list)
+    fact_ids_injected: list[str] = Field(default_factory=list)
+    fact_ids_cited: list[str] = Field(default_factory=list)
     models_used: list[ModelUsageItem] = Field(default_factory=list)
 
 
