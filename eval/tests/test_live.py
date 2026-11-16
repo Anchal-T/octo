@@ -6,6 +6,7 @@ from eval.stale_facts.live import (
     planned_runs,
     save_checkpoint,
     should_pause_after_result,
+    terminal_failure_result,
     verify_model_available,
 )
 
@@ -72,10 +73,20 @@ def test_model_availability_check_returns_only_pinned_listing(monkeypatch):
     assert not verify_model_available()
 
 
+def test_terminal_http_500_is_recorded_as_failed_without_retry():
+    assert terminal_failure_result(500) == {
+        "status": "failed",
+        "success": False,
+        "failure_reason": "workflow returned HTTP 500",
+    }
+    assert terminal_failure_result(503) is None
+    assert should_pause_after_result("failed")
+
+
 def test_daily_guard_stops_on_quota_or_provider_throttle():
     assert should_pause_after_result("quota_exhausted")
     assert should_pause_after_result("throttled")
-    assert not should_pause_after_result("failed")
+    assert not should_pause_after_result("awaiting_approval")
 
 
 def test_daily_guard_reserves_the_next_call_without_crossing_limit():

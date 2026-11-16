@@ -179,7 +179,17 @@ def has_budget_for_next_request(
 
 
 def should_pause_after_result(status: str) -> bool:
-    return status in {"quota_exhausted", "throttled"}
+    return status in {"quota_exhausted", "throttled", "failed"}
+
+
+def terminal_failure_result(status_code: int) -> dict[str, Any] | None:
+    if status_code != 500:
+        return None
+    return {
+        "status": "failed",
+        "success": False,
+        "failure_reason": "workflow returned HTTP 500",
+    }
 
 
 def save_checkpoint(path: Path, checkpoint: dict[str, Any]) -> None:
@@ -557,6 +567,10 @@ async def run_day(
                         break
                     await asyncio.sleep(poll_seconds)
                     continue
+                terminal_failure = terminal_failure_result(status.status_code)
+                if terminal_failure is not None:
+                    result = terminal_failure
+                    break
                 status.raise_for_status()
                 payload = status.json()
                 result = {
