@@ -1,9 +1,12 @@
 from eval.stale_facts.live import (
     DAILY_ESTIMATED_TOKEN_LIMIT,
     LEDGER_COUNTED_STATES,
+    PLAN_SIZE,
     _USAGE_READ,
     counted_states_sql,
     has_budget_for_next_request,
+    is_provider_failure,
+    provider_failure_streak,
     load_checkpoint,
     next_live_run,
     planned_runs,
@@ -31,15 +34,52 @@ def test_usage_gate_matches_ledger_quota_accounting():
 
 def test_live_runs_are_interleaved_per_issue():
     runs = planned_runs()
-    assert [(run["issue_number"], run["condition"]) for run in runs[:6]] == [
+    assert [(run["issue_number"], run["condition"]) for run in runs] == [
         (5, "C0"),
         (5, "C2"),
         (6, "C0"),
         (6, "C2"),
         (7, "C0"),
         (7, "C2"),
+        (8, "C0"),
+        (8, "C2"),
+        (9, "C0"),
+        (9, "C2"),
     ]
-    assert len(runs) == 20
+    assert len(runs) == PLAN_SIZE == 10
+
+
+def test_early_stop_counts_only_trailing_provider_failures():
+    order = planned_runs()
+    checkpoint = {
+        "order": order,
+        "completed": {
+            "5:C0": {"status": "failed", "failure_reason": "repro_not_established"},
+            "5:C2": {
+                "status": "failed",
+                "failure_reason": "workflow returned HTTP 500",
+            },
+            "6:C0": {"status": "failed", "failure_reason": "fix_not_established"},
+        },
+    }
+    assert provider_failure_streak(checkpoint) == 0
+    checkpoint["completed"]["6:C2"] = {
+        "status": "quota_exhausted",
+        "failure_reason": "day_tokens",
+    }
+    assert is_provider_failure(checkpoint["completed"]["6:C2"])
+    assert provider_failure_streak(checkpoint) == 1
+    checkpoint["completed"]["7:C0"] = {
+        "status": "throttled",
+        "failure_reason": "minute_tokens",
+    }
+    assert provider_failure_streak(checkpoint) == 2
+    # A later task miss resets the streak even if provider failures remain earlier.
+    checkpoint["completed"]["7:C2"] = {
+        "status": "failed",
+        "failure_reason": "fix_not_established",
+    }
+    assert provider_failure_streak(checkpoint) == 0
 
 
 def test_checkpoint_resumes_first_unfinished_run():
@@ -51,6 +91,12 @@ def test_checkpoint_resumes_first_unfinished_run():
     assert next_live_run(checkpoint)["run_key"] == "5:C2"
     checkpoint["active"] = {"run_key": "6:C0"}
     assert next_live_run(checkpoint)["run_key"] == "6:C0"
+    checkpoint["active"] = None
+    checkpoint["completed"].update(
+        {"5:C2": {"status": "failed"}, "6:C0": {"status": "failed"}}
+    )
+    checkpoint["skipped"] = {"6:C2": "user-directed day 2 resume at #7/C0"}
+    assert next_live_run(checkpoint)["run_key"] == "7:C0"
 
 
 def test_checkpoint_atomically_preserves_active_and_completed_runs(tmp_path):

@@ -28,9 +28,10 @@ LEDGER_COUNTED_STATES = ("reserved", "completed", "throttled", "failed")
 
 def counted_states_sql() -> str:
     return ", ".join(f"'{state}'" for state in LEDGER_COUNTED_STATES)
+# P1 close-out scope: five pairs (#5-#9), C0 and C2 interleaved per issue.
 ISSUE_BASES = {
     **{number: "60cdc649726bf1bc4f1b336050560b336da715ec" for number in (5, 6)},
-    **{number: "09dbe1eec31ed1b3cd05366748865f11ba427d32" for number in range(7, 15)},
+    **{number: "09dbe1eec31ed1b3cd05366748865f11ba427d32" for number in range(7, 10)},
 }
 CONDITIONS = ("C0", "C2")
 # C0 attempt 90 is retired: #6/C0 exhausted its Restate invocation while the
@@ -180,12 +181,21 @@ def planned_runs() -> list[dict[str, Any]]:
     ]
 
 
+PLAN_SIZE = len(planned_runs())
+
+
 def next_live_run(checkpoint: dict[str, Any]) -> dict[str, Any] | None:
     if checkpoint.get("active") is not None:
         return checkpoint["active"]
     completed = checkpoint.get("completed", {})
+    skipped = checkpoint.get("skipped", {})
     return next(
-        (run for run in planned_runs() if run["run_key"] not in completed), None
+        (
+            run
+            for run in planned_runs()
+            if run["run_key"] not in completed and run["run_key"] not in skipped
+        ),
+        None,
     )
 
 
@@ -199,6 +209,41 @@ def has_budget_for_next_request(
 
 def should_pause_after_result(status: str) -> bool:
     return status in {"quota_exhausted", "throttled", "failed"}
+
+
+# A provider-caused failure is a quota/throttle stop or a model-call failure;
+# a task miss (repro_not_established / fix_not_established) is a result, not a
+# provider outage. Only a streak of two provider failures stops the slice.
+PROVIDER_FAILURE_MARKERS = (
+    "tool_call_validation_failed",
+    "repo agent failed",
+    "workflow returned http 500",
+    "provider_http_400",
+    "model_mismatch",
+)
+
+
+def is_provider_failure(result: dict[str, Any]) -> bool:
+    status = result.get("status")
+    if status in {"quota_exhausted", "throttled"}:
+        return True
+    if status != "failed":
+        return False
+    reason = str(result.get("failure_reason") or "").lower()
+    return any(marker in reason for marker in PROVIDER_FAILURE_MARKERS)
+
+
+def provider_failure_streak(checkpoint: dict[str, Any]) -> int:
+    """Count trailing completed runs that failed for provider reasons."""
+    streak = 0
+    for run in reversed(checkpoint.get("order", [])):
+        result = checkpoint.get("completed", {}).get(run["run_key"])
+        if result is None:
+            continue
+        if not is_provider_failure(result):
+            break
+        streak += 1
+    return streak
 
 
 def terminal_failure_result(status_code: int) -> dict[str, Any] | None:
@@ -432,7 +477,7 @@ def _write_daily_status(
             f"# P1 live slice — {day_key[:10]}",
             "",
             f"Repo: `{REPO}` only. Pinned model: `{MODEL}` for every role.",
-            f"Runs completed today: **{len(today)}**; total: **{completed_total}/20**.",
+            f"Runs completed today: **{len(today)}**; total: **{completed_total}/{PLAN_SIZE}**.",
             f"C0/C2 completed today: **{sum(r['condition'] == 'C0' for r in today)} / {sum(r['condition'] == 'C2' for r in today)}**.",
             f"Task failures today: **{failures}**.",
             f"Groq requests today: **{usage['requests']}**; retries: **{retries}**; model failures: **{usage['model_failures']}**.",
@@ -509,7 +554,7 @@ async def run_day(
             }
 
     completed_this_invocation = 0
-    pause_reason = "all 20 runs are complete"
+    pause_reason = f"all {PLAN_SIZE} runs are complete"
     async with httpx.AsyncClient(base_url=workflow_url, timeout=30) as client:
         while run := next_live_run(checkpoint):
             usage = read_model_usage(
@@ -523,6 +568,12 @@ async def run_day(
             if run["run_key"] not in day["run_keys"]:
                 day["run_keys"].append(run["run_key"])
             if checkpoint["active"] is None:
+                if provider_failure_streak(checkpoint) >= 2:
+                    pause_reason = (
+                        "two consecutive provider-caused failures; "
+                        "pausing further Groq calls"
+                    )
+                    break
                 if max_runs is not None and completed_this_invocation >= max_runs:
                     pause_reason = f"manual per-invocation limit ({max_runs})"
                     break
@@ -616,9 +667,10 @@ async def run_day(
             checkpoint["active"] = None
             save_checkpoint(checkpoint_path, checkpoint)
             completed_this_invocation += 1
-            if should_pause_after_result(result["status"]):
+            if provider_failure_streak(checkpoint) >= 2:
                 pause_reason = (
-                    f"workflow returned {result['status']}; pausing further Groq calls"
+                    "two consecutive provider-caused failures; "
+                    "pausing further Groq calls"
                 )
                 break
 
@@ -654,7 +706,7 @@ def main() -> None:
         )
     )
     print(
-        f"P1 live slice: {result['completed_total']}/20 completed; "
+        f"P1 live slice: {result['completed_total']}/{PLAN_SIZE} completed; "
         f"{result['pause_reason']}. Daily usage: "
         f"{result['usage']['requests']} requests, "
         f"{result['usage']['reserved_tokens']} reserved tokens."
