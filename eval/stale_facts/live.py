@@ -44,6 +44,33 @@ print(json.dumps({
 }))
 """
 
+_MODEL_AVAILABILITY_CHECK = """
+import json, sys
+import httpx
+from agentteam_common import Settings
+from services.workflow.app.models.pools import pin_for, pool_for
+requested = json.load(sys.stdin)
+s = Settings.from_env()
+pin = pin_for("triager", s)
+pool = pool_for(pin, s)
+listed = False
+try:
+  response = httpx.get(
+    f"{pool.base_url}/models",
+    headers={"Authorization": f"Bearer {s.groq_api_key}"},
+    timeout=15,
+  )
+  if response.status_code == 200:
+    payload = response.json()
+    listed = any(
+      isinstance(item, dict) and item.get("id") == requested["model"]
+      for item in payload.get("data", [])
+    )
+except (httpx.HTTPError, ValueError, TypeError, AttributeError, KeyError):
+  pass
+print(json.dumps({"listed": listed}))
+"""
+
 _USAGE_READ = """
 import json, sqlite3, sys
 from datetime import UTC, datetime
@@ -217,6 +244,13 @@ def verify_live_config() -> dict[str, Any]:
     return config
 
 
+def verify_model_available() -> bool:
+    result = _compose_exec(_MODEL_AVAILABILITY_CHECK, {"model": MODEL})
+    if not isinstance(result, dict) or not isinstance(result.get("listed"), bool):
+        raise TypeError("Groq model availability check returned an invalid result")
+    return result["listed"]
+
+
 def read_model_usage(run_ids: list[str] | None = None) -> dict[str, Any]:
     return _compose_exec(_USAGE_READ, {"run_ids": run_ids or []})
 
@@ -229,6 +263,21 @@ async def _post_json(
     return response.json()
 
 
+def _github_api_json(path: str) -> dict[str, Any]:
+    process = subprocess.run(
+        ["gh", "api", path, "--header", "Accept: application/vnd.github+json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if process.returncode:
+        raise RuntimeError("Authenticated GitHub read failed for the fork")
+    try:
+        return json.loads(process.stdout)
+    except ValueError as error:
+        raise RuntimeError("GitHub CLI returned invalid JSON") from error
+
+
 async def prepare_checkpoint(
     *,
     github_url: str,
@@ -238,21 +287,13 @@ async def prepare_checkpoint(
     async with (
         httpx.AsyncClient(base_url=github_url, timeout=30) as github,
         httpx.AsyncClient(base_url=memory_url, timeout=30) as memory,
-        httpx.AsyncClient(
-            timeout=30, headers={"User-Agent": "agent-team-p1-live"}
-        ) as api,
     ):
         head_response = await github.get("/v1/repo/head")
         head_response.raise_for_status()
         if head_response.json().get("repo") != REPO:
             raise RuntimeError("GitHub service is not connected to Anchal-T/sqlparse")
 
-        repo_response = await api.get(
-            f"https://api.github.com/repos/{REPO}",
-            headers={"Accept": "application/vnd.github+json"},
-        )
-        repo_response.raise_for_status()
-        repo_metadata = repo_response.json()
+        repo_metadata = _github_api_json(f"repos/{REPO}")
         if str(
             repo_metadata.get("full_name", "")
         ).casefold() != REPO.casefold() or not repo_metadata.get("fork"):
@@ -262,12 +303,7 @@ async def prepare_checkpoint(
         frozen_issues: dict[str, Any] = {}
         for number, base_commit in ISSUE_BASES.items():
             issue_id = f"gh-{repo_id}-{number}"
-            response = await api.get(
-                f"https://api.github.com/repos/{REPO}/issues/{number}",
-                headers={"Accept": "application/vnd.github+json"},
-            )
-            response.raise_for_status()
-            issue = response.json()
+            issue = _github_api_json(f"repos/{REPO}/issues/{number}")
             if issue.get("state") != "open":
                 raise RuntimeError(f"Fork issue #{number} is not open")
             labels = {label.get("name") for label in issue.get("labels", [])}
@@ -356,6 +392,12 @@ def _write_daily_status(
     completed_total = len(checkpoint["completed"])
     failures = sum(not result["success"] for result in today)
     retries = usage["retries"]
+    model_check = checkpoint.get("model_checks", {}).get(day_key)
+    model_check_count = int(model_check is not None)
+    if model_check is None:
+        model_listed = "not checked"
+    else:
+        model_listed = "yes" if model_check["listed"] else "no"
     content = "\n".join(
         [
             f"# P1 live slice — {day_key[:10]}",
@@ -365,6 +407,7 @@ def _write_daily_status(
             f"C0/C2 completed today: **{sum(r['condition'] == 'C0' for r in today)} / {sum(r['condition'] == 'C2' for r in today)}**.",
             f"Task failures today: **{failures}**.",
             f"Groq requests today: **{usage['requests']}**; retries: **{retries}**; model failures: **{usage['model_failures']}**.",
+            f"Groq `/models` availability GETs today: **{model_check_count}**; `{MODEL}` listed: **{model_listed}** (separate from the model-call ledger).",
             f"Reported tokens today: **{usage['tokens_in']} input + {usage['tokens_out']} output**; estimated ledger reservations: **{usage['reserved_tokens']}**.",
             f"Daily reserved-token total: **{usage['reserved_tokens']} / {DAILY_ESTIMATED_TOKEN_LIMIT}**.",
             f"Pause reason: {pause_reason}.",
@@ -379,6 +422,7 @@ def _write_daily_status(
         / "runs"
         / f"P1-live-slice-{day_key[:10]}.md"
     )
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     return path
 
@@ -410,6 +454,30 @@ async def run_day(
             github_url=github_url, memory_url=memory_url, runtime=runtime
         )
         save_checkpoint(checkpoint_path, checkpoint)
+
+    if next_live_run(checkpoint) is not None:
+        preflight_usage = read_model_usage()
+        day_key = preflight_usage["day_start"]
+        model_checks = checkpoint.setdefault("model_checks", {})
+        if day_key not in model_checks:
+            model_checks[day_key] = {
+                "listed": verify_model_available(),
+                "checked_at": datetime.now(UTC).isoformat(),
+            }
+            save_checkpoint(checkpoint_path, checkpoint)
+        if not model_checks[day_key]["listed"]:
+            pause_reason = (
+                f"{MODEL} was not listed by Groq /models; no workflow run started"
+            )
+            usage = read_model_usage()
+            status_path = _write_daily_status(checkpoint, usage, pause_reason)
+            return {
+                "completed_total": len(checkpoint["completed"]),
+                "completed_this_invocation": 0,
+                "pause_reason": pause_reason,
+                "status_path": str(status_path),
+                "usage": usage,
+            }
 
     completed_this_invocation = 0
     pause_reason = "all 20 runs are complete"

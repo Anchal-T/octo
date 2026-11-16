@@ -6,6 +6,7 @@ from eval.stale_facts.live import (
     planned_runs,
     save_checkpoint,
     should_pause_after_result,
+    verify_model_available,
 )
 
 
@@ -51,6 +52,24 @@ def test_checkpoint_atomically_preserves_active_and_completed_runs(tmp_path):
     restored["active"] = None
     assert next_live_run(restored)["run_key"] == "6:C0"
     assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_model_availability_check_returns_only_pinned_listing(monkeypatch):
+    from eval.stale_facts import live
+
+    calls = []
+
+    def fake_compose_exec(code, payload):
+        calls.append((code, payload))
+        return {"listed": True}
+
+    monkeypatch.setattr(live, "_compose_exec", fake_compose_exec)
+
+    assert verify_model_available()
+    assert calls == [(live._MODEL_AVAILABILITY_CHECK, {"model": live.MODEL})]
+
+    monkeypatch.setattr(live, "_compose_exec", lambda code, payload: {"listed": False})
+    assert not verify_model_available()
 
 
 def test_daily_guard_stops_on_quota_or_provider_throttle():
