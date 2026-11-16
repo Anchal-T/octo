@@ -39,11 +39,11 @@ _PARAMETER_RE = re.compile(
 # sees a tool call. A concrete, correct example in the system prompt and in the
 # tool descriptions gives the model the exact syntax to copy.
 TOOL_CALL_FORMAT_HINT = (
-    "Tool calls: use native tool calls with <parameter=NAME>...</parameter> tags only "
-    "(never <command> or < parameter=\"name\">). Example: "
-    "<tool_call><function=bash><parameter=command>cd /workspace && ls"
-    "</parameter></function></tool_call>. Fields are strings except `anchor_names`, "
-    "which must be a real JSON array like [\"a.b.C\"], never a quoted string."
+    "ACTION FORMAT: reply with ONLY a JSON object, no prose and no XML/tool tags. "
+    "To run a command: {\"action\": \"bash\", \"command\": \"cd /workspace && ls\"}. "
+    "To finish: {\"action\": \"submit\", \"test_node_id\": \"tests/test_x.py::test_y\", "
+    "\"summary\": \"...\", \"fact_claim\": \"optional\", \"anchor_names\": [\"a.b.C\"]}. "
+    "Use double quotes; `anchor_names` is a JSON array of strings, not a string."
 )
 
 
@@ -511,12 +511,7 @@ def reproducer_base_messages(
         if not path.strip():
             continue
         candidate = messages_for("\n".join([*selected_files, path]))
-        if (
-            estimate_messages_tokens(
-                candidate, tools=REPRODUCER_TOOLS, tool_choice="required"
-            )
-            > prompt_token_cap
-        ):
+        if estimate_messages_tokens(candidate) > prompt_token_cap:
             break
         selected_files.append(path)
     if selected_files:
@@ -1193,14 +1188,12 @@ async def _call_repo_model(
             {
                 "role": "user",
                 "content": (
-                    f"Your last tool call was invalid: {outcome.reason}. "  # sanitized, no failed generation
-                    "Retry with a native tool call using the EXACT schema: bash takes a "
-                    "string `command`; submit takes string fields (`summary`, and "
-                    "`test_node_id` for reproduction) and `anchor_names` must be a real "
-                    "JSON array of strings, never a quoted string. Correct example: "
-                    "<tool_call><function=bash><parameter=command>cd /workspace && ls"
-                    "</parameter></function></tool_call>. Do not use <command> tags or "
-                    "< parameter=\"name\">."
+                    f"Your last action was invalid: {outcome.reason}. "  # sanitized, no failed generation
+                    "Reply with ONLY a JSON object: "
+                    "{\"action\": \"bash\", \"command\": \"cd /workspace && ls\"} "
+                    "or {\"action\": \"submit\", \"test_node_id\": \"...\", "
+                    "\"summary\": \"...\", \"anchor_names\": [\"a.b.C\"]}. "
+                    "No XML, no tool tags, no prose."
                 ),
             }
         )
@@ -1256,8 +1249,6 @@ async def run_reproducer_step(
                 base_msgs,
                 turns,
                 prompt_token_cap=prompt_token_cap,
-                tools=REPRODUCER_TOOLS,
-                tool_choice="required",
             )
             outcome, provider = await _call_repo_model(
                 journal,
@@ -1267,8 +1258,6 @@ async def run_reproducer_step(
                     step=f"repro:{turn}",
                     role="reproducer",
                     messages=messages,
-                    tools=REPRODUCER_TOOLS,
-                    tool_choice="required",
                     sampling=Sampling(),
                     taint=2,
                     source="github_issue",
@@ -1477,8 +1466,6 @@ async def run_fixer_step(
                 base_msgs,
                 turns,
                 prompt_token_cap=prompt_token_cap,
-                tools=FIXER_TOOLS,
-                tool_choice="required",
             )
             outcome, provider = await _call_repo_model(
                 journal,
@@ -1488,8 +1475,6 @@ async def run_fixer_step(
                     step=f"{step_tag}:{turn}",
                     role="fixer",
                     messages=messages,
-                    tools=FIXER_TOOLS,
-                    tool_choice="required",
                     sampling=Sampling(),
                     taint=2,
                     source="github_issue",

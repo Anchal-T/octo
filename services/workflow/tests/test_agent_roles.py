@@ -222,10 +222,10 @@ async def test_repo_agent_retries_invalid_tool_call_same_turn(
         retry_message = request.messages[-1]
         assert retry_message["role"] == "user"
         assert retry_message["content"].startswith(
-            "Your last tool call was invalid: tool call validation failed: missing command. "
+            "Your last action was invalid: tool call validation failed: missing command. "
         )
-        assert "<parameter=command>cd /workspace && ls</parameter>" in retry_message["content"]
-        assert "real JSON array of strings" in retry_message["content"]
+        assert '{"action": "bash", "command": "cd /workspace && ls"}' in retry_message["content"]
+        assert '"anchor_names": ["a.b.C"]' in retry_message["content"]
         assert "BAD_GENERATION" not in json.dumps(request.messages)
     if 0 < invalid_calls < 3:
         assert any(e["kind"] == "model_output" for e in journal.events)
@@ -238,32 +238,25 @@ async def test_repo_agent_retries_invalid_tool_call_same_turn(
         assert not any(e["kind"] == "model_output" for e in journal.events)
 
 
-def test_tool_schemas_teach_exact_xml_call_syntax():
-    """Regression for fork #5 C0/C2: Groq rejected bash calls that used
-    <command> instead of <parameter=command> and a submit call that passed
-    anchor_names as a quoted string. The fix must make the exact syntax
-    discoverable in the tool schema, the tool descriptions and the system
-    prompts, so the model does not have to infer Groq's XML protocol."""
-    correct_example = "<parameter=command>cd /workspace && ls</parameter>"
-    for tools in (REPRODUCER_TOOLS, FIXER_TOOLS):
-        assert len(tools) == 2
-        by_name = {tool["function"]["name"]: tool["function"] for tool in tools}
-        assert set(by_name) == {"bash", "submit"}
-        bash, submit = by_name["bash"], by_name["submit"]
-        assert "<parameter=command>" in bash["description"]
-        assert "<parameter=command>VALUE</parameter>" in (
-            bash["parameters"]["properties"]["command"]["description"]
-        )
-        assert "JSON array" in submit["description"]
-        assert "<parameter=NAME>" in TOOL_CALL_FORMAT_HINT
+def test_repo_agents_use_text_actions_with_exact_json_contract():
+    """Regression for fork #5 C0/C2 and #6/C0: Qwen on Groq cannot reliably
+    produce provider-valid XML tool calls (it emits <command> or
+    < parameter=command> and quoted arrays), and every malformed call is
+    rejected before the harness sees it. The repo-agent roles therefore use
+    the harness's text-action path: the system prompt states the exact JSON
+    action contract and the native tool schemas are not sent on those calls."""
+    bash_example = '{"action": "bash", "command": "cd /workspace && ls"}'
+    submit_example = '"anchor_names": ["a.b.C"]'
+    assert bash_example in TOOL_CALL_FORMAT_HINT
+    assert submit_example in TOOL_CALL_FORMAT_HINT
+    assert "ONLY a JSON object" in TOOL_CALL_FORMAT_HINT
+    assert "no XML" in TOOL_CALL_FORMAT_HINT
+    for prompt in (REPRODUCER_SYSTEM_PROMPT, FIXER_SYSTEM_PROMPT):
+        assert TOOL_CALL_FORMAT_HINT in prompt
+    # The schemas remain a precise contract for any caller that still uses them.
     anchor = REPRODUCER_TOOLS[1]["function"]["parameters"]["properties"]["anchor_names"]
     assert anchor["type"] == "array"
     assert "real JSON array" in anchor["description"]
-    assert "quoted string" in anchor["description"]
-    for prompt in (REPRODUCER_SYSTEM_PROMPT, FIXER_SYSTEM_PROMPT):
-        assert TOOL_CALL_FORMAT_HINT in prompt
-        assert correct_example in prompt
-        assert "never a quoted string" in prompt
 
 
 def test_fit_messages_to_cap_keeps_prompt_within_budget_and_quotes_issue():
@@ -371,7 +364,7 @@ def test_reproducer_prompt_lists_tracked_files_within_token_cap():
         "Issue body",
         None,
         tracked_files="\n".join(f"src/module_{index}.py" for index in range(100)),
-        prompt_token_cap=800,
+        prompt_token_cap=600,
     )
 
     assert "git ls-files | grep" in messages[0]["content"]
@@ -380,10 +373,7 @@ def test_reproducer_prompt_lists_tracked_files_within_token_cap():
     assert "src/module_0.py" in messages[1]["content"]
     assert "src/module_99.py" not in messages[1]["content"]
     assert (
-        estimate_messages_tokens(
-            messages, tools=REPRODUCER_TOOLS, tool_choice="required"
-        )
-        <= 800
+        estimate_messages_tokens(messages) <= 600
     )
 
 
@@ -600,11 +590,8 @@ async def test_reproducer_rejects_passing_or_broken_tests_and_accepts_failing_re
     assert "pkg/calc.py" not in result.patch
     assert "assert safe_divide(5, 0) is None" in result.patch
     first_request, second_request = journal.requests[:2]
-    assert first_request.tool_choice == second_request.tool_choice == "required"
-    assert {tool["function"]["name"] for tool in first_request.tools} == {
-        "bash",
-        "submit",
-    }
+    assert first_request.tool_choice is None and second_request.tool_choice is None
+    assert first_request.tools is None and second_request.tools is None
     assistant_call = second_request.messages[-2]
     assert assistant_call["role"] == "assistant"
     assert assistant_call["content"] == "I will inspect and create a minimal test."
@@ -612,12 +599,7 @@ async def test_reproducer_rejects_passing_or_broken_tests_and_accepts_failing_re
     assert second_request.messages[-1]["role"] == "tool"
     assert second_request.messages[-1]["tool_call_id"] == "call-repro-0"
     assert (
-        estimate_messages_tokens(
-            second_request.messages,
-            tools=second_request.tools,
-            tool_choice=second_request.tool_choice,
-        )
-        <= 5500
+        estimate_messages_tokens(second_request.messages) <= 5500
     )
 
 
@@ -733,22 +715,12 @@ async def test_fixer_rebuilds_lost_sandbox_on_replay_without_repeating_model_cal
     assert replay_journal.model_calls == 1
     first_request, second_request = replay_journal.requests
     assert first_request.role == second_request.role == "fixer"
-    assert first_request.tool_choice == second_request.tool_choice == "required"
-    assert {tool["function"]["name"] for tool in first_request.tools} == {
-        "bash",
-        "submit",
-    }
+    assert first_request.tool_choice is None and second_request.tool_choice is None
+    assert first_request.tools is None and second_request.tools is None
     assert second_request.messages[-2]["tool_calls"][0]["id"] == "call-fix-0"
     assert second_request.messages[-1]["role"] == "tool"
     assert second_request.messages[-1]["tool_call_id"] == "call-fix-0"
-    assert (
-        estimate_messages_tokens(
-            second_request.messages,
-            tools=FIXER_TOOLS,
-            tool_choice=second_request.tool_choice,
-        )
-        <= 5500
-    )
+    assert estimate_messages_tokens(second_request.messages) <= 5500
     assert resumed.files == ["pkg/calc.py"]
     assert "tests/test_repro.py" not in resumed.patch
 
