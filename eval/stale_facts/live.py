@@ -25,7 +25,11 @@ ISSUE_BASES = {
     **{number: "09dbe1eec31ed1b3cd05366748865f11ba427d32" for number in range(7, 15)},
 }
 CONDITIONS = ("C0", "C2")
-ATTEMPTS = {"C0": 90, "C2": 91}
+# C0 attempt 90 is retired: #6/C0 exhausted its Restate invocation while the
+# repo agents still used Groq's XML tool protocol, and a replay of that attempt
+# returns the cached terminal failure. Attempt 92 starts a fresh invocation
+# with the text-action path. C2 has not started and keeps 91.
+ATTEMPTS = {"C0": 92, "C2": 91}
 DEFAULT_CHECKPOINT = Path("eval/.cache/stale-facts/p1-live-slice.json")
 BODY_MAX_CHARS = 8_000
 
