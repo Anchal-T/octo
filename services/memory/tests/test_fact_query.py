@@ -1,9 +1,10 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from services.memory.app.dag import Commit, Dag, UnknownCommit
-from services.memory.app.fact_query import filter_valid, valid_at
+from services.memory.app.fact_query import FactExpiryConfig, filter_valid, valid_at
+from services.memory.app.store import MemoryStore
 
 
 def _make_commit(sha: str, parents: tuple[str, ...], day: int) -> Commit:
@@ -153,11 +154,6 @@ def test_unknown_base_raises_key_error(test_dag):
 
     with pytest.raises((KeyError, UnknownCommit)):
         filter_valid([], {}, test_dag, "unknown-sha")
-
-from datetime import timedelta
-from services.memory.app.fact_query import FactExpiryConfig, is_expired
-from services.memory.app.store import MemoryStore
-
 
 def test_2_5_ttl_boundary_user_report():
     t0 = datetime(2026, 1, 1, tzinfo=UTC)

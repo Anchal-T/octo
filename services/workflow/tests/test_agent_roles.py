@@ -10,7 +10,6 @@ from agentteam_contracts import ModelCallRequest, ModelOutcome, TriageResult
 
 from services.workflow.app.roles import (
     FIXER_SYSTEM_PROMPT,
-    FIXER_TOOLS,
     REPRODUCER_SYSTEM_PROMPT,
     REPRODUCER_TOOLS,
     TOOL_CALL_FORMAT_HINT,
@@ -943,9 +942,12 @@ async def test_tester_clean_checkout_approves_valid_fix_and_blocks_broken_suite(
 
 @pytest.mark.parametrize("role", ["reproducer", "fixer"])
 def test_fact_block_is_optional_and_appears_once_after_quoted_issue(role):
-    kwargs = dict(
-        repo="example/fork", title="Example title", body="Example body", triage=None
-    )
+    kwargs = {
+        "repo": "example/fork",
+        "title": "Example title",
+        "body": "Example body",
+        "triage": None,
+    }
     if role == "fixer":
         kwargs.update(
             test_node_id="tests/test_example.py::test_example",

@@ -437,11 +437,11 @@ def test_user_report_preserves_source_issue_and_inherits_untrusted_taint():
         "event_ids": ["ev-example"],
     }
     evidence = {"ev-example": {"taint": 2}}
-    options = dict(
-        index=index,
-        base_commit=index.sha,
-        committed_at=datetime(2026, 11, 15, tzinfo=UTC),
-    )
+    options = {
+        "index": index,
+        "base_commit": index.sha,
+        "committed_at": datetime(2026, 11, 15, tzinfo=UTC),
+    }
     status, _, fact = validate_proposal(
         "round-example", proposal, run, evidence, **options
     )

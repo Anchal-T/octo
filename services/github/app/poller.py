@@ -239,8 +239,11 @@ class Poller:
                             closing_commit=closing_commit,
                             reason=reason,
                         )
-                    except Exception:
-                        pass
+                    except Exception as error:  # noqa: BLE001 - memory closure is best-effort.
+                        logger.warning(
+                            "memory_close_by_issue_failed error_type=%s",
+                            type(error).__name__,
+                        )
                 self.store.upsert_issue(
                     replace(
                         row,
