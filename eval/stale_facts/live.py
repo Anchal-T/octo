@@ -28,6 +28,8 @@ LEDGER_COUNTED_STATES = ("reserved", "completed", "throttled", "failed")
 
 def counted_states_sql() -> str:
     return ", ".join(f"'{state}'" for state in LEDGER_COUNTED_STATES)
+
+
 # P1 close-out scope: five pairs (#5-#9), C0 and C2 interleaved per issue.
 ISSUE_BASES = {
     **{number: "60cdc649726bf1bc4f1b336050560b336da715ec" for number in (5, 6)},
@@ -184,6 +186,13 @@ def planned_runs() -> list[dict[str, Any]]:
 PLAN_SIZE = len(planned_runs())
 
 
+def plan_counts(checkpoint: dict[str, Any]) -> tuple[int, int, int]:
+    """Return (completed, skipped, pending) against the planned slot count."""
+    completed = len(checkpoint.get("completed", {}))
+    skipped = len(checkpoint.get("skipped", {}))
+    return completed, skipped, PLAN_SIZE - completed - skipped
+
+
 def next_live_run(checkpoint: dict[str, Any]) -> dict[str, Any] | None:
     if checkpoint.get("active") is not None:
         return checkpoint["active"]
@@ -208,26 +217,31 @@ def has_budget_for_next_request(
 
 
 def should_pause_after_result(status: str) -> bool:
-    return status in {"quota_exhausted", "throttled", "failed"}
+    """Signals that end the current invocation at once.
+
+    A quota stop or an ordinary throttle means the provider cannot serve more
+    calls right now. An ``unknown`` result (unexplained workflow HTTP 500) stops
+    for inspection: its cause is unattributed, so no later slot is launched
+    blindly and no provider-failure streak is advanced. Real provider failures
+    and task misses are recorded and handled by the two-failure rule instead.
+    """
+    return status in {"quota_exhausted", "throttled", "unknown"}
 
 
-# A provider-caused failure is a quota/throttle stop or a model-call failure;
-# a task miss (repro_not_established / fix_not_established) is a result, not a
-# provider outage. Only a streak of two provider failures stops the slice.
+# A provider-caused terminal failure is a model-call failure with real provider
+# error evidence. A quota stop / throttle is a scheduling signal (handled by
+# should_pause_after_result), a task miss is a result, and a bare workflow HTTP
+# 500 is a harness error — none of them count toward the two-failure stop.
 PROVIDER_FAILURE_MARKERS = (
     "tool_call_validation_failed",
     "repo agent failed",
-    "workflow returned http 500",
     "provider_http_400",
     "model_mismatch",
 )
 
 
 def is_provider_failure(result: dict[str, Any]) -> bool:
-    status = result.get("status")
-    if status in {"quota_exhausted", "throttled"}:
-        return True
-    if status != "failed":
+    if result.get("status") != "failed":
         return False
     reason = str(result.get("failure_reason") or "").lower()
     return any(marker in reason for marker in PROVIDER_FAILURE_MARKERS)
@@ -249,10 +263,15 @@ def provider_failure_streak(checkpoint: dict[str, Any]) -> int:
 def terminal_failure_result(status_code: int) -> dict[str, Any] | None:
     if status_code != 500:
         return None
+    # A bare workflow HTTP 500 is a harness failure with no provider evidence.
+    # Record it as unknown/harness so it cannot fuel the provider-failure stop;
+    # it pauses for inspection instead. Real provider attribution still comes
+    # from a failed result carrying a marker in PROVIDER_FAILURE_MARKERS.
     return {
-        "status": "failed",
+        "status": "unknown",
         "success": False,
         "failure_reason": "workflow returned HTTP 500",
+        "failure_source": "harness",
     }
 
 
@@ -454,7 +473,10 @@ def _make_request(checkpoint: dict[str, Any], run: dict[str, Any]) -> dict[str, 
 
 
 def _write_daily_status(
-    checkpoint: dict[str, Any], usage: dict[str, Any], pause_reason: str
+    checkpoint: dict[str, Any],
+    usage: dict[str, Any],
+    pause_reason: str,
+    output_dir: Path | None = None,
 ) -> Path:
     day_key = usage["day_start"]
     checkpoint["days"].setdefault(day_key, {"run_keys": []})
@@ -463,8 +485,21 @@ def _write_daily_status(
         for result in checkpoint["completed"].values()
         if result.get("day_key") == day_key
     ]
-    completed_total = len(checkpoint["completed"])
-    failures = sum(not result["success"] for result in today)
+    completed_total, skipped_total, pending_total = plan_counts(checkpoint)
+    # A quota/throttle stop is a pause, not a task failure; an unexplained HTTP
+    # 500 stays unknown/harness. Only other unsuccessful terminal outcomes are
+    # counted as failed runs (including provider-caused ones).
+    failures = quota_pauses = unknown_stops = 0
+    for result in today:
+        if result.get("success"):
+            continue
+        status = result.get("status")
+        if status in {"quota_exhausted", "throttled"}:
+            quota_pauses += 1
+        elif status == "unknown" or result.get("failure_source") == "harness":
+            unknown_stops += 1
+        else:
+            failures += 1
     retries = usage["retries"]
     model_check = checkpoint.get("model_checks", {}).get(day_key)
     model_check_count = int(model_check is not None)
@@ -477,10 +512,21 @@ def _write_daily_status(
             f"# P1 live slice — {day_key[:10]}",
             "",
             f"Repo: `{REPO}` only. Pinned model: `{MODEL}` for every role.",
-            f"Runs completed today: **{len(today)}**; total: **{completed_total}/{PLAN_SIZE}**.",
+            (
+                f"Runs completed today: **{len(today)}**; total: **{completed_total}/{PLAN_SIZE}** "
+                f"(skipped: **{skipped_total}**, pending: **{pending_total}**)."
+            ),
             f"C0/C2 completed today: **{sum(r['condition'] == 'C0' for r in today)} / {sum(r['condition'] == 'C2' for r in today)}**.",
-            f"Task failures today: **{failures}**.",
-            f"Groq requests today: **{usage['requests']}**; retries: **{retries}**; model failures: **{usage['model_failures']}**.",
+            (
+                f"Failed runs today (non-quota terminal): **{failures}**; "
+                f"quota/throttle pauses: **{quota_pauses}**; "
+                f"unknown/harness stops (no provider attribution): **{unknown_stops}**."
+            ),
+            (
+                "Groq requests today (ledger-counted attempts, refused excluded): "
+                f"**{usage['requests']}**; retries: **{retries}**; "
+                f"model failures: **{usage['model_failures']}**."
+            ),
             f"Groq `/models` availability GETs today: **{model_check_count}**; `{MODEL}` listed: **{model_listed}** (separate from the model-call ledger).",
             f"Reported tokens today: **{usage['tokens_in']} input + {usage['tokens_out']} output**; estimated ledger reservations: **{usage['reserved_tokens']}**.",
             f"Daily reserved-token total: **{usage['reserved_tokens']} / {DAILY_ESTIMATED_TOKEN_LIMIT}**.",
@@ -490,13 +536,9 @@ def _write_daily_status(
             "",
         ]
     )
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "docs"
-        / "runs"
-        / f"P1-live-slice-{day_key[:10]}.md"
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
+    base = output_dir or Path(__file__).resolve().parents[2] / "docs" / "runs"
+    path = base / f"P1-live-slice-{day_key[:10]}.md"
+    base.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     return path
 
@@ -545,8 +587,11 @@ async def run_day(
             )
             usage = read_model_usage()
             status_path = _write_daily_status(checkpoint, usage, pause_reason)
+            completed_total, skipped_total, pending_total = plan_counts(checkpoint)
             return {
-                "completed_total": len(checkpoint["completed"]),
+                "completed_total": completed_total,
+                "skipped_total": skipped_total,
+                "pending_total": pending_total,
                 "completed_this_invocation": 0,
                 "pause_reason": pause_reason,
                 "status_path": str(status_path),
@@ -554,7 +599,14 @@ async def run_day(
             }
 
     completed_this_invocation = 0
-    pause_reason = f"all {PLAN_SIZE} runs are complete"
+    completed_total, skipped_total, pending_total = plan_counts(checkpoint)
+    if pending_total == 0:
+        pause_reason = (
+            f"all {PLAN_SIZE} planned slots accounted for "
+            f"({completed_total} completed, {skipped_total} skipped)"
+        )
+    else:
+        pause_reason = f"{pending_total} of {PLAN_SIZE} planned slots pending"
     async with httpx.AsyncClient(base_url=workflow_url, timeout=30) as client:
         while run := next_live_run(checkpoint):
             usage = read_model_usage(
@@ -673,12 +725,35 @@ async def run_day(
                     "pausing further Groq calls"
                 )
                 break
+            if should_pause_after_result(result["status"]):
+                if result["status"] == "unknown":
+                    pause_reason = (
+                        f"unexplained workflow HTTP 500 on {run['run_key']}; "
+                        "stopping for inspection, no later slot started"
+                    )
+                else:
+                    pause_reason = (
+                        f"{result['status']} on {run['run_key']}; "
+                        "pausing this invocation before later slots"
+                    )
+                break
 
         usage = read_model_usage()
     save_checkpoint(checkpoint_path, checkpoint)
+    completed_total, skipped_total, pending_total = plan_counts(checkpoint)
+    if pending_total == 0:
+        # The loop can finish naturally with a stale starting-count reason;
+        # refresh it from the final state, but never override an explicit
+        # quota/provider/manual pause while slots are still pending.
+        pause_reason = (
+            f"all {PLAN_SIZE} planned slots accounted for "
+            f"({completed_total} completed, {skipped_total} skipped)"
+        )
     status_path = _write_daily_status(checkpoint, usage, pause_reason)
     return {
-        "completed_total": len(checkpoint["completed"]),
+        "completed_total": completed_total,
+        "skipped_total": skipped_total,
+        "pending_total": pending_total,
         "completed_this_invocation": completed_this_invocation,
         "pause_reason": pause_reason,
         "status_path": str(status_path),
@@ -706,8 +781,9 @@ def main() -> None:
         )
     )
     print(
-        f"P1 live slice: {result['completed_total']}/{PLAN_SIZE} completed; "
-        f"{result['pause_reason']}. Daily usage: "
+        f"P1 live slice: {result['completed_total']} completed, "
+        f"{result['skipped_total']} skipped, {result['pending_total']} pending "
+        f"of {PLAN_SIZE} planned; {result['pause_reason']}. Daily usage: "
         f"{result['usage']['requests']} requests, "
         f"{result['usage']['reserved_tokens']} reserved tokens."
     )
