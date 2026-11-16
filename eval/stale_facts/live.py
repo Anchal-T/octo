@@ -20,6 +20,14 @@ from services.workflow.app.fact_symbols import issue_references, symbol_candidat
 REPO = "Anchal-T/sqlparse"
 MODEL = "qwen/qwen3.8-27b"
 DAILY_ESTIMATED_TOKEN_LIMIT = 190_000
+# Keep the budget gate in sync with the ledger's own quota accounting
+# (Ledger._usage): HTTP-400 `refused` attempts are excluded there, so counting
+# them here overstates daily usage and makes the slice pause with quota free.
+LEDGER_COUNTED_STATES = ("reserved", "completed", "throttled", "failed")
+
+
+def counted_states_sql() -> str:
+    return ", ".join(f"'{state}'" for state in LEDGER_COUNTED_STATES)
 ISSUE_BASES = {
     **{number: "60cdc649726bf1bc4f1b336050560b336da715ec" for number in (5, 6)},
     **{number: "09dbe1eec31ed1b3cd05366748865f11ba427d32" for number in range(7, 15)},
@@ -95,7 +103,8 @@ db.row_factory = sqlite3.Row
 row = db.execute(
   "SELECT COUNT(*) AS requests, COALESCE(SUM(tokens_est), 0) AS reserved_tokens, "
   "COALESCE(SUM(CASE WHEN retry_ordinal > 1 THEN 1 ELSE 0 END), 0) AS retries "
-  "FROM call_attempt WHERE pool = 'groq' AND day_window = ?", (day_start,)
+  "FROM call_attempt WHERE pool = 'groq' AND day_window = ? "
+  "AND state IN (__STATE_FILTER__)", (day_start,)
 ).fetchone()
 failures = db.execute(
   "SELECT COUNT(*) FROM call_log l JOIN call_attempt a "
@@ -115,7 +124,8 @@ for run_id in requested.get("run_ids", []):
   attempts = db.execute(
     "SELECT COUNT(*) AS requests, COALESCE(SUM(tokens_est), 0) AS reserved_tokens, "
     "COALESCE(SUM(CASE WHEN retry_ordinal > 1 THEN 1 ELSE 0 END), 0) AS retries "
-    "FROM call_attempt WHERE pool = 'groq' AND run_id = ?", (run_id,)
+    "FROM call_attempt WHERE pool = 'groq' AND run_id = ? "
+    "AND state IN (__STATE_FILTER__)", (run_id,)
   ).fetchone()
   run_failures = db.execute(
     "SELECT COUNT(*) FROM call_log WHERE run_id = ? "
@@ -155,7 +165,7 @@ print(json.dumps({
   "tokens_out": tokens["tokens_out"],
   "runs": runs,
 }))
-"""
+""".replace("__STATE_FILTER__", counted_states_sql())
 
 
 def planned_runs() -> list[dict[str, Any]]:

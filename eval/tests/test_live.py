@@ -1,5 +1,8 @@
 from eval.stale_facts.live import (
     DAILY_ESTIMATED_TOKEN_LIMIT,
+    LEDGER_COUNTED_STATES,
+    _USAGE_READ,
+    counted_states_sql,
     has_budget_for_next_request,
     load_checkpoint,
     next_live_run,
@@ -9,6 +12,21 @@ from eval.stale_facts.live import (
     terminal_failure_result,
     verify_model_available,
 )
+
+
+def test_usage_gate_matches_ledger_quota_accounting():
+    """HTTP-400 `refused` attempts consume no ledger quota; counting them in
+    the slice's reserved total made the daily gate pause with budget free."""
+    assert "refused" not in LEDGER_COUNTED_STATES
+    assert set(LEDGER_COUNTED_STATES) == {
+        "reserved",
+        "completed",
+        "throttled",
+        "failed",
+    }
+    assert counted_states_sql() == "'reserved', 'completed', 'throttled', 'failed'"
+    assert "__STATE_FILTER__" not in _USAGE_READ
+    assert counted_states_sql() in _USAGE_READ
 
 
 def test_live_runs_are_interleaved_per_issue():
