@@ -1,0 +1,237 @@
+{
+  "cleanup_activation": {
+    "idle_grace_s": 1.5,
+    "in_flight": 0,
+    "last_start_unix": 1794863553.4874349,
+    "last_stop_unix": 1794863554.5709326,
+    "worker_alive": false,
+    "worker_module": "services.workflow.tests.durability_probe",
+    "worker_pid": null,
+    "worker_port": 41201,
+    "worker_start_count": 5
+  },
+  "image": "docker.restate.dev/restatedev/restate:1.8.1",
+  "observed": {
+    "approval_wait_activation": {
+      "idle_grace_s": 1.5,
+      "in_flight": 0,
+      "last_start_unix": 1794863542.421392,
+      "last_stop_unix": 1794863544.7235837,
+      "worker_alive": false,
+      "worker_module": "services.workflow.tests.durability_probe",
+      "worker_pid": null,
+      "worker_port": 41201,
+      "worker_start_count": 3
+    },
+    "before_valid_approval_activation": {
+      "idle_grace_s": 1.5,
+      "in_flight": 0,
+      "last_start_unix": 1794863548.38735,
+      "last_stop_unix": 1794863550.472488,
+      "worker_alive": false,
+      "worker_module": "services.workflow.tests.durability_probe",
+      "worker_pid": null,
+      "worker_port": 41201,
+      "worker_start_count": 4
+    },
+    "duplicate_approval": {
+      "body": {
+        "status": "already_decided"
+      },
+      "status_code": 200
+    },
+    "final_snapshot": {
+      "activation": {
+        "idle_grace_s": 1.5,
+        "in_flight": 0,
+        "last_start_unix": 1794863553.4874349,
+        "last_stop_unix": 1794863550.472488,
+        "worker_alive": true,
+        "worker_module": "services.workflow.tests.durability_probe",
+        "worker_pid": 218383,
+        "worker_port": 41201,
+        "worker_start_count": 5
+      },
+      "admin_port": 46695,
+      "container": "agentteam-durability-77e53e4ff2a8",
+      "info": {
+        "revision": "v1a-proof-0001",
+        "stage": "done"
+      },
+      "ingress_port": 43655,
+      "provider": {
+        "call_counts": {
+          "durability-v1a-proof-0001:v1a-proof-0001:turn:1": 1,
+          "durability-v1a-proof-0001:v1a-proof-0001:turn:2": 1
+        },
+        "calls": 2,
+        "completion_keys": [
+          "durability-v1a-proof-0001:v1a-proof-0001:turn:1",
+          "durability-v1a-proof-0001:v1a-proof-0001:turn:2"
+        ],
+        "completions": 2,
+        "events": [
+          {
+            "at_epoch": 1794863522.3959265,
+            "request_id": "durability-v1a-proof-0001:v1a-proof-0001:turn:1",
+            "revision": "v1a-proof-0001",
+            "turn": 1
+          },
+          {
+            "at_epoch": 1794863542.9369402,
+            "request_id": "durability-v1a-proof-0001:v1a-proof-0001:turn:2",
+            "revision": "v1a-proof-0001",
+            "turn": 2
+          }
+        ],
+        "keys": [
+          "durability-v1a-proof-0001:v1a-proof-0001:turn:1",
+          "durability-v1a-proof-0001:v1a-proof-0001:turn:2"
+        ],
+        "receipts": [
+          {
+            "created_epoch": 1794863522.3960893,
+            "output": {
+              "marker": "durability-probe-v1",
+              "request_id": "durability-v1a-proof-0001:v1a-proof-0001:turn:1",
+              "revision": "v1a-proof-0001",
+              "text": "fake-model-turn-1",
+              "turn": 1
+            },
+            "request_id": "durability-v1a-proof-0001:v1a-proof-0001:turn:1",
+            "revision": "v1a-proof-0001",
+            "turn": 1
+          },
+          {
+            "created_epoch": 1794863542.937054,
+            "output": {
+              "marker": "durability-probe-v1",
+              "request_id": "durability-v1a-proof-0001:v1a-proof-0001:turn:2",
+              "revision": "v1a-proof-0001",
+              "text": "fake-model-turn-2",
+              "turn": 2
+            },
+            "request_id": "durability-v1a-proof-0001:v1a-proof-0001:turn:2",
+            "revision": "v1a-proof-0001",
+            "turn": 2
+          }
+        ]
+      },
+      "restate_image": "docker.restate.dev/restatedev/restate:1.8.1"
+    },
+    "result": {
+      "approved": true,
+      "decision": {
+        "approved": true,
+        "by": "test-reviewer",
+        "revision": "v1a-proof-0001"
+      },
+      "revision": "v1a-proof-0001",
+      "turns": [
+        {
+          "marker": "durability-probe-v1",
+          "request_id": "durability-v1a-proof-0001:v1a-proof-0001:turn:1",
+          "revision": "v1a-proof-0001",
+          "text": "fake-model-turn-1",
+          "turn": 1
+        },
+        {
+          "marker": "durability-probe-v1",
+          "request_id": "durability-v1a-proof-0001:v1a-proof-0001:turn:2",
+          "revision": "v1a-proof-0001",
+          "text": "fake-model-turn-2",
+          "turn": 2
+        }
+      ]
+    },
+    "stale_approval": {
+      "body": {
+        "status": "stale_revision"
+      },
+      "status_code": 200
+    },
+    "timer_elapsed_seconds": 20.541013717651367,
+    "timer_wait_activation": {
+      "idle_grace_s": 1.5,
+      "in_flight": 0,
+      "last_start_unix": 1794863521.8791525,
+      "last_stop_unix": 1794863524.1630397,
+      "worker_alive": false,
+      "worker_module": "services.workflow.tests.durability_probe",
+      "worker_pid": null,
+      "worker_port": 41201,
+      "worker_start_count": 2
+    },
+    "timer_wait_provider": {
+      "call_counts": {
+        "durability-v1a-proof-0001:v1a-proof-0001:turn:1": 1
+      },
+      "calls": 1,
+      "completion_keys": [
+        "durability-v1a-proof-0001:v1a-proof-0001:turn:1"
+      ],
+      "completions": 1,
+      "events": [
+        {
+          "at_epoch": 1794863522.3959265,
+          "request_id": "durability-v1a-proof-0001:v1a-proof-0001:turn:1",
+          "revision": "v1a-proof-0001",
+          "turn": 1
+        }
+      ],
+      "keys": [
+        "durability-v1a-proof-0001:v1a-proof-0001:turn:1"
+      ],
+      "receipts": [
+        {
+          "created_epoch": 1794863522.3960893,
+          "output": {
+            "marker": "durability-probe-v1",
+            "request_id": "durability-v1a-proof-0001:v1a-proof-0001:turn:1",
+            "revision": "v1a-proof-0001",
+            "text": "fake-model-turn-1",
+            "turn": 1
+          },
+          "request_id": "durability-v1a-proof-0001:v1a-proof-0001:turn:1",
+          "revision": "v1a-proof-0001",
+          "turn": 1
+        }
+      ]
+    },
+    "valid_approval": {
+      "body": {
+        "status": "recorded"
+      },
+      "status_code": 200
+    },
+    "worker_starts_before_restart": 3
+  },
+  "passed": true,
+  "revision": "v1a-proof-0001",
+  "scenario": "v1a-durability",
+  "scope": "test-only local activation proof; production handlers and deployments unchanged",
+  "sdk_version": "1.1.0",
+  "source_sha256": {
+    "services/workflow/tests/durability_activation.py": "3758e0bf25f1e4e1e3e8c932eb994cc5a2553ebc5ef26347df87897641840a25",
+    "services/workflow/tests/durability_probe.py": "512410d0d5db71ba0a70b60f3527c2999a6c721bc2842640468662d818b277f8",
+    "services/workflow/tests/test_durability_integration.py": "1c0f29f3f543c3718090ee2a10f01b729075a59fe570eb2fb6694e77fccf67cf",
+    "services/workflow/tests/test_durability_probe.py": "9806891e093e6c993de2b7d31ab1c51cda143afdc65061097ecd65a69f1699d1"
+  },
+  "timer_seconds": 20,
+  "verification": {
+    "formatting": "passed",
+    "independent_review": "no remaining blocking findings",
+    "normal_suite": {
+      "failed": 0,
+      "passed": 469,
+      "skipped": 15
+    },
+    "opt_in_durability": {
+      "failed": 0,
+      "passed": 1
+    },
+    "ruff": "passed"
+  },
+  "verified_at_utc": "2026-11-16T21:14:06.767566+00:00",
+  "worker_module": "services.workflow.tests.durability_probe"
+}
