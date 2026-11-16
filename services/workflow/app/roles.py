@@ -38,6 +38,15 @@ _PARAMETER_RE = re.compile(
 # provider's schema validation with `tool_use_failed` before the harness ever
 # sees a tool call. A concrete, correct example in the system prompt and in the
 # tool descriptions gives the model the exact syntax to copy.
+# The fixer used to spend all eight turns inspecting (all 16 fixer turns in
+# #6/C0 were sed/grep/python -c with zero source edits). A single, deterministic
+# nudge at turn 5 breaks the inspection loop without extending the turn cap.
+FIXER_EDIT_NUDGE_TURN = 5
+FIXER_EDIT_NUDGE = (
+    "You have not edited any non-test source file yet. Make your edit now, "
+    "then submit."
+)
+
 TOOL_CALL_FORMAT_HINT = (
     "ACTION FORMAT: reply with ONLY a JSON object, no prose and no XML/tool tags. "
     "To run a command: {\"action\": \"bash\", \"command\": \"cd /workspace && ls\"}. "
@@ -617,6 +626,37 @@ def _first_balanced_json_object(text: str) -> str | None:
     return None
 
 
+def _escape_raw_json_string_controls(text: str) -> str:
+    """Escape literal control characters inside JSON string values.
+
+    Qwen sometimes emits a heredoc as the `command` value with real newlines
+    instead of `\\n`. Strict json.loads rejects those, so the action is lost
+    even though the command is intact. Only characters inside strings change.
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    controls = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    for char in text:
+        if not in_string:
+            out.append(char)
+            if char == '"':
+                in_string = True
+            continue
+        if escaped:
+            out.append(char)
+            escaped = False
+        elif char == "\\":
+            out.append(char)
+            escaped = True
+        elif char == '"':
+            out.append(char)
+            in_string = False
+        else:
+            out.append(controls.get(char, char))
+    return "".join(out)
+
+
 def _decode_json_object(text: str | None) -> dict[str, Any] | None:
     if not text or not text.strip():
         return None
@@ -644,7 +684,14 @@ def _decode_json_object(text: str | None) -> dict[str, Any] | None:
             try:
                 data = json.loads(_escape_invalid_backslashes(object_text))
             except (RecursionError, ValueError):
-                return None
+                try:
+                    data = json.loads(
+                        _escape_raw_json_string_controls(
+                            _escape_invalid_backslashes(object_text)
+                        )
+                    )
+                except (RecursionError, ValueError):
+                    return None
         if isinstance(data, dict):
             if function_name in {"bash", "submit"} and "action" not in data:
                 data["action"] = function_name
@@ -1459,6 +1506,7 @@ async def run_fixer_step(
     model_used: str | None = None
     provider_used: str | None = None
     step_tag = f"fix:{fix_attempt}"
+    made_edit = False
 
     try:
         for turn in range(turn_cap):
@@ -1467,6 +1515,8 @@ async def run_fixer_step(
                 turns,
                 prompt_token_cap=prompt_token_cap,
             )
+            if turn == FIXER_EDIT_NUDGE_TURN and not made_edit:
+                messages = [*messages, {"role": "user", "content": FIXER_EDIT_NUDGE}]
             outcome, provider = await _call_repo_model(
                 journal,
                 f"{step_tag}:llm:{turn}",
@@ -1549,6 +1599,8 @@ async def run_fixer_step(
                 )
                 tool_res = ToolStepResult.model_validate(raw_tool)
                 last_diff = tool_res.git_diff
+                if tool_res.changed_files:
+                    made_edit = True
                 tool_ev_id = await journal.record_event(
                     f"{step_tag}:ev-tool:{turn}",
                     EventWrite(

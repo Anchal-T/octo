@@ -238,6 +238,65 @@ async def test_repo_agent_retries_invalid_tool_call_same_turn(
         assert not any(e["kind"] == "model_output" for e in journal.events)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("edit_early", [False, True])
+async def test_fixer_edit_nudge_at_turn_five(tmp_path, edit_early):
+    """Regression for #6/C0: both fix attempts inspected for eight turns and
+    never edited. One deterministic nudge at turn 5 breaks the loop; no turn
+    cap is raised and the nudge is skipped once a source edit has landed."""
+    from services.workflow.app.roles import FIXER_EDIT_NUDGE, FIXER_EDIT_NUDGE_TURN
+
+    repo = tmp_path / "repo"
+    sha = _init_buggy_repo(repo)
+    manager = SandboxSessionManager(
+        lambda base: LocalGitSandbox(
+            repo_path=repo,
+            base_commit=base,
+            work_root=tmp_path / "work",
+        )
+    )
+    inspect = json.dumps({"action": "bash", "command": "printf inspecting"})
+    edit = json.dumps(
+        {"action": "bash", "command": "echo '# harness nudge test' >> pkg/calc.py"}
+    )
+    replies = [edit if edit_early and index == 0 else inspect for index in range(8)]
+    journal = FakeStepJournal(replies)
+    result = await run_fixer_step(
+        journal=journal,
+        sessions=manager,
+        session_key="nudge-session",
+        key_prefix="nudge-prefix",
+        run_id="run-nudge",
+        fix_attempt=1,
+        repo="Anchal-T/demo",
+        base_commit=sha,
+        title="Example issue",
+        body="Example body",
+        triage=None,
+        test_node_id="tests/test_calc.py::test_safe_divide_positive",
+        repro_diff="",
+        review_notes=None,
+        turn_cap=8,
+        prompt_token_cap=5500,
+    )
+    assert result.succeeded is False
+    assert len(journal.requests) == 8  # turn cap unchanged
+    nudged = [
+        index
+        for index, request in enumerate(journal.requests)
+        if any(
+            message.get("content") == FIXER_EDIT_NUDGE
+            for message in request.messages
+            if isinstance(message, dict)
+        )
+    ]
+    if edit_early:
+        assert nudged == []
+    else:
+        assert FIXER_EDIT_NUDGE_TURN == 5
+        assert nudged == [5]
+
+
 def test_repo_agents_use_text_actions_with_exact_json_contract():
     """Regression for fork #5 C0/C2 and #6/C0: Qwen on Groq cannot reliably
     produce provider-valid XML tool calls (it emits <command> or
@@ -298,6 +357,16 @@ def test_repro_and_fix_parsers_accept_wrapped_json_tool_call():
 
     assert parse_repro_action(reply) == BashAction(command="ls")
     assert parse_fix_action(reply) == BashAction(command="ls")
+
+
+def test_parsers_accept_json_with_raw_newlines_in_command_string():
+    """#6/C0 repro turns 4 and 5 emitted a heredoc with real newlines inside
+    the JSON string; strict json.loads rejected the whole action."""
+    command = "cd /workspace && cat >> tests/test_format.py << 'EOF'\ndef test_x():\n    pass\nEOF\n"
+    reply = json.dumps({"action": "bash", "command": command})
+    raw_newlines = reply.replace("\\n", "\n")
+    assert parse_repro_action(raw_newlines) == BashAction(command=command)
+    assert parse_fix_action(raw_newlines) == BashAction(command=command)
 
 
 def test_repro_and_fix_parsers_accept_parameter_tool_call():
