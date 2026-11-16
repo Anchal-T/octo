@@ -9,8 +9,11 @@ import pytest
 from agentteam_contracts import ModelCallRequest, ModelOutcome, TriageResult
 
 from services.workflow.app.roles import (
+    FIXER_SYSTEM_PROMPT,
     FIXER_TOOLS,
+    REPRODUCER_SYSTEM_PROMPT,
     REPRODUCER_TOOLS,
+    TOOL_CALL_FORMAT_HINT,
     BashAction,
     CleanCheckResult,
     SandboxSessionManager,
@@ -216,11 +219,13 @@ async def test_repo_agent_retries_invalid_tool_call_same_turn(
     }
     for retry, request in enumerate(journal.requests[1:], 1):
         assert request.step == journal.requests[0].step + f":tool-retry:{retry}"
-        assert request.messages[-1] == {
-            "role": "user",
-            "content": "Your last tool call was invalid: tool call validation failed: missing command. "
-            "Call `bash` with a `command` string, or `submit`.",
-        }
+        retry_message = request.messages[-1]
+        assert retry_message["role"] == "user"
+        assert retry_message["content"].startswith(
+            "Your last tool call was invalid: tool call validation failed: missing command. "
+        )
+        assert "<parameter=command>cd /workspace && ls</parameter>" in retry_message["content"]
+        assert "real JSON array of strings" in retry_message["content"]
         assert "BAD_GENERATION" not in json.dumps(request.messages)
     if 0 < invalid_calls < 3:
         assert any(e["kind"] == "model_output" for e in journal.events)
@@ -231,6 +236,34 @@ async def test_repo_agent_retries_invalid_tool_call_same_turn(
     else:
         assert result.retry_outcome.error_code == failed.error_code
         assert not any(e["kind"] == "model_output" for e in journal.events)
+
+
+def test_tool_schemas_teach_exact_xml_call_syntax():
+    """Regression for fork #5 C0/C2: Groq rejected bash calls that used
+    <command> instead of <parameter=command> and a submit call that passed
+    anchor_names as a quoted string. The fix must make the exact syntax
+    discoverable in the tool schema, the tool descriptions and the system
+    prompts, so the model does not have to infer Groq's XML protocol."""
+    correct_example = "<parameter=command>cd /workspace && ls</parameter>"
+    for tools in (REPRODUCER_TOOLS, FIXER_TOOLS):
+        assert len(tools) == 2
+        by_name = {tool["function"]["name"]: tool["function"] for tool in tools}
+        assert set(by_name) == {"bash", "submit"}
+        bash, submit = by_name["bash"], by_name["submit"]
+        assert "<parameter=command>" in bash["description"]
+        assert "<parameter=command>VALUE</parameter>" in (
+            bash["parameters"]["properties"]["command"]["description"]
+        )
+        assert "JSON array" in submit["description"]
+        assert "<parameter=NAME>" in TOOL_CALL_FORMAT_HINT
+    anchor = REPRODUCER_TOOLS[1]["function"]["parameters"]["properties"]["anchor_names"]
+    assert anchor["type"] == "array"
+    assert "real JSON array" in anchor["description"]
+    assert "quoted string" in anchor["description"]
+    for prompt in (REPRODUCER_SYSTEM_PROMPT, FIXER_SYSTEM_PROMPT):
+        assert TOOL_CALL_FORMAT_HINT in prompt
+        assert correct_example in prompt
+        assert "never a quoted string" in prompt
 
 
 def test_fit_messages_to_cap_keeps_prompt_within_budget_and_quotes_issue():
@@ -338,7 +371,7 @@ def test_reproducer_prompt_lists_tracked_files_within_token_cap():
         "Issue body",
         None,
         tracked_files="\n".join(f"src/module_{index}.py" for index in range(100)),
-        prompt_token_cap=600,
+        prompt_token_cap=800,
     )
 
     assert "git ls-files | grep" in messages[0]["content"]
@@ -350,7 +383,7 @@ def test_reproducer_prompt_lists_tracked_files_within_token_cap():
         estimate_messages_tokens(
             messages, tools=REPRODUCER_TOOLS, tool_choice="required"
         )
-        <= 600
+        <= 800
     )
 
 

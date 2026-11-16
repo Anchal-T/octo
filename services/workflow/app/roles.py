@@ -32,6 +32,20 @@ _PARAMETER_RE = re.compile(
     r"<parameter=([A-Za-z_][A-Za-z0-9_]*)>(.*?)</parameter>", re.DOTALL
 )
 
+# Groq renders Qwen tool calls as XML. The model sometimes emits the parameter
+# name as a tag (`<command>`), adds whitespace to the tag (`< parameter="x">`),
+# or serialises an array parameter as a quoted string. Those all fail the
+# provider's schema validation with `tool_use_failed` before the harness ever
+# sees a tool call. A concrete, correct example in the system prompt and in the
+# tool descriptions gives the model the exact syntax to copy.
+TOOL_CALL_FORMAT_HINT = (
+    "Tool calls: use native tool calls with <parameter=NAME>...</parameter> tags only "
+    "(never <command> or < parameter=\"name\">). Example: "
+    "<tool_call><function=bash><parameter=command>cd /workspace && ls"
+    "</parameter></function></tool_call>. Fields are strings except `anchor_names`, "
+    "which must be a real JSON array like [\"a.b.C\"], never a quoted string."
+)
+
 
 def _action_tools(
     submit_properties: dict[str, dict[str, Any]],
@@ -42,10 +56,18 @@ def _action_tools(
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a shell command in the repository sandbox.",
+            "description": (
+                "Run a shell command in the repository sandbox. Pass one string "
+                "field `command` as <parameter=command>VALUE</parameter>."
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"command": {"type": "string"}},
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command, as <parameter=command>VALUE</parameter>.",
+                    }
+                },
                 "required": ["command"],
                 "additionalProperties": False,
             },
@@ -55,7 +77,10 @@ def _action_tools(
         "type": "function",
         "function": {
             "name": "submit",
-            "description": "Submit the completed reproduction or fix.",
+            "description": (
+                "Submit the completed reproduction or fix. `anchor_names` is a real "
+                "JSON array of strings, never a quoted string."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": submit_properties,
@@ -71,8 +96,14 @@ def _action_tools(
 
 REPRODUCER_TOOLS = _action_tools(
     {
-        "test_node_id": {"type": "string"},
-        "summary": {"type": "string"},
+        "test_node_id": {
+            "type": "string",
+            "description": "Pytest node of the failing test, e.g. tests/test_x.py::test_y.",
+        },
+        "summary": {
+            "type": "string",
+            "description": "One sentence describing the failing test that was added.",
+        },
         "fact_claim": {
             "type": "string",
             "description": "Optional one-sentence bug cause supported by the failing test.",
@@ -80,12 +111,22 @@ REPRODUCER_TOOLS = _action_tools(
         "anchor_names": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Exact SCIP symbols or fully qualified Python names for the cause at the base commit.",
+            "description": (
+                "Exact SCIP symbols for the cause at the base commit: a real JSON "
+                "array like [\"a.b.C\"], never a quoted string."
+            ),
         },
     },
     optional=("fact_claim", "anchor_names"),
 )
-FIXER_TOOLS = _action_tools({"summary": {"type": "string"}})
+FIXER_TOOLS = _action_tools(
+    {
+        "summary": {
+            "type": "string",
+            "description": "One sentence describing the source fix that makes the tests pass.",
+        }
+    }
+)
 
 REPRODUCER_SYSTEM_PROMPT = (
     "You are the Reproducer agent for this repository. "
@@ -97,7 +138,8 @@ REPRODUCER_SYSTEM_PROMPT = (
     "ONLY create or edit test files "
     "(under tests/ or test_*.py); any changes to non-test source files are "
     "automatically reverted. Use the bash tool to inspect or edit tests. "
-    "Use submit with test_node_id and summary only after the test fails as expected."
+    "Use submit with test_node_id and summary only after the test fails as expected. "
+    + TOOL_CALL_FORMAT_HINT
 )
 
 FIXER_SYSTEM_PROMPT = (
@@ -108,7 +150,7 @@ FIXER_SYSTEM_PROMPT = (
     "source files so the reproduction test and the existing test suite pass. "
     "Test files are protected; any edits to test files are automatically reverted. "
     "Use the bash tool to inspect or edit source. Use submit with a summary "
-    "only once your source fix makes the tests pass."
+    "only once your source fix makes the tests pass. " + TOOL_CALL_FORMAT_HINT
 )
 
 TESTER_SYSTEM_PROMPT = (
@@ -1151,8 +1193,14 @@ async def _call_repo_model(
             {
                 "role": "user",
                 "content": (
-                    f"Your last tool call was invalid: {outcome.reason}. "
-                    "Call `bash` with a `command` string, or `submit`."
+                    f"Your last tool call was invalid: {outcome.reason}. "  # sanitized, no failed generation
+                    "Retry with a native tool call using the EXACT schema: bash takes a "
+                    "string `command`; submit takes string fields (`summary`, and "
+                    "`test_node_id` for reproduction) and `anchor_names` must be a real "
+                    "JSON array of strings, never a quoted string. Correct example: "
+                    "<tool_call><function=bash><parameter=command>cd /workspace && ls"
+                    "</parameter></function></tool_call>. Do not use <command> tags or "
+                    "< parameter=\"name\">."
                 ),
             }
         )

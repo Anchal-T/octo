@@ -22,6 +22,13 @@ from .store import Store
 logger = logging.getLogger(__name__)
 
 _PROVIDER_ERROR_BODY_MAX_BYTES = 2048
+# Daily-budget reservations used to reserve the whole per-role `max_tokens`
+# for every call. Observed generations are 40-175 tokens (max 175 in the P1
+# slice), so reserving 1,024-1,500 output tokens per call inflated the ledger
+# by ~3x and made the run pause with most of the daily budget unused. This is
+# only a local budgeting estimate: the provider still enforces its own quota
+# and the real request keeps its full `sampling["max_tokens"]`.
+OUTPUT_RESERVE_TOKENS = 256
 _PROVIDER_SECRET_FIELD_RE = re.compile(
     r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|"
     r"client[_-]?secret|password|secret|authorization)[\"']?\s*[:=]\s*)"
@@ -68,7 +75,7 @@ class ModelClient:
         )
         overall_started = self._now()
         call_started_mono = self.monotonic()
-        tokens_est = prompt_tokens + sampling["max_tokens"]
+        tokens_est = prompt_tokens + min(pin.max_tokens, OUTPUT_RESERVE_TOKENS)
 
         if (
             request.sampling.max_tokens is not None

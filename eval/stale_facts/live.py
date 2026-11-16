@@ -32,6 +32,7 @@ BODY_MAX_CHARS = 8_000
 _PIN_CHECK = """
 import json
 from agentteam_common import Settings
+from services.workflow.app.models.client import OUTPUT_RESERVE_TOKENS
 from services.workflow.app.models.pools import pin_for
 s = Settings.from_env()
 roles = ("triager", "reproducer", "fixer", "tester")
@@ -40,7 +41,11 @@ print(json.dumps({
   "pins": {role: pins[role].model for role in roles},
   "groq_tpd": s.groq_tpd,
   "reset_tz": s.groq_reset_tz,
-  "max_call_reservation": max(p.prompt_token_cap + p.max_tokens for p in pins.values()),
+  "output_reserve_tokens": OUTPUT_RESERVE_TOKENS,
+  "max_call_reservation": max(
+    p.prompt_token_cap + min(p.max_tokens, OUTPUT_RESERVE_TOKENS)
+    for p in pins.values()
+  ),
 }))
 """
 

@@ -14,8 +14,14 @@ from agentteam_contracts import (
 )
 from pydantic import ValidationError
 
-from services.workflow.app.models.client import ModelClient, retry_fits
+from services.workflow.app.models.client import (
+    OUTPUT_RESERVE_TOKENS,
+    ModelClient,
+    _payload_identity,
+    retry_fits,
+)
 from services.workflow.app.models.ledger import Ledger
+from services.workflow.app.models.pools import pin_for
 from services.workflow.app.models.store import Store
 
 MODEL = "openai/gpt-oss-20b"
@@ -66,6 +72,42 @@ def make_client(
 def test_retry_fits_only_when_wait_and_generation_fit_remaining_timeout():
     assert retry_fits(remaining_s=60, retry_after_s=30, expected_generation_s=15)
     assert not retry_fits(remaining_s=40, retry_after_s=30, expected_generation_s=15)
+
+
+def test_daily_reservation_uses_output_reserve_not_max_tokens(tmp_path):
+    """The daily ledger must not reserve a full `max_tokens` for every call:
+    P1 slice #5 reserved 128,598 tokens for only 42,214 reported tokens,
+    mostly because each call reserved ~1,000-1,500 output tokens that were
+    never generated. A small, realistic output reserve keeps the 190k daily
+    budget usable."""
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "openai/gpt-oss-20b",
+                "choices": [
+                    {"message": {"content": "Example triage", "tool_calls": []}}
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 3},
+            },
+        )
+
+    client, settings = make_client(tmp_path, provider)
+    request = model_request()
+    result = client.call(request)
+    assert result.outcome == "completed"
+
+    pin = pin_for("triager", settings)
+    _, _, _, prompt_tokens = _payload_identity(request, pin)
+    assert OUTPUT_RESERVE_TOKENS < pin.max_tokens
+    with client.store.connection() as connection:
+        row = connection.execute(
+            "SELECT tokens_est FROM call_attempt WHERE request_id = ?",
+            (result.request_id,),
+        ).fetchone()
+    assert row["tokens_est"] == prompt_tokens + OUTPUT_RESERVE_TOKENS
+    assert row["tokens_est"] < prompt_tokens + pin.max_tokens
 
 
 def test_model_request_is_triager_only_and_bounds_taint():
@@ -774,13 +816,18 @@ def test_token_window_quota_returns_minute_scope_before_provider_call(tmp_path):
         triager_prompt_token_cap=100,
         groq_tpm=1200,
     )
-    assert client.call(model_request(run_id="run-first")).outcome == "completed"
+    # Each call reserves prompt estimate + OUTPUT_RESERVE_TOKENS (270 here),
+    # so four calls fit the 1,200 TPM window and the fifth is stopped locally.
+    for index in range(4):
+        assert (
+            client.call(model_request(run_id=f"run-{index}")).outcome == "completed"
+        )
 
-    result = client.call(model_request(run_id="run-second"))
+    result = client.call(model_request(run_id="run-over"))
 
     assert result.outcome == "quota_exhausted"
     assert result.scope == "minute_tokens"
-    assert calls == 1
+    assert calls == 4
 
 
 def test_daily_quota_exhaustion_is_not_cached_and_retry_after_reset_calls_provider(
