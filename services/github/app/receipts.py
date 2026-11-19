@@ -34,6 +34,8 @@ class GithubReceipts:
         target: str,
         result_type: type[T],
         effect: Callable[..., Awaitable[T]],
+        *,
+        request_can_change: bool = False,
         **payload: Any,
     ) -> T:
         key = stable_id("gh-write", json.dumps([self.repo, operation_key, action]))
@@ -43,7 +45,9 @@ class GithubReceipts:
         async with self.store.receipt_lock(key):
             receipt = self.store.get_side_effect_receipt(key)
             if receipt is not None:
-                if receipt["target"] != target or receipt["request_sha256"] != digest:
+                if receipt["target"] != target or (
+                    not request_can_change and receipt["request_sha256"] != digest
+                ):
                     raise WriteConflictError(
                         "idempotency_key was already used with a different request"
                     )

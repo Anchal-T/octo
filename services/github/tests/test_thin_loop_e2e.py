@@ -742,6 +742,20 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
         assert fake_gh.review_requests[pr_7_num] == [["Anchal-T"], ["Anchal-T"]]
         assert fake_gh.statuses[sha_pushed][-1]["state"] == "pending"
 
+        # Returning to a past head is a new observed push and re-requests review.
+        clock[0] = NOW + timedelta(minutes=5, seconds=10)
+        fake_gh.push_pr_commit(pr_7_num, "a" * 40)
+        await runtime.poller.run_cycle()
+        clock[0] = NOW + timedelta(minutes=5, seconds=20)
+        fake_gh.push_pr_commit(pr_7_num, sha_pushed)
+        await runtime.poller.run_cycle()
+        assert not wf_task_7.done()
+        assert fake_gh.review_requests[pr_7_num] == [["Anchal-T"]] * 4
+        assert [status["state"] for status in fake_gh.statuses[sha_pushed]] == [
+            "pending",
+            "pending",
+        ]
+
         # Now Anchal-T approves at sha_pushed -> workflow resolves to merged + success status!
         clock[0] = NOW + timedelta(minutes=6)
         fake_gh.add_review(

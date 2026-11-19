@@ -655,6 +655,8 @@ class Poller:
                     f"issues/{row.number}",
                     int,
                     self.github.post_comment,
+                    # The marker identifies the comment across poll cycles.
+                    request_can_change=True,
                     number=row.number,
                     body=body,
                 )
@@ -766,7 +768,8 @@ class Poller:
 
             if pr.state == "open" and row.review_requested_sha != pr.head_sha:
                 try:
-                    key = f"pr:{pr.number}:{pr.head_sha}"
+                    # A later push can put a previously reviewed SHA back on the PR.
+                    key = f"pr:{pr.number}:{pr.head_sha}:{row.updated_at}"
                     if self.approvers:
                         await self.receipts.run(
                             key,
@@ -795,12 +798,13 @@ class Poller:
                     continue
                 self.auth_state = "ok"
                 self._check_rate_limit()
-                row = replace(
-                    row,
-                    review_requested_sha=pr.head_sha if self.approvers else None,
-                    updated_at=self._iso(self._now()),
-                )
-                self.store.upsert_pull_request(row)
+                if self.approvers:
+                    row = replace(
+                        row,
+                        review_requested_sha=pr.head_sha,
+                        updated_at=self._iso(self._now()),
+                    )
+                    self.store.upsert_pull_request(row)
 
             if row.decision == "pending":
                 try:

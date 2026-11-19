@@ -359,6 +359,51 @@ async def test_retry_after_crash_between_comment_post_and_record_avoids_duplicat
 
 
 @pytest.mark.anyio
+async def test_poll_comment_retries_with_new_timestamp_after_throttle(tmp_path):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    fake_github.add_issue(7, created_at=NOW, updated_at=NOW)
+    handle = fake_github.handle
+    comment_path = f"{ISSUE_PATH}/comments"
+    failed = False
+
+    def fail_first_comment_post(request):
+        nonlocal failed
+        if not failed and request.method == "POST" and request.url.path == comment_path:
+            fake_github.fail_path_next(comment_path, 429, {"retry-after": "300"})
+            failed = True
+        return handle(request)
+
+    fake_github.handle = fail_first_comment_post
+    fake_workflow = FakeWorkflow()
+    fake_workflow.set_response(
+        "POST", f"/v1/issues/{ISSUE_KEY}/start", 202, {"issue_id": ISSUE_KEY}
+    )
+    poller, store, github_http, workflow_http, _, _, now, _ = make_poller(
+        tmp_path, fake_github, fake_workflow
+    )
+
+    try:
+        await poller.prepare()
+        first = await poller.run_cycle()
+        assert first.aborted_reason == "secondary_rate_limit"
+        now[0] += timedelta(minutes=5)
+        second = await poller.run_cycle()
+        assert second.comments_posted == 1
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    with store.connection() as connection:
+        receipts = connection.execute(
+            "SELECT * FROM side_effect_receipt WHERE action = 'github.comment_post' "
+            "ORDER BY seq"
+        ).fetchall()
+    assert [row["outcome"] for row in receipts] == ["rate_limited", "ok"]
+    assert receipts[0]["idempotency_key"] == receipts[1]["idempotency_key"]
+    assert receipts[0]["request_sha256"] != receipts[1]["request_sha256"]
+
+
+@pytest.mark.anyio
 async def test_start_caps_are_per_cycle_and_utc_day(tmp_path):
     fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
     for number, age_minutes in ((1, 4), (2, 3), (3, 2)):
