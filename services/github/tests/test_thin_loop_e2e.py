@@ -1,19 +1,18 @@
 import asyncio
 import json
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
-from agentteam_common import stable_id
+from agentteam_common import Settings, stable_id
 from agentteam_contracts import (
     ApprovalDecision,
     IssueRunRequestV2,
     IssueRunResultV2,
-    ModelOutcome,
     RunStartAccepted,
     RunStatusV2,
 )
@@ -24,9 +23,11 @@ from services.github.app.main import build_runtime, close_runtime, create_app
 from services.github.app.rules import evaluate_pr_reviews
 from services.github.app.schemas import GithubPullRequest, GithubReview
 from services.github.app.settings import GithubSettings
+from services.github.app.store import Store as GithubStore
 from services.github.tests.github_fakes import FakeGithub
 from services.memory.app.sync import validate_proposal
 from services.workflow.app import issue_run_v2 as v2_mod
+from services.workflow.app.models import Ledger, ModelClient, Store as ModelStore
 from services.workflow.app.sandbox import LocalGitSandbox
 
 NOW = datetime(2026, 11, 12, 12, tzinfo=UTC)
@@ -375,8 +376,9 @@ class _InMemoryXtdbBridge:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("replay", [False, True], ids=["normal", "restart"])
 async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, replay
 ):
     repo_dir = tmp_path / "sqlparse_fork"
     base_sha = _init_demo_repo(repo_dir)
@@ -413,7 +415,7 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
             wf_key = issue_id if req.attempt == 1 else f"{issue_id}-r{req.attempt}"
             if wf_key not in invocations:
                 ctx = _InProcessWorkflowCtx(wf_key)
-                t = asyncio.create_task(v2_mod.run_issue_v2(ctx, req))  # type: ignore[arg-type]
+                t = asyncio.create_task(run_with_replay(ctx, req))  # type: ignore[arg-type]
                 invocations[wf_key] = (ctx, t)
             accepted = RunStartAccepted(
                 issue_id=issue_id, invocation_id=f"inv-{wf_key}", attempt=req.attempt
@@ -535,31 +537,88 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
             "notes": "",
         }
     )
-    role_queues = {
-        "triager": [triage_reply, triage_reply],
-        "reproducer": [repro_bash, repro_submit, repro_bash, repro_submit],
-        "fixer": [fix_bash, fix_submit, fix_bash, fix_submit],
-        "tester": [tester_reply, tester_reply],
-    }
+    replies = iter(
+        [triage_reply, repro_bash, repro_submit, fix_bash, fix_submit, tester_reply] * 2
+    )
+    billed_calls = []
+    model_settings = replace(
+        Settings(),
+        models_sqlite_path=str(tmp_path / "models.sqlite"),
+        groq_tpm=100_000,
+    )
+    crash_after = (
+        {
+            "groq.chat_completion",
+            "github.branch_ref_upsert",
+            "github.draft_pr_open",
+            "github.reviewer_request",
+            "github.evidence_comment_upsert",
+            "github.commit_status",
+        }
+        if replay
+        else set()
+    )
+    expected_crashes = crash_after.copy()
+    crashes = set()
 
-    def fake_model(request):
-        text = role_queues[request.role].pop(0)
-        return ModelOutcome(
-            outcome="completed",
-            request_id=f"mc-{request.run_id}-{request.step}",
-            decided_at=clock[0],
-            model_pinned="openai/gpt-oss-20b",
-            model_reported="openai/gpt-oss-20b",
-            run_id=request.run_id,
-            step=request.step,
-            text=text,
-            tokens_in=40,
-            tokens_out=20,
-            started_at=clock[0],
-            finished_at=clock[0],
+    class RestartWorkflow(Exception):
+        pass
+
+    def interrupt_after(action):
+        if action in crash_after:
+            crash_after.remove(action)
+            crashes.add(action)
+            raise RestartWorkflow
+
+    def fake_provider(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.groq.com"
+        payload = json.loads(request.content)
+        billed_calls.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "model": payload["model"],
+                "choices": [{"message": {"content": next(replies)}}],
+                "usage": {"prompt_tokens": 40, "completion_tokens": 20},
+            },
         )
 
-    monkeypatch.setattr(v2_mod, "call_model", fake_model)
+    def start_model_client(http: httpx.Client) -> ModelClient:
+        store = ModelStore(model_settings)
+        return ModelClient(
+            model_settings, Ledger(model_settings, store), store, http, lambda: clock[0]
+        )
+
+    model_http = httpx.Client(transport=httpx.MockTransport(fake_provider))
+    model_client = start_model_client(model_http)
+
+    def call_model_then_interrupt(request):
+        result = model_client.call(request)
+        assert result.outcome == "completed"
+        interrupt_after("groq.chat_completion")
+        return result
+
+    record_receipt = GithubStore.record_side_effect_receipt
+
+    def record_receipt_then_interrupt(store, key, **receipt):
+        record_receipt(store, key, **receipt)
+        if receipt["outcome"] == "ok":
+            interrupt_after(receipt["action"])
+
+    async def run_with_replay(ctx, req):
+        nonlocal model_client
+        while True:
+            try:
+                return await v2_mod.run_issue_v2(ctx, req)
+            except RestartWorkflow:
+                # The side-effect store was committed but this Restate step is still
+                # absent from the journal. Reopen the ledger and replay the handler.
+                model_client = start_model_client(model_http)
+
+    monkeypatch.setattr(
+        GithubStore, "record_side_effect_receipt", record_receipt_then_interrupt
+    )
+    monkeypatch.setattr(v2_mod, "call_model", call_model_then_interrupt)
     monkeypatch.setattr(v2_mod, "post_memory", memory.post)
     monkeypatch.setattr(v2_mod, "call_github_api", call_github_service)
     monkeypatch.setattr(
@@ -602,6 +661,47 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
         assert fake_gh.pulls[pr_7_num]["user"]["login"] == "octo-agent-team[bot]"
         assert fake_gh.review_requests[pr_7_num] == [["Anchal-T"]]
         assert fake_gh.statuses[sha_initial][-1]["state"] == "pending"
+
+        assert crashes == expected_crashes
+        repo_path = f"/repos/{fake_gh.repo}"
+        writes = [(method, path) for method, path, _ in fake_gh.calls]
+        for path in (
+            "git/trees",
+            "git/commits",
+            "git/refs",
+            "pulls",
+            f"pulls/{pr_7_num}/requested_reviewers",
+            f"issues/{pr_7_num}/comments",
+            f"statuses/{sha_initial}",
+        ):
+            assert writes.count(("POST", f"{repo_path}/{path}")) == 1
+        assert not any(method == "PATCH" for method, _ in writes)
+        assert len(billed_calls) == 6
+        with model_client.store.connection() as conn:
+            model_receipts = conn.execute("SELECT * FROM side_effect_receipt").fetchall()
+        assert len(model_receipts) == 6
+        assert len({row["idempotency_key"] for row in model_receipts}) == 6
+        assert all(
+            row["target"] == "Anchal-T/sqlparse/issues/gh-1450220110-7"
+            for row in model_receipts
+        )
+        assert all(
+            row["outcome"] == "completed" and row["response_json"]
+            for row in model_receipts
+        )
+        with runtime.store.connection() as conn:
+            github_receipts = conn.execute(
+                "SELECT * FROM side_effect_receipt WHERE action != 'github.comment_post'"
+            ).fetchall()
+        assert len(github_receipts) == 7
+        assert len({row["idempotency_key"] for row in github_receipts}) == 7
+        assert all(
+            row["target"].startswith("Anchal-T/sqlparse/") and row["outcome"] == "ok"
+            for row in github_receipts
+        )
+        for row in [*model_receipts, *github_receipts]:
+            assert len(row["request_sha256"]) == 64
+            assert datetime.fromisoformat(row["decided_at"]).tzinfo is not None
 
         # Dismissed review does NOT approve!
         clock[0] = NOW + timedelta(minutes=2)
@@ -710,5 +810,7 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
         assert row_8 is not None
         assert row_8.state == "finished"
         assert row_8.result_status == "rejected"
+        assert len(billed_calls) == 12
     finally:
+        model_http.close()
         await close_runtime(runtime)

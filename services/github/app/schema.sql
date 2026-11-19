@@ -82,3 +82,17 @@ CREATE TABLE IF NOT EXISTS lease (
     holder TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS side_effect_receipt (
+    seq INTEGER PRIMARY KEY,
+    idempotency_key TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    decided_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS side_effect_receipt_key
+    ON side_effect_receipt(idempotency_key, seq DESC);

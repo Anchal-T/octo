@@ -119,8 +119,8 @@ class Ledger:
             connection.execute(
                 "INSERT INTO call_attempt (request_id, retry_ordinal, run_id, step, "
                 "role, pool, model_pinned, payload_sha256, sampling_json, state, "
-                "tokens_est, minute_window, day_window, started_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?)",
+                "tokens_est, minute_window, day_window, started_at, target) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?)",
                 (
                     request_id,
                     retry_ordinal,
@@ -135,6 +135,7 @@ class Ledger:
                     minute_key,
                     day_key,
                     _iso(now),
+                    request.target,
                 ),
             )
             return Reservation(status="reserved", retry_ordinal=retry_ordinal)

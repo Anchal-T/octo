@@ -866,3 +866,64 @@ def test_daily_quota_exhaustion_is_not_cached_and_retry_after_reset_calls_provid
     resumed = client.call(model_request(run_id="run-second"))
     assert resumed.outcome == "completed"
     assert calls == 2
+
+
+@pytest.mark.parametrize("profile", ["local", "compose"])
+def test_model_authority_enforces_role_pins_caps_and_shared_rates(
+    tmp_path, monkeypatch, profile
+):
+    monkeypatch.setenv("MODEL_AUTHORITY_PROFILE", profile)
+    sent = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append((body["model"], body["max_tokens"]))
+        return httpx.Response(
+            200,
+            json={"model": body["model"], "choices": [{"message": {"content": "ok"}}]},
+        )
+
+    client, _ = make_client(tmp_path, provider)
+    pool = client.authority.pool
+    assert (pool.rpm, pool.tpm, pool.rpd, pool.tpd) == (30, 8000, 1000, 200000)
+    assert pool.base_url == "https://api.groq.com/openai/v1"
+
+    with pytest.raises(ValueError, match="not authorized"):
+        client.call(model_request().model_copy(update={"model": "unconfigured/model"}))
+    assert sent == []
+
+    expected = [
+        ("triager", 1024, 6000),
+        ("reproducer", 1200, 5500),
+        ("fixer", 1500, 5500),
+        ("tester", 1024, 5500),
+    ]
+    for role, max_tokens, prompt_cap in expected:
+        pin = client.authority.pin_for(role)
+        expected_model = (
+            MODEL if profile == "local" or role == "triager" else "qwen/qwen3.8-27b"
+        )
+        assert (pin.model, pin.max_tokens, pin.prompt_token_cap) == (
+            expected_model,
+            max_tokens,
+            prompt_cap,
+        )
+
+        request = model_request(run_id=f"run-{role}").model_copy(update={"role": role})
+        too_many_tokens = request.model_copy(
+            update={"sampling": Sampling(max_tokens=max_tokens + 1)}
+        )
+        assert client.call(too_many_tokens).error_code == "max_tokens_exceeded"
+        oversized = [{"role": "user", "content": "x" * (4 * prompt_cap)}]
+        long_prompt = request.model_copy(update={"messages": oversized})
+        assert client.call(long_prompt).error_code == "prompt_too_long"
+        assert client.call(request).outcome == "completed"
+        assert sent[-1] == (expected_model, max_tokens)
+
+    assert len(sent) == len(expected)
+
+
+def test_model_authority_rejects_unconfigured_pin_through_settings(monkeypatch):
+    monkeypatch.setenv("FIXER_MODEL", "unconfigured/model")
+    with pytest.raises(ValueError, match="configured free Groq model"):
+        Settings.from_env()

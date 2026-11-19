@@ -9,6 +9,7 @@ from agentteam_common.ids import workflow_key
 from agentteam_contracts import ApprovalRequest, IssueRunResult, IssueRunResultV2
 
 from .client import GithubClient, GithubFailure
+from .receipts import GithubReceipts
 from .rules import (
     admit,
     decide,
@@ -58,6 +59,7 @@ class Poller:
         self.workflow = workflow
         self.store = store
         self.clock = clock
+        self.receipts = GithubReceipts(store, github.repo, clock)
         self.sleep = sleep
         self.holder = holder
         self.memory = memory
@@ -647,7 +649,15 @@ class Poller:
                 detail=detail,
             )
             try:
-                comment_id = await self.github.post_comment(row.number, body)
+                comment_id = await self.receipts.run(
+                    f"{run_key}:{kind}:{row.fingerprint}",
+                    "github.comment_post",
+                    f"issues/{row.number}",
+                    int,
+                    self.github.post_comment,
+                    number=row.number,
+                    body=body,
+                )
             except GithubFailure as error:
                 self._record_auth_failure(error)
                 if error.outcome.outcome in {"invalid", "not_found"}:
@@ -756,12 +766,27 @@ class Poller:
 
             if pr.state == "open" and row.review_requested_sha != pr.head_sha:
                 try:
+                    key = f"pr:{pr.number}:{pr.head_sha}"
                     if self.approvers:
-                        await self.github.request_reviewers(pr.number, self.approvers)
-                    await self.github.create_commit_status(
-                        pr.head_sha,
+                        await self.receipts.run(
+                            key,
+                            "github.reviewer_request",
+                            f"pulls/{pr.number}",
+                            type(None),
+                            self.github.request_reviewers,
+                            pr_number=pr.number,
+                            reviewers=list(self.approvers),
+                        )
+                    await self.receipts.run(
+                        key,
+                        "github.commit_status",
+                        f"pulls/{pr.number}",
+                        type(None),
+                        self.github.create_commit_status,
+                        sha=pr.head_sha,
                         state="pending",
                         description="Waiting for approval on the current PR head.",
+                        context="agent-team",
                     )
                 except GithubFailure as error:
                     self._record_auth_failure(error)

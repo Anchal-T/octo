@@ -194,6 +194,7 @@ async def run_issue_v1(
         run_id=plan.run_id,
         step="triage",
         role="triager",
+        target=f"{request.repo}/issues/{request.issue_id}",
         messages=triage_messages(
             request.title, request.body, allowed_areas=allowed_areas
         ),

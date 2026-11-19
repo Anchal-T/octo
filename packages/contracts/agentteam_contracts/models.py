@@ -205,6 +205,8 @@ class ModelCallRequest(Contract):
     run_id: str = Field(min_length=1, max_length=256)
     step: str = Field(min_length=1, max_length=128)
     role: ModelRole
+    model: str | None = Field(default=None, min_length=1)
+    target: str | None = Field(default=None, min_length=1)
     messages: list[dict[str, Any]] = Field(min_length=1)
     tools: list[dict[str, Any]] | None = Field(default=None, min_length=1)
     tool_choice: Literal["auto", "required"] | None = None

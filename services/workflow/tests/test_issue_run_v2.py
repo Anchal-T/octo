@@ -915,6 +915,7 @@ async def test_citations_include_native_tool_arguments_and_replay_in_order(
     calls = []
 
     def model(request):
+        assert request.target == "example/repo/issues/example-issue"
         calls.append(request.step)
         return ModelOutcome(
             outcome="completed",
@@ -941,7 +942,9 @@ async def test_citations_include_native_tool_arguments_and_replay_in_order(
     monkeypatch.setattr(v2_mod, "call_model", model)
     ctx = FakeWorkflowCtx("example-workflow")
     for _ in range(2):
-        journal = v2_mod.RestateStepJournal(ctx)
+        journal = v2_mod.RestateStepJournal(
+            ctx, target="example/repo/issues/example-issue"
+        )
         journal.injected_ids["example-run"] = [first, second]
         for turn in range(2):
             req = ModelCallRequest(

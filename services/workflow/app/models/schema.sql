@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS call_attempt (
     day_window TEXT NOT NULL,
     started_at TEXT NOT NULL,
     decided_at TEXT,
+    target TEXT,
     PRIMARY KEY (request_id, retry_ordinal)
 );
 
@@ -68,3 +69,17 @@ CREATE TABLE IF NOT EXISTS call_log (
     decided_at TEXT NOT NULL,
     error_code TEXT
 );
+
+
+CREATE VIEW IF NOT EXISTS side_effect_receipt AS
+SELECT
+    attempt.request_id || ':' || attempt.retry_ordinal AS idempotency_key,
+    'groq.chat_completion' AS action,
+    COALESCE(attempt.target, attempt.run_id) AS target,
+    attempt.payload_sha256 AS request_sha256,
+    attempt.state AS outcome,
+    COALESCE(attempt.decided_at, attempt.started_at) AS decided_at,
+    completion.response_json
+FROM call_attempt AS attempt
+LEFT JOIN completion
+    ON completion.request_id = attempt.request_id AND attempt.state = 'completed';

@@ -344,6 +344,16 @@ class GithubClient:
         items = self._json_list(response)
         return GithubPullRequest.from_api(items[0]) if items else None
 
+    async def ensure_draft_pr(
+        self, *, title: str, body: str, head_branch: str, base_branch: str
+    ) -> GithubPullRequest:
+        existing = await self.find_open_pr(head_branch=head_branch)
+        if existing is not None:
+            return existing
+        return await self.create_draft_pr(
+            title=title, body=body, head_branch=head_branch, base_branch=base_branch
+        )
+
     async def create_draft_pr(
         self,
         *,
