@@ -7,6 +7,10 @@ import httpx
 import jwt
 
 
+def git_hash(kind, data):
+    return hashlib.sha1(f"{kind} {len(data)}\0".encode() + data).hexdigest()
+
+
 class FakeGithub:
     def __init__(
         self,
@@ -32,7 +36,8 @@ class FakeGithub:
         self._clock = clock or (lambda: datetime.now(UTC))
         self.default_branch = default_branch
         self.refs = {f"heads/{default_branch}": default_head_sha}
-        self.trees = {}
+        self.empty_tree_sha = git_hash("tree", b"")
+        self.trees = {self.empty_tree_sha: []}
         self.git_commits = {}
         self.pulls = {}
         self.reviews = {}
@@ -369,15 +374,48 @@ class FakeGithub:
             )
 
         if subpath == "git/trees" and request.method == "POST":
-            raw = request.content
-            tree_sha = hashlib.sha1(raw).hexdigest()
-            self.trees[tree_sha] = json.loads(raw)
+            payload = json.loads(request.content)
+            tree_sha = self._put_tree(payload["base_tree"], payload["tree"])
             return httpx.Response(201, headers=response_headers, json={"sha": tree_sha})
 
+        if subpath.startswith("git/trees/") and request.method == "GET":
+            sha = subpath.removeprefix("git/trees/")
+            if sha in self.trees:
+                return httpx.Response(
+                    200,
+                    headers=response_headers,
+                    json={"sha": sha, "tree": self.trees[sha]},
+                )
+            return httpx.Response(404, headers=response_headers, json={})
+
+        if subpath.startswith("git/commits/") and request.method == "GET":
+            sha = subpath.removeprefix("git/commits/")
+            commit = self.git_commits.get(sha)
+            if commit is None and sha == self.refs[f"heads/{self.default_branch}"]:
+                commit = {"tree": self.empty_tree_sha}
+            if commit is not None:
+                return httpx.Response(
+                    200,
+                    headers=response_headers,
+                    json={"sha": sha, "tree": {"sha": commit["tree"]}},
+                )
+            return httpx.Response(404, headers=response_headers, json={})
+
         if subpath == "git/commits" and request.method == "POST":
-            raw = request.content
-            commit_sha = hashlib.sha1(raw).hexdigest()
-            self.git_commits[commit_sha] = json.loads(raw)
+            payload = json.loads(request.content)
+            lines = [
+                f"tree {payload['tree']}",
+                *[f"parent {p}" for p in payload["parents"]],
+            ]
+            for role in ("author", "committer"):
+                person = payload[role]
+                stamp = int(datetime.fromisoformat(person["date"]).timestamp())
+                lines.append(
+                    f"{role} {person['name']} <{person['email']}> {stamp} +0000"
+                )
+            data = ("\n".join(lines) + "\n\n" + payload["message"]).encode()
+            commit_sha = git_hash("commit", data)
+            self.git_commits[commit_sha] = payload
             return httpx.Response(
                 201, headers=response_headers, json={"sha": commit_sha}
             )
@@ -399,6 +437,16 @@ class FakeGithub:
             body = json.loads(request.content)
             self.statuses.setdefault(sha, []).append(body)
             return httpx.Response(201, headers=response_headers, json=body)
+
+        if (
+            subpath.startswith("commits/")
+            and subpath.endswith("/statuses")
+            and request.method == "GET"
+        ):
+            sha = subpath.split("/")[1]
+            return self._page(
+                list(reversed(self.statuses.get(sha, []))), query, response_headers
+            )
 
         if subpath == "pulls":
             if request.method == "GET":
@@ -485,11 +533,53 @@ class FakeGithub:
                 return httpx.Response(
                     201, headers=response_headers, json=self.pulls[pr_number]
                 )
+            if pr_parts[2] == "requested_reviewers" and request.method == "GET":
+                requests = self.review_requests.get(pr_number, [])
+                users = sorted({login for request in requests for login in request})
+                return httpx.Response(
+                    200,
+                    headers=response_headers,
+                    json={"users": [{"login": login} for login in users], "teams": []},
+                )
             if pr_parts[2] == "reviews" and request.method == "GET":
                 return self._page(
                     self.reviews.get(pr_number, []), query, response_headers
                 )
         return None
+
+    def _put_tree(self, base_sha, updates):
+        entries = {entry["path"]: entry for entry in self.trees[base_sha]}
+        for update in updates:
+            name, _, rest = update["path"].partition("/")
+            if rest:
+                child = entries.get(name, {}).get("sha", self.empty_tree_sha)
+                sha = self._put_tree(child, [dict(update, path=rest)])
+                if sha != self.empty_tree_sha:
+                    entries[name] = {"path": name, "mode": "040000", "sha": sha}
+                else:
+                    entries.pop(name, None)
+            elif update.get("sha") is None and "content" not in update:
+                entries.pop(name, None)
+            else:
+                entries[name] = {
+                    "path": name,
+                    "mode": update["mode"],
+                    "sha": git_hash("blob", update["content"].encode()),
+                }
+        ordered = sorted(
+            entries.values(),
+            key=lambda item: (
+                item["path"] + ("/" if item["mode"] == "040000" else "")
+            ).encode(),
+        )
+        data = b"".join(
+            f"{int(item['mode'], 8):o} {item['path']}\0".encode()
+            + bytes.fromhex(item["sha"])
+            for item in ordered
+        )
+        sha = git_hash("tree", data)
+        self.trees[sha] = ordered
+        return sha
 
     def _verify_app_jwt(self, auth_header: str) -> bool:
         if not auth_header.startswith("Bearer ") or self.app_public_key_pem is None:

@@ -1,6 +1,7 @@
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any, TypeVar
 
 from agentteam_common import stable_id
@@ -35,6 +36,8 @@ class GithubReceipts:
         result_type: type[T],
         effect: Callable[..., Awaitable[T]],
         *,
+        reconcile: Callable[..., Awaitable[tuple[T] | None]] | None = None,
+        use_started_at: bool = False,
         request_can_change: bool = False,
         **payload: Any,
     ) -> T:
@@ -54,8 +57,31 @@ class GithubReceipts:
                 if receipt["outcome"] == "ok":
                     return adapter.validate_json(receipt["response_json"])
 
+            if receipt is not None and receipt["outcome"] == "pending":
+                started_at = datetime.fromisoformat(receipt["decided_at"])
+            else:
+                started_at = self.clock()
+                self.store.record_side_effect_receipt(
+                    key,
+                    action=action,
+                    target=target,
+                    request_sha256=digest,
+                    outcome="pending",
+                    response_json="null",
+                    decided_at=started_at,
+                )
+            if use_started_at:
+                payload["started_at"] = started_at
+
             try:
-                result = await effect(**payload)
+                recovered = (
+                    await reconcile(**payload)
+                    if receipt is not None and reconcile is not None
+                    else None
+                )
+                result = (
+                    recovered[0] if recovered is not None else await effect(**payload)
+                )
             except GithubFailure as error:
                 self.store.record_side_effect_receipt(
                     key,

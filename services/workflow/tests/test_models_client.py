@@ -927,3 +927,28 @@ def test_model_authority_rejects_unconfigured_pin_through_settings(monkeypatch):
     monkeypatch.setenv("FIXER_MODEL", "unconfigured/model")
     with pytest.raises(ValueError, match="configured free Groq model"):
         Settings.from_env()
+
+
+def test_fixer_cannot_use_another_roles_model_or_exceed_its_output_cap(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MODEL_AUTHORITY_PROFILE", "compose")
+
+    def provider(_: httpx.Request) -> httpx.Response:
+        pytest.fail("rejected requests must not reach the provider")
+
+    client, _ = make_client(tmp_path, provider)
+    triager = client.authority.pin_for("triager")
+    fixer = client.authority.pin_for("fixer")
+    assert fixer.model != triager.model
+    request = model_request().model_copy(update={"role": "fixer"})
+    with pytest.raises(ValueError, match="not authorized for role: fixer"):
+        client.call(request.model_copy(update={"model": triager.model}))
+
+    over_cap = request.model_copy(
+        update={
+            "model": fixer.model,
+            "sampling": Sampling(max_tokens=fixer.max_tokens + 1),
+        }
+    )
+    assert client.call(over_cap).error_code == "max_tokens_exceeded"

@@ -2,6 +2,7 @@ import asyncio
 import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 import httpx
@@ -623,38 +624,39 @@ class Poller:
                 ),
                 None,
             )
-            if existing is not None:
-                self.store.record_comment(
-                    row.issue_key,
-                    row.attempt,
-                    kind,
-                    row.fingerprint,
-                    existing.id,
-                    existing.created_at,
-                )
-                continue
-
-            if detail.get("refetch") == "true":
+            if existing is None and detail.get("refetch") == "true":
                 refetched = await self._refetch_result_detail(row, detail)
                 if refetched is None:
                     continue
                 detail = refetched
 
-            if posted:
+            if existing is None and posted:
                 await self.sleep(1)
-            body = render_comment(
-                kind,
-                key=run_key,
-                fp=row.fingerprint,
-                detail=detail,
+            body = (
+                existing.body
+                if existing
+                else render_comment(
+                    kind,
+                    key=run_key,
+                    fp=row.fingerprint,
+                    detail=detail,
+                )
             )
+
+            async def ensure_comment(
+                *, number: int, body: str, existing_id=existing.id if existing else None
+            ) -> int:
+                if existing_id is not None:
+                    return existing_id
+                return await self.github.post_comment(number, body)
+
             try:
                 comment_id = await self.receipts.run(
                     f"{run_key}:{kind}:{row.fingerprint}",
                     "github.comment_post",
                     f"issues/{row.number}",
                     int,
-                    self.github.post_comment,
+                    ensure_comment,
                     # The marker identifies the comment across poll cycles.
                     request_can_change=True,
                     number=row.number,
@@ -673,8 +675,10 @@ class Poller:
                 kind,
                 row.fingerprint,
                 comment_id,
-                self._now(),
+                existing.created_at if existing else self._now(),
             )
+            if existing is not None:
+                continue
             posted += 1
             summary.comments_posted += 1
 
@@ -777,6 +781,9 @@ class Poller:
                             f"pulls/{pr.number}",
                             type(None),
                             self.github.request_reviewers,
+                            reconcile=partial(
+                                self.github.find_review_request, head_sha=pr.head_sha
+                            ),
                             pr_number=pr.number,
                             reviewers=list(self.approvers),
                         )
@@ -786,6 +793,7 @@ class Poller:
                         f"pulls/{pr.number}",
                         type(None),
                         self.github.create_commit_status,
+                        reconcile=self.github.find_commit_status,
                         sha=pr.head_sha,
                         state="pending",
                         description="Waiting for approval on the current PR head.",

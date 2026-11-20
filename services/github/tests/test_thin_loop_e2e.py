@@ -27,7 +27,8 @@ from services.github.app.store import Store as GithubStore
 from services.github.tests.github_fakes import FakeGithub
 from services.memory.app.sync import validate_proposal
 from services.workflow.app import issue_run_v2 as v2_mod
-from services.workflow.app.models import Ledger, ModelClient, Store as ModelStore
+from services.workflow.app.models import Ledger, ModelClient
+from services.workflow.app.models import Store as ModelStore
 from services.workflow.app.sandbox import LocalGitSandbox
 
 NOW = datetime(2026, 11, 12, 12, tzinfo=UTC)
@@ -678,7 +679,9 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
         assert not any(method == "PATCH" for method, _ in writes)
         assert len(billed_calls) == 6
         with model_client.store.connection() as conn:
-            model_receipts = conn.execute("SELECT * FROM side_effect_receipt").fetchall()
+            model_receipts = conn.execute(
+                "SELECT * FROM side_effect_receipt"
+            ).fetchall()
         assert len(model_receipts) == 6
         assert len({row["idempotency_key"] for row in model_receipts}) == 6
         assert all(
@@ -691,7 +694,8 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
         )
         with runtime.store.connection() as conn:
             github_receipts = conn.execute(
-                "SELECT * FROM side_effect_receipt WHERE action != 'github.comment_post'"
+                "SELECT * FROM side_effect_receipt "
+                "WHERE action != 'github.comment_post' AND outcome = 'ok'"
             ).fetchall()
         assert len(github_receipts) == 7
         assert len({row["idempotency_key"] for row in github_receipts}) == 7

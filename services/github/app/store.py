@@ -462,7 +462,7 @@ class Store:
         with self.connection() as connection:
             return connection.execute(
                 "SELECT * FROM side_effect_receipt WHERE idempotency_key = ? "
-                "ORDER BY (outcome = 'ok') DESC, seq DESC LIMIT 1",
+                "ORDER BY (outcome = 'ok') DESC, (outcome = 'pending') DESC, seq DESC LIMIT 1",
                 (key,),
             ).fetchone()
 

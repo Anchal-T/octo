@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from functools import partial
 
 from agentteam_common import workflow_key
 from agentteam_contracts import (
@@ -128,6 +129,7 @@ async def open_draft_pull_request(
             issue_target,
             str,
             github.create_tree,
+            reconcile=github.find_created_tree,
             base_tree=request.base_commit,
             files=request.files,
         )
@@ -136,7 +138,9 @@ async def open_draft_pull_request(
             "github.commit_create",
             issue_target,
             str,
-            github.create_commit,
+            partial(github.create_commit, author_login=self_login),
+            reconcile=partial(github.find_created_commit, author_login=self_login),
+            use_started_at=True,
             message=f"fix: {request.title}\n\nAgent Team run {run_key}",
             tree_sha=tree_sha,
             parents=[request.base_commit],
@@ -157,6 +161,11 @@ async def open_draft_pull_request(
             issue_target,
             GithubPullRequest,
             github.ensure_draft_pr,
+            reconcile=partial(
+                github.find_created_draft_pr,
+                head_sha=commit_sha,
+                author_login=self_login,
+            ),
             title=request.title,
             body=request.body,
             head_branch=branch,
@@ -169,13 +178,14 @@ async def open_draft_pull_request(
             or previous_row.head_sha != commit_sha
             or previous_row.review_requested_sha != commit_sha
         )
-        if need_review_request and approvers:
+        if pr.state == "open" and need_review_request and approvers:
             await receipts.run(
                 f"pr:{pr.number}:{commit_sha}",
                 "github.reviewer_request",
                 f"pulls/{pr.number}",
                 type(None),
                 github.request_reviewers,
+                reconcile=partial(github.find_review_request, head_sha=commit_sha),
                 pr_number=pr.number,
                 reviewers=approvers,
             )
@@ -192,8 +202,10 @@ async def open_draft_pull_request(
                 head_sha=commit_sha,
                 html_url=pr.html_url,
                 author_login=pr.author_login or self_login,
-                state="open",
-                review_requested_sha=commit_sha if approvers else None,
+                state="merged" if pr.merged else pr.state,
+                review_requested_sha=commit_sha
+                if approvers and pr.state == "open"
+                else None,
                 decision="pending",
                 decided_by=None,
                 decision_reason=None,
@@ -259,6 +271,8 @@ async def upsert_pr_evidence_comment(
             None,
         )
         if existing is not None:
+            if existing.body == body:
+                return existing.id
             return await github.update_comment(existing.id, body)
         return await github.post_comment(pr_number, body)
 
@@ -315,6 +329,7 @@ async def set_commit_status(
             f"commits/{sha}",
             type(None),
             github.create_commit_status,
+            reconcile=github.find_commit_status,
             sha=sha,
             state=request.state,
             description=request.description,
