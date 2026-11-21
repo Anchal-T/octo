@@ -377,9 +377,16 @@ class _InMemoryXtdbBridge:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("replay", [False, True], ids=["normal", "restart"])
+@pytest.mark.parametrize(
+    "crash_point",
+    [
+        pytest.param(None, id="normal"),
+        pytest.param("after-receipt", id="restart"),
+        pytest.param("before-receipt", id="uncertain-write-restart"),
+    ],
+)
 async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
-    monkeypatch, tmp_path, replay
+    monkeypatch, tmp_path, crash_point
 ):
     repo_dir = tmp_path / "sqlparse_fork"
     base_sha = _init_demo_repo(repo_dir)
@@ -466,12 +473,16 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
         workflow_version="v2",
         sqlite_path=str(tmp_path / "github.sqlite"),
     )
-    runtime = build_runtime(
-        settings,
-        transport=_AsyncRouterTransport(),
-        clock=lambda: clock[0],
-        sleep=lambda _s: asyncio.sleep(0),
-    )
+
+    def start_github_runtime():
+        return build_runtime(
+            settings,
+            transport=_AsyncRouterTransport(),
+            clock=lambda: clock[0],
+            sleep=lambda _s: asyncio.sleep(0),
+        )
+
+    runtime = start_github_runtime()
     gh_app = create_app(runtime)
 
     memory = _InMemoryXtdbBridge()
@@ -547,8 +558,9 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
         models_sqlite_path=str(tmp_path / "models.sqlite"),
         groq_tpm=100_000,
     )
-    crash_after = (
-        {
+    crash_after = set()
+    if crash_point == "after-receipt":
+        crash_after = {
             "groq.chat_completion",
             "github.branch_ref_upsert",
             "github.draft_pr_open",
@@ -556,9 +568,8 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
             "github.evidence_comment_upsert",
             "github.commit_status",
         }
-        if replay
-        else set()
-    )
+    elif crash_point == "before-receipt":
+        crash_after = {"github.commit_status"}
     expected_crashes = crash_after.copy()
     crashes = set()
 
@@ -601,23 +612,38 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
 
     record_receipt = GithubStore.record_side_effect_receipt
 
-    def record_receipt_then_interrupt(store, key, **receipt):
+    def record_receipt_with_interruption(store, key, **receipt):
+        action = receipt["action"]
+        if (
+            crash_point == "before-receipt"
+            and receipt["outcome"] == "ok"
+            and action in crash_after
+        ):
+            pending = store.get_side_effect_receipt(key)
+            assert pending is not None and pending["outcome"] == "pending"
+            sha = receipt["target"].rsplit("/", 1)[-1]
+            assert [status["state"] for status in fake_gh.statuses[sha]] == ["pending"]
+            interrupt_after(action)
         record_receipt(store, key, **receipt)
         if receipt["outcome"] == "ok":
-            interrupt_after(receipt["action"])
+            interrupt_after(action)
 
     async def run_with_replay(ctx, req):
-        nonlocal model_client
+        nonlocal gh_app, model_client, runtime
         while True:
             try:
                 return await v2_mod.run_issue_v2(ctx, req)
             except RestartWorkflow:
-                # The side-effect store was committed but this Restate step is still
-                # absent from the journal. Reopen the ledger and replay the handler.
+                if crash_point == "before-receipt":
+                    assert "status-pending" not in ctx.journal
+                    await close_runtime(runtime)
+                    runtime = start_github_runtime()
+                    await runtime.poller.prepare()
+                    gh_app = create_app(runtime)
                 model_client = start_model_client(model_http)
 
     monkeypatch.setattr(
-        GithubStore, "record_side_effect_receipt", record_receipt_then_interrupt
+        GithubStore, "record_side_effect_receipt", record_receipt_with_interruption
     )
     monkeypatch.setattr(v2_mod, "call_model", call_model_then_interrupt)
     monkeypatch.setattr(v2_mod, "post_memory", memory.post)
@@ -666,6 +692,8 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
         assert crashes == expected_crashes
         repo_path = f"/repos/{fake_gh.repo}"
         writes = [(method, path) for method, path, _ in fake_gh.calls]
+        if crash_point == "before-receipt":
+            assert ("GET", f"{repo_path}/commits/{sha_initial}/statuses") in writes
         for path in (
             "git/trees",
             "git/commits",

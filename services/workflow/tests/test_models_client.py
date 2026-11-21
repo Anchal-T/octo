@@ -952,3 +952,42 @@ def test_fixer_cannot_use_another_roles_model_or_exceed_its_output_cap(
         }
     )
     assert client.call(over_cap).error_code == "max_tokens_exceeded"
+
+
+def test_model_authority_rejects_cached_request_under_current_policy(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MODEL_AUTHORITY_PROFILE", "compose")
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"model": body["model"], "choices": [{"message": {"content": "ok"}}]},
+        )
+
+    client, _ = make_client(tmp_path, provider, fixer_max_tokens=128)
+    request = model_request().model_copy(
+        update={"role": "fixer", "sampling": Sampling(max_tokens=128)}
+    )
+    completed = client.call(request)
+    assert completed.outcome == "completed"
+
+    def unused_provider(_: httpx.Request) -> httpx.Response:
+        pytest.fail("rejected requests must not reach the provider")
+
+    restarted, _ = make_client(tmp_path, unused_provider, fixer_max_tokens=127)
+    rejected = restarted.call(request)
+    assert rejected.request_id == completed.request_id
+    assert rejected.outcome == "failed"
+    assert rejected.error_code == "max_tokens_exceeded"
+    assert rejected.reason == "requested max_tokens exceeds the configured role limit"
+
+    triager_model = restarted.authority.pin_for("triager").model
+    wrong_model = request.model_copy(
+        update={"model": triager_model, "sampling": Sampling(max_tokens=127)}
+    )
+    with pytest.raises(
+        ValueError, match="requested model is not authorized for role: fixer"
+    ):
+        restarted.call(wrong_model)
