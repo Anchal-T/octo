@@ -70,15 +70,14 @@ class GithubReceipts:
                     response_json="null",
                     decided_at=started_at,
                 )
-            if use_started_at:
-                payload["started_at"] = started_at
-
             try:
                 recovered = (
-                    await reconcile(**payload)
+                    await reconcile(started_at, **payload)
                     if receipt is not None and reconcile is not None
                     else None
                 )
+                if use_started_at:
+                    payload["started_at"] = started_at
                 result = (
                     recovered[0] if recovered is not None else await effect(**payload)
                 )

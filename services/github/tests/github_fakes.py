@@ -435,6 +435,7 @@ class FakeGithub:
         if subpath.startswith("statuses/") and request.method == "POST":
             sha = subpath.removeprefix("statuses/")
             body = json.loads(request.content)
+            body["created_at"] = self._clock().isoformat(timespec="seconds")
             self.statuses.setdefault(sha, []).append(body)
             return httpx.Response(201, headers=response_headers, json=body)
 

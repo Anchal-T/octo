@@ -86,27 +86,33 @@ def _make_app_env(tmp_path, *, use_app: bool = True):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("action", "write_path", "close_pr"),
+    ("action", "write_path", "before_replay"),
     [
-        pytest.param("github.tree_create", "/git/trees", False, id="tree"),
-        pytest.param("github.commit_create", "/git/commits", False, id="commit"),
-        pytest.param("github.branch_ref_upsert", "/git/refs", False, id="branch"),
-        pytest.param("github.draft_pr_open", "/pulls", False, id="draft-pr"),
-        pytest.param("github.draft_pr_open", "/pulls", True, id="closed-pr"),
+        pytest.param("github.tree_create", "/git/trees", None, id="tree"),
+        pytest.param("github.commit_create", "/git/commits", None, id="commit"),
+        pytest.param("github.branch_ref_upsert", "/git/refs", None, id="branch"),
+        pytest.param("github.draft_pr_open", "/pulls", None, id="draft-pr"),
+        pytest.param("github.draft_pr_open", "/pulls", "close-pr", id="closed-pr"),
         pytest.param(
             "github.reviewer_request",
             "/pulls/1/requested_reviewers",
-            False,
+            None,
             id="reviewers",
         ),
         pytest.param(
-            "github.evidence_comment_upsert", "/issues/1/comments", False, id="comment"
+            "github.evidence_comment_upsert", "/issues/1/comments", None, id="comment"
         ),
-        pytest.param("github.commit_status", "/statuses/", False, id="status"),
+        pytest.param("github.commit_status", "/statuses/", None, id="status"),
+        pytest.param(
+            "github.commit_status",
+            "/statuses/",
+            "supersede-status",
+            id="superseded-status",
+        ),
     ],
 )
 async def test_replay_recovers_write_before_success_receipt(
-    tmp_path, monkeypatch, action, write_path, close_pr
+    tmp_path, monkeypatch, action, write_path, before_replay
 ):
     runtime, app, github = _make_app_env(tmp_path)
     base_tree = github._put_tree(
@@ -183,8 +189,17 @@ async def test_replay_recovers_write_before_success_receipt(
     finally:
         await close_runtime(runtime)
 
-    if close_pr:
+    if before_replay == "close-pr":
         github.pulls[1]["state"] = "closed"
+    if before_replay == "supersede-status":
+        github.statuses[sha].append(
+            {
+                "context": body.context,
+                "state": "success",
+                "description": "Approved",
+                "created_at": (NOW + timedelta(seconds=10)).isoformat(),
+            }
+        )
     restart_time = NOW + timedelta(minutes=1)
     runtime = build_runtime(
         settings, transport=github.transport, clock=lambda: restart_time
@@ -194,9 +209,14 @@ async def test_replay_recovers_write_before_success_receipt(
         result = await request(create_app(runtime), method, path, body)
         assert result.status_code == 200
         assert result.json()["outcome"] == "ok"
-        if close_pr:
+        if before_replay == "close-pr":
             assert runtime.store.get_pull_request(1).state == "closed"
             assert github.review_requests == {}
+        if before_replay == "supersede-status":
+            assert [status["state"] for status in github.statuses[sha]] == [
+                "pending",
+                "success",
+            ]
         with runtime.store.connection() as conn:
             receipts = conn.execute(
                 "SELECT * FROM side_effect_receipt WHERE action = ? ORDER BY seq",

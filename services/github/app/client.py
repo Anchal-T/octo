@@ -326,7 +326,7 @@ class GithubClient:
         return True
 
     async def find_created_tree(
-        self, *, base_tree: str, files: Sequence[PrFileChange]
+        self, _started_at: datetime, *, base_tree: str, files: Sequence[PrFileChange]
     ) -> tuple[str] | None:
         base_sha = await self._commit_tree(base_tree)
         sha = await changed_tree_sha(base_sha, files, self._tree_entries)
@@ -366,11 +366,11 @@ class GithubClient:
 
     async def find_created_commit(
         self,
+        started_at: datetime,
         *,
         message: str,
         tree_sha: str,
         parents: Sequence[str],
-        started_at: datetime,
         author_login: str,
     ) -> tuple[str] | None:
         identity = self._commit_identity(started_at, author_login)
@@ -438,6 +438,7 @@ class GithubClient:
 
     async def find_created_draft_pr(
         self,
+        _started_at: datetime,
         *,
         title: str,
         body: str,
@@ -516,7 +517,12 @@ class GithubClient:
         )
 
     async def find_review_request(
-        self, *, pr_number: int, reviewers: Sequence[str], head_sha: str
+        self,
+        _started_at: datetime,
+        *,
+        pr_number: int,
+        reviewers: Sequence[str],
+        head_sha: str,
     ) -> tuple[None] | None:
         response = await self._request(
             "GET",
@@ -569,8 +575,17 @@ class GithubClient:
         )
 
     async def find_commit_status(
-        self, *, sha: str, state: str, description: str, context: str
+        self,
+        started_at: datetime,
+        *,
+        sha: str,
+        state: str,
+        description: str,
+        context: str,
     ) -> tuple[None] | None:
+        # GitHub timestamps have second precision. The receipt clock can be finer.
+        started_at = started_at.replace(microsecond=0)
+        seen_context = False
         for page in range(1, GITHUB_MAX_PAGES + 1):
             response = await self._request(
                 "GET",
@@ -580,13 +595,19 @@ class GithubClient:
             )
             statuses = self._json_list(response)
             for status in statuses:
-                if status["context"] == context:
-                    if (
-                        status["state"] == state
-                        and status.get("description") == description[:140]
-                    ):
-                        return (None,)
+                if status["context"] != context:
+                    continue
+                matches = (
+                    status["state"] == state
+                    and status.get("description") == description[:140]
+                )
+                if not seen_context and matches:
+                    return (None,)
+                seen_context = True
+                if datetime.fromisoformat(status["created_at"]) < started_at:
                     return None
+                if matches:
+                    return (None,)
             if len(statuses) < GITHUB_PAGE_SIZE:
                 break
         return None
