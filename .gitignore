@@ -9,5 +9,3 @@ __pycache__/
 eval/.cache/
 repos/
 .playwright-mcp/
-docs/
-skills/system/run-workflow/SKILL.md
