@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -5,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
+from weakref import WeakValueDictionary
 
 IssueState = Literal[
     "ignored",
@@ -190,6 +192,9 @@ class Store:
     def __init__(self, path: str, busy_timeout_ms: int = 5000) -> None:
         self.path = path
         self.busy_timeout_ms = busy_timeout_ms
+        self._receipt_locks: WeakValueDictionary[str, asyncio.Lock] = (
+            WeakValueDictionary()
+        )
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         schema = Path(__file__).with_name("schema.sql").read_text()
         with self.connection() as connection:
@@ -445,6 +450,48 @@ class Store:
                 (issue_key, attempt),
             ).fetchone()
         return None if row is None else self._pr_row(row)
+
+    def receipt_lock(self, key: str) -> asyncio.Lock:
+        lock = self._receipt_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._receipt_locks[key] = lock
+        return lock
+
+    def get_side_effect_receipt(self, key: str) -> sqlite3.Row | None:
+        with self.connection() as connection:
+            return connection.execute(
+                "SELECT * FROM side_effect_receipt WHERE idempotency_key = ? "
+                "ORDER BY (outcome = 'ok') DESC, (outcome = 'pending') DESC, seq DESC LIMIT 1",
+                (key,),
+            ).fetchone()
+
+    def record_side_effect_receipt(
+        self,
+        key: str,
+        *,
+        action: str,
+        target: str,
+        request_sha256: str,
+        outcome: str,
+        response_json: str,
+        decided_at: datetime,
+    ) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "INSERT INTO side_effect_receipt "
+                "(idempotency_key, action, target, request_sha256, outcome, "
+                "response_json, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    key,
+                    action,
+                    target,
+                    request_sha256,
+                    outcome,
+                    response_json,
+                    self._iso(decided_at),
+                ),
+            )
 
     def get_write_log(
         self, idempotency_key: str, *, endpoint: str, request_sha256: str

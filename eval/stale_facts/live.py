@@ -68,11 +68,9 @@ _MODEL_AVAILABILITY_CHECK = """
 import json, sys
 import httpx
 from agentteam_common import Settings
-from services.workflow.app.models.pools import pin_for, pool_for
 requested = json.load(sys.stdin)
 s = Settings.from_env()
-pin = pin_for("triager", s)
-pool = pool_for(pin, s)
+pool = s.validate_model_config().pool
 listed = False
 try:
   response = httpx.get(

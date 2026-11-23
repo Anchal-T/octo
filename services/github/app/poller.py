@@ -2,6 +2,7 @@ import asyncio
 import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 import httpx
@@ -9,6 +10,7 @@ from agentteam_common.ids import workflow_key
 from agentteam_contracts import ApprovalRequest, IssueRunResult, IssueRunResultV2
 
 from .client import GithubClient, GithubFailure
+from .receipts import GithubReceipts
 from .rules import (
     admit,
     decide,
@@ -58,6 +60,7 @@ class Poller:
         self.workflow = workflow
         self.store = store
         self.clock = clock
+        self.receipts = GithubReceipts(store, github.repo, clock)
         self.sleep = sleep
         self.holder = holder
         self.memory = memory
@@ -621,33 +624,44 @@ class Poller:
                 ),
                 None,
             )
-            if existing is not None:
-                self.store.record_comment(
-                    row.issue_key,
-                    row.attempt,
-                    kind,
-                    row.fingerprint,
-                    existing.id,
-                    existing.created_at,
-                )
-                continue
-
-            if detail.get("refetch") == "true":
+            if existing is None and detail.get("refetch") == "true":
                 refetched = await self._refetch_result_detail(row, detail)
                 if refetched is None:
                     continue
                 detail = refetched
 
-            if posted:
+            if existing is None and posted:
                 await self.sleep(1)
-            body = render_comment(
-                kind,
-                key=run_key,
-                fp=row.fingerprint,
-                detail=detail,
+            body = (
+                existing.body
+                if existing
+                else render_comment(
+                    kind,
+                    key=run_key,
+                    fp=row.fingerprint,
+                    detail=detail,
+                )
             )
+
+            async def ensure_comment(
+                *, number: int, body: str, existing_id=existing.id if existing else None
+            ) -> int:
+                if existing_id is not None:
+                    return existing_id
+                return await self.github.post_comment(number, body)
+
             try:
-                comment_id = await self.github.post_comment(row.number, body)
+                comment_id = await self.receipts.run(
+                    f"{run_key}:{kind}:{row.fingerprint}",
+                    "github.comment_post",
+                    f"issues/{row.number}",
+                    int,
+                    ensure_comment,
+                    # The marker identifies the comment across poll cycles.
+                    request_can_change=True,
+                    number=row.number,
+                    body=body,
+                )
             except GithubFailure as error:
                 self._record_auth_failure(error)
                 if error.outcome.outcome in {"invalid", "not_found"}:
@@ -661,8 +675,10 @@ class Poller:
                 kind,
                 row.fingerprint,
                 comment_id,
-                self._now(),
+                existing.created_at if existing else self._now(),
             )
+            if existing is not None:
+                continue
             posted += 1
             summary.comments_posted += 1
 
@@ -756,12 +772,32 @@ class Poller:
 
             if pr.state == "open" and row.review_requested_sha != pr.head_sha:
                 try:
+                    # A later push can put a previously reviewed SHA back on the PR.
+                    key = f"pr:{pr.number}:{pr.head_sha}:{row.updated_at}"
                     if self.approvers:
-                        await self.github.request_reviewers(pr.number, self.approvers)
-                    await self.github.create_commit_status(
-                        pr.head_sha,
+                        await self.receipts.run(
+                            key,
+                            "github.reviewer_request",
+                            f"pulls/{pr.number}",
+                            type(None),
+                            self.github.request_reviewers,
+                            reconcile=partial(
+                                self.github.find_review_request, head_sha=pr.head_sha
+                            ),
+                            pr_number=pr.number,
+                            reviewers=list(self.approvers),
+                        )
+                    await self.receipts.run(
+                        key,
+                        "github.commit_status",
+                        f"pulls/{pr.number}",
+                        type(None),
+                        self.github.create_commit_status,
+                        reconcile=self.github.find_commit_status,
+                        sha=pr.head_sha,
                         state="pending",
                         description="Waiting for approval on the current PR head.",
+                        context="agent-team",
                     )
                 except GithubFailure as error:
                     self._record_auth_failure(error)
@@ -770,12 +806,13 @@ class Poller:
                     continue
                 self.auth_state = "ok"
                 self._check_rate_limit()
-                row = replace(
-                    row,
-                    review_requested_sha=pr.head_sha if self.approvers else None,
-                    updated_at=self._iso(self._now()),
-                )
-                self.store.upsert_pull_request(row)
+                if self.approvers:
+                    row = replace(
+                        row,
+                        review_requested_sha=pr.head_sha,
+                        updated_at=self._iso(self._now()),
+                    )
+                    self.store.upsert_pull_request(row)
 
             if row.decision == "pending":
                 try:

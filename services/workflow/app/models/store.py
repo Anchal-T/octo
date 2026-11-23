@@ -39,6 +39,10 @@ class Store:
         schema = Path(__file__).with_name("schema.sql").read_text()
         with self.connection() as connection:
             connection.executescript(schema)
+            connection.execute("BEGIN IMMEDIATE")
+            columns = connection.execute("PRAGMA table_info(call_attempt)")
+            if not any(column["name"] == "target" for column in columns):
+                connection.execute("ALTER TABLE call_attempt ADD COLUMN target TEXT")
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:

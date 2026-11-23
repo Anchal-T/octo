@@ -314,8 +314,11 @@ async def test_retry_after_crash_between_start_and_state_write_is_idempotent(tmp
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("before_receipt", [False, True])
 async def test_retry_after_crash_between_comment_post_and_record_avoids_duplicate(
     tmp_path,
+    monkeypatch,
+    before_receipt,
 ):
     fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
     fake_github.add_issue(7, created_at=NOW, updated_at=NOW)
@@ -326,24 +329,27 @@ async def test_retry_after_crash_between_comment_post_and_record_avoids_duplicat
     poller, store, github_http, workflow_http, *_ = make_poller(
         tmp_path, fake_github, fake_workflow
     )
-    record_comment = store.record_comment
-    should_crash = [True]
+    record_receipt = store.record_side_effect_receipt
 
-    def crash_after_comment_post(*args, **kwargs):
-        if should_crash[0]:
-            should_crash[0] = False
+    def crash(*args, **kwargs):
+        raise RuntimeError("simulated crash")
+
+    def crash_before_receipt(key, **receipt):
+        if receipt["outcome"] == "ok":
             raise RuntimeError("simulated crash")
-        record_comment(*args, **kwargs)
+        return record_receipt(key, **receipt)
 
-    store.record_comment = crash_after_comment_post
     try:
         await poller.prepare()
-        with pytest.raises(RuntimeError, match="simulated crash"):
-            await poller.run_cycle()
-        store.record_comment = record_comment
+        with monkeypatch.context() as patch:
+            if before_receipt:
+                patch.setattr(store, "record_side_effect_receipt", crash_before_receipt)
+            else:
+                patch.setattr(store, "record_comment", crash)
+            with pytest.raises(RuntimeError, match="simulated crash"):
+                await poller.run_cycle()
         await poller.run_cycle()
     finally:
-        store.record_comment = record_comment
         await github_http.aclose()
         await workflow_http.aclose()
 
@@ -356,6 +362,57 @@ async def test_retry_after_crash_between_comment_post_and_record_avoids_duplicat
     )
     row = store.get_issue(ISSUE_KEY)
     assert store.comment_exists(ISSUE_KEY, row.attempt, "ack", row.fingerprint)
+    with store.connection() as connection:
+        outcomes = connection.execute(
+            "SELECT outcome FROM side_effect_receipt WHERE action = 'github.comment_post'"
+        ).fetchall()
+    assert {row["outcome"] for row in outcomes} == {"pending", "ok"}
+
+
+@pytest.mark.anyio
+async def test_poll_comment_retries_with_new_timestamp_after_throttle(tmp_path):
+    fake_github = FakeGithub(repo="agent-bot/fork", self_login="agent-bot")
+    fake_github.add_issue(7, created_at=NOW, updated_at=NOW)
+    handle = fake_github.handle
+    comment_path = f"{ISSUE_PATH}/comments"
+    failed = False
+
+    def fail_first_comment_post(request):
+        nonlocal failed
+        if not failed and request.method == "POST" and request.url.path == comment_path:
+            fake_github.fail_path_next(comment_path, 429, {"retry-after": "300"})
+            failed = True
+        return handle(request)
+
+    fake_github.handle = fail_first_comment_post
+    fake_workflow = FakeWorkflow()
+    fake_workflow.set_response(
+        "POST", f"/v1/issues/{ISSUE_KEY}/start", 202, {"issue_id": ISSUE_KEY}
+    )
+    poller, store, github_http, workflow_http, _, _, now, _ = make_poller(
+        tmp_path, fake_github, fake_workflow
+    )
+
+    try:
+        await poller.prepare()
+        first = await poller.run_cycle()
+        assert first.aborted_reason == "secondary_rate_limit"
+        now[0] += timedelta(minutes=5)
+        second = await poller.run_cycle()
+        assert second.comments_posted == 1
+    finally:
+        await github_http.aclose()
+        await workflow_http.aclose()
+
+    with store.connection() as connection:
+        receipts = connection.execute(
+            "SELECT * FROM side_effect_receipt WHERE action = 'github.comment_post' "
+            "AND outcome != 'pending' "
+            "ORDER BY seq"
+        ).fetchall()
+    assert [row["outcome"] for row in receipts] == ["rate_limited", "ok"]
+    assert receipts[0]["idempotency_key"] == receipts[1]["idempotency_key"]
+    assert receipts[0]["request_sha256"] != receipts[1]["request_sha256"]
 
 
 @pytest.mark.anyio

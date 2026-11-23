@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from services.github.app.main import build_runtime, close_runtime, create_app
 from services.github.app.settings import GithubSettings
+from services.github.app.store import Store
 from services.github.tests.github_fakes import FakeGithub, FakeWorkflow
 
 NOW = datetime(2026, 11, 12, 12, tzinfo=UTC)
@@ -81,6 +82,155 @@ def _make_app_env(tmp_path, *, use_app: bool = True):
         clock=lambda: NOW,
     )
     return runtime, create_app(runtime), fake_gh
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("action", "write_path", "before_replay"),
+    [
+        pytest.param("github.tree_create", "/git/trees", None, id="tree"),
+        pytest.param("github.commit_create", "/git/commits", None, id="commit"),
+        pytest.param("github.branch_ref_upsert", "/git/refs", None, id="branch"),
+        pytest.param("github.draft_pr_open", "/pulls", None, id="draft-pr"),
+        pytest.param("github.draft_pr_open", "/pulls", "close-pr", id="closed-pr"),
+        pytest.param(
+            "github.reviewer_request",
+            "/pulls/1/requested_reviewers",
+            None,
+            id="reviewers",
+        ),
+        pytest.param(
+            "github.evidence_comment_upsert", "/issues/1/comments", None, id="comment"
+        ),
+        pytest.param("github.commit_status", "/statuses/", None, id="status"),
+        pytest.param(
+            "github.commit_status",
+            "/statuses/",
+            "supersede-status",
+            id="superseded-status",
+        ),
+    ],
+)
+async def test_replay_recovers_write_before_success_receipt(
+    tmp_path, monkeypatch, action, write_path, before_replay
+):
+    runtime, app, github = _make_app_env(tmp_path)
+    base_tree = github._put_tree(
+        github.empty_tree_sha,
+        [
+            {"path": "src/old.py", "mode": "100644", "content": "old\n"},
+            {"path": "src/keep.py", "mode": "100644", "content": "keep\n"},
+            {"path": "src.py", "mode": "100644", "content": "sibling\n"},
+        ],
+    )
+    github.git_commits[BASE_SHA] = {"tree": base_tree}
+    record = Store.record_side_effect_receipt
+
+    class Restart(Exception):
+        pass
+
+    def crash_before_receipt(store, key, **receipt):
+        if receipt["action"] == action and receipt["outcome"] == "ok":
+            raise Restart
+        record(store, key, **receipt)
+
+    async def request(app, method, path, body):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            return await client.request(method, path, json=body.model_dump(mode="json"))
+
+    open_request = OpenPrRequest(
+        idempotency_key="open-1",
+        issue_id="gh-1450220110-7",
+        base_commit=BASE_SHA,
+        title="Fix parser",
+        files=[
+            PrFileChange(path="src/old.py", content=None),
+            PrFileChange(path="src/new.py", content="new = 'é'\n"),
+        ],
+    )
+    method, path, body = "POST", "/v1/prs", open_request
+    settings = runtime.settings
+    try:
+        if action in {"github.evidence_comment_upsert", "github.commit_status"}:
+            opened = await request(app, method, path, body)
+            assert opened.json()["outcome"] == "ok"
+            sha = opened.json()["head_sha"]
+            if action == "github.evidence_comment_upsert":
+                method, path = "PUT", "/v1/prs/1/evidence"
+                body = EvidenceCommentRequest(
+                    idempotency_key="evidence-1",
+                    issue_id=open_request.issue_id,
+                    base_commit=BASE_SHA,
+                    head_sha=sha,
+                    repro_test_node_id="test.py::test_it",
+                    repro_failed_before=True,
+                    repro_passed_after=True,
+                    suite_passed=True,
+                    review_verdict="approve",
+                )
+            else:
+                path = f"/v1/commits/{sha}/status"
+                body = CommitStatusRequest(
+                    idempotency_key="status-1", state="pending", description="Waiting"
+                )
+                write_path += sha
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Store, "record_side_effect_receipt", crash_before_receipt)
+            with pytest.raises(Restart):
+                await request(app, method, path, body)
+        with runtime.store.connection() as conn:
+            outcomes = conn.execute(
+                "SELECT outcome FROM side_effect_receipt WHERE action = ?", (action,)
+            ).fetchall()
+        assert [row["outcome"] for row in outcomes] == ["pending"]
+    finally:
+        await close_runtime(runtime)
+
+    if before_replay == "close-pr":
+        github.pulls[1]["state"] = "closed"
+    if before_replay == "supersede-status":
+        github.statuses[sha].append(
+            {
+                "context": body.context,
+                "state": "success",
+                "description": "Approved",
+                "created_at": (NOW + timedelta(seconds=10)).isoformat(),
+            }
+        )
+    restart_time = NOW + timedelta(minutes=1)
+    runtime = build_runtime(
+        settings, transport=github.transport, clock=lambda: restart_time
+    )
+    github._clock = lambda: restart_time
+    try:
+        result = await request(create_app(runtime), method, path, body)
+        assert result.status_code == 200
+        assert result.json()["outcome"] == "ok"
+        if before_replay == "close-pr":
+            assert runtime.store.get_pull_request(1).state == "closed"
+            assert github.review_requests == {}
+        if before_replay == "supersede-status":
+            assert [status["state"] for status in github.statuses[sha]] == [
+                "pending",
+                "success",
+            ]
+        with runtime.store.connection() as conn:
+            receipts = conn.execute(
+                "SELECT * FROM side_effect_receipt WHERE action = ? ORDER BY seq",
+                (action,),
+            ).fetchall()
+        assert [row["outcome"] for row in receipts] == ["pending", "ok"]
+        assert receipts[0]["idempotency_key"] == receipts[1]["idempotency_key"]
+        assert receipts[0]["request_sha256"] == receipts[1]["request_sha256"]
+        assert (
+            github.calls.count(("POST", f"/repos/{github.repo}{write_path}", {})) == 1
+        )
+        assert not any(method == "PATCH" for method, _, _ in github.calls)
+    finally:
+        await close_runtime(runtime)
 
 
 @pytest.mark.anyio

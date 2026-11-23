@@ -244,8 +244,9 @@ def _key_prefix_v2(issue_id: str, attempt: int) -> str:
 
 
 class RestateStepJournal:
-    def __init__(self, ctx: restate.WorkflowContext) -> None:
+    def __init__(self, ctx: restate.WorkflowContext, target: str) -> None:
         self.ctx = ctx
+        self.target = target
         self.injected_ids: dict[str, list[str]] = {}
         self.cited_ids: dict[str, list[str]] = {}
 
@@ -253,6 +254,7 @@ class RestateStepJournal:
         self, name: str, request: ModelCallRequest
     ) -> tuple[ModelOutcome, str]:
         provider = pin_for(request.role, settings).pool
+        request = request.model_copy(update={"target": self.target})
         for call_num in (1, 2, 3):
             outcome = await self.ctx.run_typed(
                 f"{name}:{call_num}",
@@ -466,7 +468,9 @@ async def run_issue_v2(
 
     prefix = _key_prefix_v2(request.issue_id, request.attempt)
     wf_key = workflow_key(request.issue_id, request.attempt)
-    journal = RestateStepJournal(ctx)
+    journal = RestateStepJournal(
+        ctx, target=f"{request.repo}/issues/{request.issue_id}"
+    )
     sync_decisions: list[SyncDecisionItem] = []
     models_used: dict[str, ModelUsageItem] = {}
 

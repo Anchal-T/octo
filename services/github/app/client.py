@@ -9,6 +9,7 @@ import httpx
 from agentteam_contracts import PrFileChange
 
 from .auth import GithubAppTokenSource, StaticTokenSource, TokenSource
+from .git_objects import changed_tree_sha, object_sha
 from .schemas import (
     Clock,
     GithubComment,
@@ -228,6 +229,7 @@ class GithubClient:
             f"/repos/{self.repo}/issues/{number}/comments",
             json={"body": body},
             missing="issue",
+            retry_ambiguous=False,
         )
         return self._json(response)["id"]
 
@@ -237,6 +239,7 @@ class GithubClient:
             f"/repos/{self.repo}/issues/comments/{comment_id}",
             json={"body": body},
             missing="issue",
+            retry_ambiguous=False,
         )
         return self._json(response)["id"]
 
@@ -285,48 +288,127 @@ class GithubClient:
         response = await self._request(
             "POST",
             f"/repos/{self.repo}/git/trees",
-            json={"base_tree": base_tree, "tree": entries},
+            json={"base_tree": await self._commit_tree(base_tree), "tree": entries},
+            retry_ambiguous=False,
         )
         return self._json(response)["sha"]
 
+    async def _commit_tree(self, sha: str) -> str:
+        response = await self._request(
+            "GET", f"/repos/{self.repo}/git/commits/{sha}", missing="issue"
+        )
+        return self._json(response)["tree"]["sha"]
+
+    async def _tree_entries(self, sha: str) -> list[dict[str, Any]]:
+        response = await self._request(
+            "GET", f"/repos/{self.repo}/git/trees/{sha}", missing="issue"
+        )
+        data = self._json(response)
+        if data.get("truncated"):
+            raise GithubFailure(
+                self._error_outcome(
+                    "unavailable",
+                    "truncated_tree",
+                    "Cannot reconcile a truncated Git tree",
+                )
+            )
+        return data["tree"]
+
+    async def _git_object_exists(self, kind: str, sha: str) -> bool:
+        try:
+            await self._request(
+                "GET", f"/repos/{self.repo}/git/{kind}/{sha}", missing="issue"
+            )
+        except GithubFailure as error:
+            if error.outcome.outcome == "not_found":
+                return False
+            raise
+        return True
+
+    async def find_created_tree(
+        self, _started_at: datetime, *, base_tree: str, files: Sequence[PrFileChange]
+    ) -> tuple[str] | None:
+        base_sha = await self._commit_tree(base_tree)
+        sha = await changed_tree_sha(base_sha, files, self._tree_entries)
+        return (sha,) if await self._git_object_exists("trees", sha) else None
+
     async def create_commit(
-        self, *, message: str, tree_sha: str, parents: Sequence[str]
+        self,
+        *,
+        message: str,
+        tree_sha: str,
+        parents: Sequence[str],
+        started_at: datetime,
+        author_login: str,
     ) -> str:
+        identity = self._commit_identity(started_at, author_login)
         response = await self._request(
             "POST",
             f"/repos/{self.repo}/git/commits",
             json={
-                "message": message,
+                "message": message.rstrip("\n") + "\n",
                 "tree": tree_sha,
                 "parents": list(parents),
+                "author": identity,
+                "committer": identity,
             },
+            retry_ambiguous=False,
         )
         return self._json(response)["sha"]
 
+    @staticmethod
+    def _commit_identity(started_at: datetime, author_login: str) -> dict[str, str]:
+        return {
+            "name": author_login,
+            "email": f"{author_login}@users.noreply.github.com",
+            "date": started_at.astimezone(UTC).isoformat(timespec="seconds"),
+        }
+
+    async def find_created_commit(
+        self,
+        started_at: datetime,
+        *,
+        message: str,
+        tree_sha: str,
+        parents: Sequence[str],
+        author_login: str,
+    ) -> tuple[str] | None:
+        identity = self._commit_identity(started_at, author_login)
+        epoch = int(datetime.fromisoformat(identity["date"]).timestamp())
+        who = f"{identity['name']} <{identity['email']}> {epoch} +0000"
+        headers = [f"tree {tree_sha}", *(f"parent {sha}" for sha in parents)]
+        headers += [f"author {who}", f"committer {who}"]
+        prefix = "\n".join(headers) + "\n\n"
+        for ending in ("\n", ""):
+            body = prefix + message.rstrip("\n") + ending
+            sha = object_sha("commit", body.encode("utf-8"))
+            if await self._git_object_exists("commits", sha):
+                return (sha,)
+        return None
+
     async def upsert_branch_ref(self, branch: str, sha: str) -> None:
-        exists = False
         try:
-            await self._request(
-                "GET",
-                f"/repos/{self.repo}/git/ref/heads/{branch}",
-                missing="issue",
-            )
-            exists = True
+            current_sha = await self.get_branch_head(branch)
         except GithubFailure as error:
             if error.outcome.outcome != "not_found":
                 raise
-        if exists:
+            current_sha = None
+        if current_sha == sha:
+            return
+        if current_sha is not None:
             await self._request(
                 "PATCH",
                 f"/repos/{self.repo}/git/refs/heads/{branch}",
                 json={"sha": sha, "force": True},
                 missing="issue",
+                retry_ambiguous=False,
             )
         else:
             await self._request(
                 "POST",
                 f"/repos/{self.repo}/git/refs",
                 json={"ref": f"refs/heads/{branch}", "sha": sha},
+                retry_ambiguous=False,
             )
 
     async def find_open_pr(self, *, head_branch: str) -> GithubPullRequest | None:
@@ -343,6 +425,54 @@ class GithubClient:
         )
         items = self._json_list(response)
         return GithubPullRequest.from_api(items[0]) if items else None
+
+    async def ensure_draft_pr(
+        self, *, title: str, body: str, head_branch: str, base_branch: str
+    ) -> GithubPullRequest:
+        existing = await self.find_open_pr(head_branch=head_branch)
+        if existing is not None:
+            return existing
+        return await self.create_draft_pr(
+            title=title, body=body, head_branch=head_branch, base_branch=base_branch
+        )
+
+    async def find_created_draft_pr(
+        self,
+        _started_at: datetime,
+        *,
+        title: str,
+        body: str,
+        head_branch: str,
+        base_branch: str,
+        head_sha: str,
+        author_login: str,
+    ) -> tuple[GithubPullRequest] | None:
+        owner = self.repo.split("/", 1)[0]
+        for page in range(1, GITHUB_MAX_PAGES + 1):
+            response = await self._request(
+                "GET",
+                f"/repos/{self.repo}/pulls",
+                params={
+                    "state": "all",
+                    "head": f"{owner}:{head_branch}",
+                    "per_page": GITHUB_PAGE_SIZE,
+                    "page": page,
+                },
+            )
+            items = self._json_list(response)
+            for item in items:
+                pr = GithubPullRequest.from_api(item)
+                if (
+                    pr.head_sha == head_sha
+                    and pr.base_ref == base_branch
+                    and pr.author_login.casefold() == author_login.casefold()
+                    and item.get("title") == title
+                    and (item.get("body") or "") == body
+                ):
+                    return (pr,)
+            if len(items) < GITHUB_PAGE_SIZE:
+                break
+        return None
 
     async def create_draft_pr(
         self,
@@ -362,6 +492,7 @@ class GithubClient:
                 "base": base_branch,
                 "draft": True,
             },
+            retry_ambiguous=False,
         )
         return GithubPullRequest.from_api(self._json(response))
 
@@ -382,7 +513,31 @@ class GithubClient:
             f"/repos/{self.repo}/pulls/{pr_number}/requested_reviewers",
             json={"reviewers": clean},
             missing="issue",
+            retry_ambiguous=False,
         )
+
+    async def find_review_request(
+        self,
+        _started_at: datetime,
+        *,
+        pr_number: int,
+        reviewers: Sequence[str],
+        head_sha: str,
+    ) -> tuple[None] | None:
+        response = await self._request(
+            "GET",
+            f"/repos/{self.repo}/pulls/{pr_number}/requested_reviewers",
+            missing="issue",
+        )
+        requested = {user["login"].casefold() for user in self._json(response)["users"]}
+        expected = {login.casefold() for login in reviewers if login.strip()}
+        if not expected <= requested:
+            requested.update(
+                review.author_login.casefold()
+                for review in await self.list_reviews(pr_number)
+                if review.commit_id == head_sha and review.submitted_at is not None
+            )
+        return (None,) if expected <= requested else None
 
     async def list_reviews(self, pr_number: int) -> list[GithubReview]:
         reviews: list[GithubReview] = []
@@ -416,7 +571,46 @@ class GithubClient:
                 "context": context,
             },
             missing="issue",
+            retry_ambiguous=False,
         )
+
+    async def find_commit_status(
+        self,
+        started_at: datetime,
+        *,
+        sha: str,
+        state: str,
+        description: str,
+        context: str,
+    ) -> tuple[None] | None:
+        # GitHub timestamps have second precision. The receipt clock can be finer.
+        started_at = started_at.replace(microsecond=0)
+        seen_context = False
+        for page in range(1, GITHUB_MAX_PAGES + 1):
+            response = await self._request(
+                "GET",
+                f"/repos/{self.repo}/commits/{sha}/statuses",
+                params={"per_page": GITHUB_PAGE_SIZE, "page": page},
+                missing="issue",
+            )
+            statuses = self._json_list(response)
+            for status in statuses:
+                if status["context"] != context:
+                    continue
+                matches = (
+                    status["state"] == state
+                    and status.get("description") == description[:140]
+                )
+                if not seen_context and matches:
+                    return (None,)
+                seen_context = True
+                if datetime.fromisoformat(status["created_at"]) < started_at:
+                    return None
+                if matches:
+                    return (None,)
+            if len(statuses) < GITHUB_PAGE_SIZE:
+                break
+        return None
 
     async def _request(
         self,
@@ -427,11 +621,12 @@ class GithubClient:
         json: dict[str, Any] | None = None,
         missing: Literal["repo", "issue", "revalidation"] = "repo",
         bearer_override: str | None = None,
+        retry_ambiguous: bool = True,
     ) -> httpx.Response:
         server_retry = 0
         secondary_retried = False
         app_token_refreshed = False
-        retry_delays = (1, 2, 4)
+        retry_delays = (1, 2, 4) if retry_ambiguous else ()
         url = f"{GITHUB_API_BASE_URL}{path}"
         bearer = (
             bearer_override

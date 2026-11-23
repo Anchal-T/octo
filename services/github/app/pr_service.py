@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import UTC, datetime
-from typing import Any
+from functools import partial
 
 from agentteam_common import workflow_key
 from agentteam_contracts import (
@@ -15,19 +13,15 @@ from agentteam_contracts import (
 )
 
 from .client import GithubClient, GithubFailure
+from .receipts import GithubReceipts, request_hash
 from .rules import (
     parse_evidence_marker,
     render_evidence_comment,
     validate_agent_branch,
 )
-from .schemas import Clock
+from .schemas import Clock, GithubPullRequest
 from .settings import GithubSettings
 from .store import PullRequestRow, Store
-
-
-def _request_hash(payload: dict[str, Any]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _map_github_failure(error: GithubFailure, now: datetime) -> GithubWriteOutcome:
@@ -80,7 +74,7 @@ async def open_draft_pull_request(
 ) -> GithubWriteOutcome:
     now = _utc_now(clock)
     body_no_key = request.model_dump(mode="json", exclude={"idempotency_key"})
-    req_hash = _request_hash(body_no_key)
+    req_hash = request_hash(body_no_key)
     cached = store.get_write_log(
         request.idempotency_key, endpoint="POST /v1/prs", request_sha256=req_hash
     )
@@ -126,37 +120,75 @@ async def open_draft_pull_request(
         ]
         run_key = workflow_key(request.issue_id, request.attempt)
 
-        tree_sha = await github.create_tree(
+        receipts = GithubReceipts(store, github.repo, clock)
+        key = request.idempotency_key
+        issue_target = f"issues/{request.issue_id}"
+        tree_sha = await receipts.run(
+            key,
+            "github.tree_create",
+            issue_target,
+            str,
+            github.create_tree,
+            reconcile=github.find_created_tree,
             base_tree=request.base_commit,
             files=request.files,
         )
-        commit_sha = await github.create_commit(
+        commit_sha = await receipts.run(
+            key,
+            "github.commit_create",
+            issue_target,
+            str,
+            partial(github.create_commit, author_login=self_login),
+            reconcile=partial(github.find_created_commit, author_login=self_login),
+            use_started_at=True,
             message=f"fix: {request.title}\n\nAgent Team run {run_key}",
             tree_sha=tree_sha,
             parents=[request.base_commit],
         )
-        await github.upsert_branch_ref(branch, commit_sha)
+        await receipts.run(
+            key,
+            "github.branch_ref_upsert",
+            issue_target,
+            type(None),
+            github.upsert_branch_ref,
+            branch=branch,
+            sha=commit_sha,
+        )
 
-        existing_pr = await github.find_open_pr(head_branch=branch)
-        if existing_pr is None:
-            pr = await github.create_draft_pr(
-                title=request.title,
-                body=request.body,
-                head_branch=branch,
-                base_branch=base_branch,
-            )
-            previous_row = None
-        else:
-            pr = existing_pr.model_copy(update={"head_sha": commit_sha})
-            previous_row = store.get_pull_request(pr.number)
+        pr = await receipts.run(
+            key,
+            "github.draft_pr_open",
+            issue_target,
+            GithubPullRequest,
+            github.ensure_draft_pr,
+            reconcile=partial(
+                github.find_created_draft_pr,
+                head_sha=commit_sha,
+                author_login=self_login,
+            ),
+            title=request.title,
+            body=request.body,
+            head_branch=branch,
+            base_branch=base_branch,
+        )
+        previous_row = store.get_pull_request(pr.number)
 
         need_review_request = (
             previous_row is None
             or previous_row.head_sha != commit_sha
             or previous_row.review_requested_sha != commit_sha
         )
-        if need_review_request and approvers:
-            await github.request_reviewers(pr.number, approvers)
+        if pr.state == "open" and need_review_request and approvers:
+            await receipts.run(
+                f"pr:{pr.number}:{commit_sha}",
+                "github.reviewer_request",
+                f"pulls/{pr.number}",
+                type(None),
+                github.request_reviewers,
+                reconcile=partial(github.find_review_request, head_sha=commit_sha),
+                pr_number=pr.number,
+                reviewers=approvers,
+            )
 
         now_iso = now.isoformat()
         created_at = previous_row.created_at if previous_row is not None else now_iso
@@ -170,8 +202,10 @@ async def open_draft_pull_request(
                 head_sha=commit_sha,
                 html_url=pr.html_url,
                 author_login=pr.author_login or self_login,
-                state="open",
-                review_requested_sha=commit_sha if approvers else None,
+                state="merged" if pr.merged else pr.state,
+                review_requested_sha=commit_sha
+                if approvers and pr.state == "open"
+                else None,
                 decision="pending",
                 decided_by=None,
                 decision_reason=None,
@@ -214,7 +248,7 @@ async def upsert_pr_evidence_comment(
 ) -> GithubWriteOutcome:
     endpoint = f"PUT /v1/prs/{pr_number}/evidence"
     body_no_key = request.model_dump(mode="json", exclude={"idempotency_key"})
-    req_hash = _request_hash(body_no_key)
+    req_hash = request_hash(body_no_key)
     cached = store.get_write_log(
         request.idempotency_key, endpoint=endpoint, request_sha256=req_hash
     )
@@ -223,7 +257,8 @@ async def upsert_pr_evidence_comment(
 
     run_key = workflow_key(request.issue_id, request.attempt)
     rendered = render_evidence_comment(request, workflow_run_key=run_key)
-    try:
+
+    async def upsert_comment(*, body: str) -> int:
         self_login = await github.get_self()
         comments = await github.list_comments(pr_number)
         existing = next(
@@ -236,9 +271,20 @@ async def upsert_pr_evidence_comment(
             None,
         )
         if existing is not None:
-            comment_id = await github.update_comment(existing.id, rendered)
-        else:
-            comment_id = await github.post_comment(pr_number, rendered)
+            if existing.body == body:
+                return existing.id
+            return await github.update_comment(existing.id, body)
+        return await github.post_comment(pr_number, body)
+
+    try:
+        comment_id = await GithubReceipts(store, github.repo, clock).run(
+            request.idempotency_key,
+            "github.evidence_comment_upsert",
+            f"pulls/{pr_number}",
+            int,
+            upsert_comment,
+            body=rendered,
+        )
     except GithubFailure as error:
         return _map_github_failure(error, _utc_now(clock))
 
@@ -269,7 +315,7 @@ async def set_commit_status(
 ) -> GithubWriteOutcome:
     endpoint = f"POST /v1/commits/{sha}/status"
     body_no_key = request.model_dump(mode="json", exclude={"idempotency_key"})
-    req_hash = _request_hash(body_no_key)
+    req_hash = request_hash(body_no_key)
     cached = store.get_write_log(
         request.idempotency_key, endpoint=endpoint, request_sha256=req_hash
     )
@@ -277,8 +323,14 @@ async def set_commit_status(
         return GithubWriteOutcome.model_validate_json(cached)
 
     try:
-        await github.create_commit_status(
-            sha,
+        await GithubReceipts(store, github.repo, clock).run(
+            request.idempotency_key,
+            "github.commit_status",
+            f"commits/{sha}",
+            type(None),
+            github.create_commit_status,
+            reconcile=github.find_commit_status,
+            sha=sha,
             state=request.state,
             description=request.description,
             context=request.context,

@@ -16,7 +16,7 @@ from agentteam_contracts import ModelCallRequest, ModelOutcome
 from pydantic import ValidationError
 
 from .ledger import Ledger, Reservation
-from .pools import Pin, Pool, pin_for, pool_for
+from .pools import Pin, Pool
 from .store import Store
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ class ModelClient:
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        settings.validate_model_config()
+        self.authority = settings.validate_model_config()
         self.settings = settings
         self.ledger = ledger
         self.store = store
@@ -64,8 +64,8 @@ class ModelClient:
         self.sleep = sleep
 
     def call(self, request: ModelCallRequest) -> ModelOutcome:
-        pin = pin_for(request.role, self.settings)
-        pool = pool_for(pin, self.settings)
+        pin = self.authority.pin_for(request.role, model=request.model)
+        pool = self.authority.pool
         sampling_json, sampling, payload_sha256, prompt_tokens = _payload_identity(
             request, pin
         )
@@ -543,6 +543,7 @@ class ModelClient:
             json=body,
             headers={"Authorization": f"Bearer {self.settings.groq_api_key}"},
             timeout=remaining,
+            follow_redirects=False,
         )
 
     def _throttled_reserved(
