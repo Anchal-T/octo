@@ -32,16 +32,51 @@ _PARAMETER_RE = re.compile(
     r"<parameter=([A-Za-z_][A-Za-z0-9_]*)>(.*?)</parameter>", re.DOTALL
 )
 
+# Groq renders Qwen tool calls as XML. The model sometimes emits the parameter
+# name as a tag (`<command>`), adds whitespace to the tag (`< parameter="x">`),
+# or serialises an array parameter as a quoted string. Those all fail the
+# provider's schema validation with `tool_use_failed` before the harness ever
+# sees a tool call. A concrete, correct example in the system prompt and in the
+# tool descriptions gives the model the exact syntax to copy.
+# The fixer used to spend all eight turns inspecting (all 16 fixer turns in
+# #6/C0 were sed/grep/python -c with zero source edits). A single, deterministic
+# nudge at turn 5 breaks the inspection loop without extending the turn cap.
+FIXER_EDIT_NUDGE_TURN = 5
+FIXER_EDIT_NUDGE = (
+    "You have not edited any non-test source file yet. Make your edit now, "
+    "then submit."
+)
 
-def _action_tools(submit_properties: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
+TOOL_CALL_FORMAT_HINT = (
+    "ACTION FORMAT: reply with ONLY a JSON object, no prose and no XML/tool tags. "
+    "To run a command: {\"action\": \"bash\", \"command\": \"cd /workspace && ls\"}. "
+    "To finish: {\"action\": \"submit\", \"test_node_id\": \"tests/test_x.py::test_y\", "
+    "\"summary\": \"...\", \"fact_claim\": \"optional\", \"anchor_names\": [\"a.b.C\"]}. "
+    "Use double quotes; `anchor_names` is a JSON array of strings, not a string."
+)
+
+
+def _action_tools(
+    submit_properties: dict[str, dict[str, Any]],
+    *,
+    optional: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
     bash = {
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a shell command in the repository sandbox.",
+            "description": (
+                "Run a shell command in the repository sandbox. Pass one string "
+                "field `command` as <parameter=command>VALUE</parameter>."
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"command": {"type": "string"}},
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command, as <parameter=command>VALUE</parameter>.",
+                    }
+                },
                 "required": ["command"],
                 "additionalProperties": False,
             },
@@ -51,11 +86,16 @@ def _action_tools(submit_properties: dict[str, dict[str, str]]) -> list[dict[str
         "type": "function",
         "function": {
             "name": "submit",
-            "description": "Submit the completed reproduction or fix.",
+            "description": (
+                "Submit the completed reproduction or fix. `anchor_names` is a real "
+                "JSON array of strings, never a quoted string."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": submit_properties,
-                "required": list(submit_properties),
+                "required": [
+                    name for name in submit_properties if name not in optional
+                ],
                 "additionalProperties": False,
             },
         },
@@ -65,11 +105,37 @@ def _action_tools(submit_properties: dict[str, dict[str, str]]) -> list[dict[str
 
 REPRODUCER_TOOLS = _action_tools(
     {
-        "test_node_id": {"type": "string"},
-        "summary": {"type": "string"},
+        "test_node_id": {
+            "type": "string",
+            "description": "Pytest node of the failing test, e.g. tests/test_x.py::test_y.",
+        },
+        "summary": {
+            "type": "string",
+            "description": "One sentence describing the failing test that was added.",
+        },
+        "fact_claim": {
+            "type": "string",
+            "description": "Optional one-sentence bug cause supported by the failing test.",
+        },
+        "anchor_names": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Exact SCIP symbols for the cause at the base commit: a real JSON "
+                "array like [\"a.b.C\"], never a quoted string."
+            ),
+        },
+    },
+    optional=("fact_claim", "anchor_names"),
+)
+FIXER_TOOLS = _action_tools(
+    {
+        "summary": {
+            "type": "string",
+            "description": "One sentence describing the source fix that makes the tests pass.",
+        }
     }
 )
-FIXER_TOOLS = _action_tools({"summary": {"type": "string"}})
 
 REPRODUCER_SYSTEM_PROMPT = (
     "You are the Reproducer agent for this repository. "
@@ -81,7 +147,8 @@ REPRODUCER_SYSTEM_PROMPT = (
     "ONLY create or edit test files "
     "(under tests/ or test_*.py); any changes to non-test source files are "
     "automatically reverted. Use the bash tool to inspect or edit tests. "
-    "Use submit with test_node_id and summary only after the test fails as expected."
+    "Use submit with test_node_id and summary only after the test fails as expected. "
+    + TOOL_CALL_FORMAT_HINT
 )
 
 FIXER_SYSTEM_PROMPT = (
@@ -92,7 +159,7 @@ FIXER_SYSTEM_PROMPT = (
     "source files so the reproduction test and the existing test suite pass. "
     "Test files are protected; any edits to test files are automatically reverted. "
     "Use the bash tool to inspect or edit source. Use submit with a summary "
-    "only once your source fix makes the tests pass."
+    "only once your source fix makes the tests pass. " + TOOL_CALL_FORMAT_HINT
 )
 
 TESTER_SYSTEM_PROMPT = (
@@ -127,6 +194,8 @@ class BashAction:
 class SubmitReproAction:
     test_node_id: str
     summary: str
+    fact_claim: str | None = None
+    anchor_names: tuple[str, ...] = ()
     kind: Literal["submit"] = "submit"
 
 
@@ -169,6 +238,9 @@ class CleanCheckResult(Contract):
 @dataclass(frozen=True)
 class ReproStepResult:
     succeeded: bool
+    fact_claim: str | None = None
+    anchor_names: tuple[str, ...] = ()
+    evidence_event_id: str | None = None
     patch: str = ""
     files: list[str] | None = None
     test_node_id: str = ""
@@ -409,12 +481,19 @@ def reproducer_base_messages(
     body: str,
     triage: TriageResult | None,
     *,
+    fact_block: str = "",
     tracked_files: str = "",
     prompt_token_cap: int = 5500,
 ) -> list[dict[str, str]]:
     triage_line = (
         f"Triaged area: {triage.area} ({triage.kind}, priority {triage.priority}) - {triage.summary}\n\n"
         if triage is not None
+        else ""
+    )
+
+    fact_section = (
+        f"{fact_block}\nIf you relied on a fact, cite it as [fact-<12 hex>].\n\n"
+        if fact_block
         else ""
     )
 
@@ -426,6 +505,7 @@ def reproducer_base_messages(
             f"Repository: {repo}\n"
             f"{triage_line}"
             f"{quote_untrusted_issue(title, body)}\n\n"
+            f"{fact_section}"
             "Start by inspecting the relevant module and existing tests, then create a minimal failing pytest test."
             f"{tracked_files_line}"
         )
@@ -440,12 +520,7 @@ def reproducer_base_messages(
         if not path.strip():
             continue
         candidate = messages_for("\n".join([*selected_files, path]))
-        if (
-            estimate_messages_tokens(
-                candidate, tools=REPRODUCER_TOOLS, tool_choice="required"
-            )
-            > prompt_token_cap
-        ):
+        if estimate_messages_tokens(candidate) > prompt_token_cap:
             break
         selected_files.append(path)
     if selected_files:
@@ -462,6 +537,7 @@ def fixer_base_messages(
     test_node_id: str,
     repro_diff: str,
     review_notes: str | None = None,
+    fact_block: str = "",
 ) -> list[dict[str, str]]:
     triage_line = (
         f"Triaged area: {triage.area} - {triage.summary}\n"
@@ -473,6 +549,11 @@ def fixer_base_messages(
         if review_notes
         else ""
     )
+    fact_section = (
+        f"\n\n{fact_block}\nIf you relied on a fact, cite it as [fact-<12 hex>]."
+        if fact_block
+        else ""
+    )
     user = (
         f"Repository: {repo}\n"
         f"{triage_line}"
@@ -480,6 +561,7 @@ def fixer_base_messages(
         f"Reproduction test diff:\n{trim_output(repro_diff, 1200)}\n"
         f"{review_block}\n"
         f"{quote_untrusted_issue(title, body, max_body_chars=1500)}"
+        f"{fact_section}"
     )
     return [
         {"role": "system", "content": FIXER_SYSTEM_PROMPT},
@@ -544,6 +626,37 @@ def _first_balanced_json_object(text: str) -> str | None:
     return None
 
 
+def _escape_raw_json_string_controls(text: str) -> str:
+    """Escape literal control characters inside JSON string values.
+
+    Qwen sometimes emits a heredoc as the `command` value with real newlines
+    instead of `\\n`. Strict json.loads rejects those, so the action is lost
+    even though the command is intact. Only characters inside strings change.
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    controls = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    for char in text:
+        if not in_string:
+            out.append(char)
+            if char == '"':
+                in_string = True
+            continue
+        if escaped:
+            out.append(char)
+            escaped = False
+        elif char == "\\":
+            out.append(char)
+            escaped = True
+        elif char == '"':
+            out.append(char)
+            in_string = False
+        else:
+            out.append(controls.get(char, char))
+    return "".join(out)
+
+
 def _decode_json_object(text: str | None) -> dict[str, Any] | None:
     if not text or not text.strip():
         return None
@@ -571,7 +684,14 @@ def _decode_json_object(text: str | None) -> dict[str, Any] | None:
             try:
                 data = json.loads(_escape_invalid_backslashes(object_text))
             except (RecursionError, ValueError):
-                return None
+                try:
+                    data = json.loads(
+                        _escape_raw_json_string_controls(
+                            _escape_invalid_backslashes(object_text)
+                        )
+                    )
+                except (RecursionError, ValueError):
+                    return None
         if isinstance(data, dict):
             if function_name in {"bash", "submit"} and "action" not in data:
                 data["action"] = function_name
@@ -712,7 +832,21 @@ def parse_repro_action(
         if not is_test_path(validated_node.split("::", 1)[0]):
             return None
         clean_summary = " ".join(summary.split())[:300].strip() or "Reproduced issue."
-        return SubmitReproAction(test_node_id=validated_node, summary=clean_summary)
+        claim = data.get("fact_claim")
+        anchors = data.get("anchor_names", [])
+        if (
+            not isinstance(claim, str)
+            or not claim.strip()
+            or not isinstance(anchors, list)
+            or any(not isinstance(name, str) for name in anchors)
+        ):
+            claim, anchors = None, []
+        return SubmitReproAction(
+            test_node_id=validated_node,
+            summary=clean_summary,
+            fact_claim=claim.strip()[:400] if claim else None,
+            anchor_names=tuple(anchors),
+        )
     return None
 
 
@@ -1050,6 +1184,69 @@ def _read_tracked_files(
     return result.stdout_trimmed
 
 
+async def _call_repo_model(
+    journal: StepJournal,
+    name: str,
+    request: ModelCallRequest,
+    *,
+    key_prefix: str,
+    event_ids: list[str],
+) -> tuple[ModelOutcome, str]:
+    messages = list(request.messages)
+    for retry in range(3):
+        suffix = f":tool-retry:{retry}" if retry else ""
+        outcome, provider = await journal.call_model(
+            name + suffix,
+            request.model_copy(
+                update={"step": request.step + suffix, "messages": list(messages)}
+            ),
+        )
+        if (
+            not (
+                outcome.outcome == "failed"
+                and outcome.http_status == 400
+                and outcome.error_code == "tool_call_validation_failed"
+            )
+            or retry == 2
+        ):
+            return outcome, provider
+        event_ids.append(
+            await journal.record_event(
+                name + f":tool-call-retry:{retry + 1}",
+                EventWrite(
+                    idempotency_key=f"{key_prefix}:{request.step}:tool_call_retry:{retry + 1}",
+                    source="agent",
+                    kind="tool_call_retry",
+                    taint=1,
+                    payload={
+                        "run_id": request.run_id,
+                        "role": request.role,
+                        "step": request.step,
+                        "retry_count": retry + 1,
+                        "request_id": outcome.request_id,
+                        "model": outcome.model_pinned,
+                        "reason": outcome.reason,
+                        "provider_error_body": outcome.provider_error_body,
+                    },
+                ),
+            )
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Your last action was invalid: {outcome.reason}. "  # sanitized, no failed generation
+                    "Reply with ONLY a JSON object: "
+                    "{\"action\": \"bash\", \"command\": \"cd /workspace && ls\"} "
+                    "or {\"action\": \"submit\", \"test_node_id\": \"...\", "
+                    "\"summary\": \"...\", \"anchor_names\": [\"a.b.C\"]}. "
+                    "No XML, no tool tags, no prose."
+                ),
+            }
+        )
+    raise AssertionError("unreachable tool retry state")
+
+
 async def run_reproducer_step(
     *,
     journal: StepJournal,
@@ -1065,6 +1262,7 @@ async def run_reproducer_step(
     turn_cap: int,
     prompt_token_cap: int,
     cmd_timeout_s: float = 60.0,
+    fact_block: str = "",
 ) -> ReproStepResult:
     tracked_files = await journal.run_step(
         "repro-tracked-files",
@@ -1078,6 +1276,7 @@ async def run_reproducer_step(
         title,
         body,
         triage,
+        fact_block=fact_block,
         tracked_files=tracked_files,
         prompt_token_cap=prompt_token_cap,
     )
@@ -1097,22 +1296,21 @@ async def run_reproducer_step(
                 base_msgs,
                 turns,
                 prompt_token_cap=prompt_token_cap,
-                tools=REPRODUCER_TOOLS,
-                tool_choice="required",
             )
-            outcome, provider = await journal.call_model(
+            outcome, provider = await _call_repo_model(
+                journal,
                 f"repro-llm:{turn}",
                 ModelCallRequest(
                     run_id=run_id,
                     step=f"repro:{turn}",
                     role="reproducer",
                     messages=messages,
-                    tools=REPRODUCER_TOOLS,
-                    tool_choice="required",
                     sampling=Sampling(),
                     taint=2,
                     source="github_issue",
                 ),
+                key_prefix=key_prefix,
+                event_ids=event_ids,
             )
             provider_used = provider
             model_used = outcome.model_reported or outcome.model_pinned
@@ -1233,6 +1431,9 @@ async def run_reproducer_step(
             if verify_res.verified:
                 return ReproStepResult(
                     succeeded=True,
+                    fact_claim=parsed.fact_claim,
+                    anchor_names=parsed.anchor_names,
+                    evidence_event_id=verify_ev_id,
                     patch=verify_res.git_diff,
                     files=list(verify_res.changed_files),
                     test_node_id=parsed.test_node_id,
@@ -1283,6 +1484,7 @@ async def run_fixer_step(
     turn_cap: int,
     prompt_token_cap: int,
     cmd_timeout_s: float = 60.0,
+    fact_block: str = "",
 ) -> FixStepResult:
     base_msgs = fixer_base_messages(
         repo,
@@ -1292,6 +1494,7 @@ async def run_fixer_step(
         test_node_id=test_node_id,
         repro_diff=repro_diff,
         review_notes=review_notes,
+        fact_block=fact_block,
     )
     turns: list[tuple[dict[str, Any], dict[str, Any]]] = []
     event_ids: list[str] = []
@@ -1303,6 +1506,7 @@ async def run_fixer_step(
     model_used: str | None = None
     provider_used: str | None = None
     step_tag = f"fix:{fix_attempt}"
+    made_edit = False
 
     try:
         for turn in range(turn_cap):
@@ -1310,22 +1514,23 @@ async def run_fixer_step(
                 base_msgs,
                 turns,
                 prompt_token_cap=prompt_token_cap,
-                tools=FIXER_TOOLS,
-                tool_choice="required",
             )
-            outcome, provider = await journal.call_model(
+            if turn == FIXER_EDIT_NUDGE_TURN and not made_edit:
+                messages = [*messages, {"role": "user", "content": FIXER_EDIT_NUDGE}]
+            outcome, provider = await _call_repo_model(
+                journal,
                 f"{step_tag}:llm:{turn}",
                 ModelCallRequest(
                     run_id=run_id,
                     step=f"{step_tag}:{turn}",
                     role="fixer",
                     messages=messages,
-                    tools=FIXER_TOOLS,
-                    tool_choice="required",
                     sampling=Sampling(),
                     taint=2,
                     source="github_issue",
                 ),
+                key_prefix=key_prefix,
+                event_ids=event_ids,
             )
             provider_used = provider
             model_used = outcome.model_reported or outcome.model_pinned
@@ -1394,6 +1599,8 @@ async def run_fixer_step(
                 )
                 tool_res = ToolStepResult.model_validate(raw_tool)
                 last_diff = tool_res.git_diff
+                if tool_res.changed_files:
+                    made_edit = True
                 tool_ev_id = await journal.record_event(
                     f"{step_tag}:ev-tool:{turn}",
                     EventWrite(

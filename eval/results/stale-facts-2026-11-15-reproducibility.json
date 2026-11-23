@@ -1,0 +1,26 @@
+{
+  "runs": 2,
+  "fresh_isolated_xtdb_each_run": true,
+  "results_byte_identical": true,
+  "seeds_byte_identical": true,
+  "result_sha256": "c0341225a6b911cd7a5becb943ccc12c08a3fc98ef04ceab8b17c41fcd5b9814",
+  "seed_manifest_sha256": "495a93106174163240faefcd229d633779feec5572a6a1d6c40d0fb434112ad5",
+  "model_requests": 0,
+  "scip_failures": 0,
+  "skipped_commits": 0,
+  "harness_commit": "57ee9b0",
+  "pr_evidence_comment": "https://github.com/Anchal-T/sqlparse/pull/15#issuecomment-6893079367",
+  "stack_down": true,
+  "tests": {
+    "full": {
+      "passed": 444,
+      "skipped": 14,
+      "failed": 0
+    },
+    "memory_xtdb": {
+      "passed": 108,
+      "skipped": 0,
+      "failed": 0
+    }
+  }
+}

@@ -22,10 +22,46 @@ class Repo:
         shas = list(dict.fromkeys(shas))
         if not shas:
             return []
-        git_commits = self.git_repo.rev_list_parents(shas[-1])
+        git_commits = self.git_repo.rev_list_parents(shas)
+        requested = set(shas)
+        shas = [sha for sha in git_commits if sha in requested]
         branches = {sha: branch for sha in shas}
         main_head = shas[-1] if branch == "main" else None
         return self._process(shas, branches, git_commits, main_head)
+
+    def bootstrap(self, base: str) -> dict:
+        """Seed true ancestry, leaving historical symbol diffs explicitly unknown."""
+        git_commits = self.git_repo.rev_list_parents(base)
+        existing = {commit.sha: commit for commit in self.store.get_commits()}
+        main_path = set()
+        sha = base
+        while True:
+            main_path.add(sha)
+            if not git_commits[sha]:
+                break
+            sha = git_commits[sha][0]
+        metadata = [
+            existing[sha]
+            if sha in existing
+            else Commit(
+                sha=sha,
+                parents=parents,
+                committed_at=self.git_repo.committer_date(sha),
+                branch="main" if sha in main_path else "history",
+                author=self.git_repo.author(sha),
+                changed_symbols=(),
+                symbols_indexed=False,
+            )
+            for sha, parents in git_commits.items()
+        ]
+        self.store.record_commit_metadata(metadata)
+        self._dag = None
+        self._process([base], {base: "main"}, git_commits, base)
+        return {
+            "main_head": base,
+            "ancestry_commits": len(metadata),
+            "indexed_base": base,
+        }
 
     def replay(self, shas_topo: Iterable[str], main_head: str) -> list[str]:
         shas = list(dict.fromkeys(shas_topo))
@@ -75,7 +111,7 @@ class Repo:
         for sha in shas:
             parents = git_commits[sha]
             commit = dag.commits.get(sha)
-            if commit is None:
+            if commit is None or not commit.symbols_indexed:
                 child_index, changed_symbols, merge_side_symbols = self._diff(
                     sha, parents, indexes
                 )
@@ -83,7 +119,7 @@ class Repo:
                     sha=sha,
                     parents=parents,
                     committed_at=self.git_repo.committer_date(sha),
-                    branch=branches[sha],
+                    branch=commit.branch if commit else branches[sha],
                     author=self.git_repo.author(sha),
                     changed_symbols=tuple(sorted(changed_symbols)),
                     merge_side_symbols=tuple(
@@ -92,7 +128,12 @@ class Repo:
                     ),
                 )
                 self.store.record_commit(commit)
-                dag.add(commit)
+                if sha in dag.commits:
+                    dag.commits[sha] = (
+                        commit  # Only symbol metadata changes; ancestry caches stay valid.
+                    )
+                else:
+                    dag.add(commit)
                 indexes[sha] = child_index
 
             closer.close_facts_for_commit(sha, commit.branch)

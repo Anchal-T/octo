@@ -23,6 +23,27 @@ services:
       dockerfile: services/memory/Dockerfile
     environment:
       XTDB_HOST: xtdb
+      SCIP_REPO_PATH: /var/lib/memory/sqlparse
+      SCIP_PROJECT_NAME: sqlparse
+      SCIP_CACHE_DIR: /scip-cache
+      MEMORY_REPO_REMOTE: https://github.com/Anchal-T/sqlparse.git
+      FACT_USER_REPORT_TTL_COMMITS: ${FACT_USER_REPORT_TTL_COMMITS:-50}
+      FACT_USER_REPORT_HALF_LIFE_DAYS: ${FACT_USER_REPORT_HALF_LIFE_DAYS:-30}
+      FACT_MIN_EFFECTIVE_CONFIDENCE: ${FACT_MIN_EFFECTIVE_CONFIDENCE:-0.6}
+      FACT_USER_REPORT_INITIAL_CONFIDENCE: ${FACT_USER_REPORT_INITIAL_CONFIDENCE:-0.8}
+    volumes:
+      - ../repos/sqlparse:/repos/sqlparse-src:ro
+      - memory-repo:/var/lib/memory
+      - scip-cache:/scip-cache
+    command:
+      - sh
+      - -ec
+      - |
+        git config --global --add safe.directory /var/lib/memory/sqlparse
+        git config --global --add safe.directory /repos/sqlparse-src
+        test -d /var/lib/memory/sqlparse/.git || git clone --shared --no-checkout /repos/sqlparse-src /var/lib/memory/sqlparse
+        git -C /var/lib/memory/sqlparse remote set-url origin "$${MEMORY_REPO_REMOTE}"
+        exec uvicorn services.memory.app.main:app --host 0.0.0.0 --port 8001
     depends_on:
       - xtdb
     ports:
@@ -132,6 +153,7 @@ services:
       GITHUB_WORKFLOW_VERSION: ${GITHUB_WORKFLOW_VERSION:-v2}
       GITHUB_REPO: ${GITHUB_REPO:-}
       WORKFLOW_URL: http://workflow:8002
+      MEMORY_URL: http://memory:8001
       GITHUB_SQLITE_PATH: /var/lib/agent-team/github/github.sqlite
       GITHUB_POLL_INTERVAL_S: ${GITHUB_POLL_INTERVAL_S:-60}
       GITHUB_MAX_STARTS_PER_CYCLE: ${GITHUB_MAX_STARTS_PER_CYCLE:-1}
@@ -151,3 +173,5 @@ volumes:
   restate-data:
   models-data:
   github-data:
+  memory-repo:
+  scip-cache:

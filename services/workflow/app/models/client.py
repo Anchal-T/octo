@@ -22,6 +22,13 @@ from .store import Store
 logger = logging.getLogger(__name__)
 
 _PROVIDER_ERROR_BODY_MAX_BYTES = 2048
+# Daily-budget reservations used to reserve the whole per-role `max_tokens`
+# for every call. Observed generations are 40-175 tokens (max 175 in the P1
+# slice), so reserving 1,024-1,500 output tokens per call inflated the ledger
+# by ~3x and made the run pause with most of the daily budget unused. This is
+# only a local budgeting estimate: the provider still enforces its own quota
+# and the real request keeps its full `sampling["max_tokens"]`.
+OUTPUT_RESERVE_TOKENS = 256
 _PROVIDER_SECRET_FIELD_RE = re.compile(
     r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|"
     r"client[_-]?secret|password|secret|authorization)[\"']?\s*[:=]\s*)"
@@ -68,7 +75,7 @@ class ModelClient:
         )
         overall_started = self._now()
         call_started_mono = self.monotonic()
-        tokens_est = prompt_tokens + sampling["max_tokens"]
+        tokens_est = prompt_tokens + min(pin.max_tokens, OUTPUT_RESERVE_TOKENS)
 
         if (
             request.sampling.max_tokens is not None
@@ -329,6 +336,23 @@ class ModelClient:
                 return outcome
 
             if status < 200 or status >= 300:
+                tool_error = None
+                if status == 400 and request.tools:
+                    try:
+                        error = response.json().get("error", {})
+                        message = error.get("message", "")
+                        if (
+                            error.get("code") == "tool_use_failed"
+                            and isinstance(message, str)
+                            and "tool call validation failed" in message.lower()
+                        ):
+                            tool_error = " ".join(
+                                _provider_error_body(
+                                    message, self.settings.groq_api_key
+                                ).split()
+                            )[:512]
+                    except (ValueError, AttributeError):
+                        pass
                 outcome = self._result(
                     "failed",
                     request,
@@ -338,9 +362,18 @@ class ModelClient:
                     started=overall_started,
                     finished=finished,
                     http_status=status,
-                    error_code=_provider_error_code(status),
+                    error_code="tool_call_validation_failed"
+                    if tool_error
+                    else _provider_error_code(status),
+                    provider_error_body=(
+                        _provider_error_body(response.text, self.settings.groq_api_key)
+                        if tool_error
+                        else None
+                    ),
                     reason=(
-                        f"provider rejected the model call; response body: "
+                        tool_error
+                        if tool_error
+                        else f"provider rejected the model call; response body: "
                         f"{_provider_error_body(response.text, self.settings.groq_api_key)}"
                         if status == 400 and response.text
                         else "provider rejected the model call"

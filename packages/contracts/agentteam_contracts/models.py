@@ -1,4 +1,5 @@
 import math
+import re
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Literal, Self
@@ -98,6 +99,8 @@ class RunWrite(Contract):
     tokens_out: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0, ge=0)
     outcome: str
+    fact_ids_injected: list[str] = Field(default_factory=list)
+    fact_ids_cited: list[str] = Field(default_factory=list)
     event_ids: list[str] = Field(default_factory=list)
     started_at: datetime
     ended_at: datetime | None = None
@@ -116,6 +119,8 @@ class RunRecord(Contract):
     tokens_out: int
     cost_usd: float
     outcome: str
+    fact_ids_injected: list[str] = Field(default_factory=list)
+    fact_ids_cited: list[str] = Field(default_factory=list)
     event_ids: list[str]
     started_at: datetime
     ended_at: datetime | None
@@ -145,6 +150,48 @@ class ProposalRecord(Contract):
 
 class CommitRound(Contract):
     pass
+
+
+class RepoPush(Contract):
+    branch: Literal["main"] = "main"
+    before: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    after: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
+class RepoPushResponse(Contract):
+    processed: list[str]
+    already_recorded: list[str]
+    closed_fact_ids: list[str]
+    main_head: str
+
+
+class SymbolLocation(Contract):
+    file: str
+    line: int = Field(ge=1)
+
+    @field_validator("file")
+    @classmethod
+    def safe_path(cls, value: str) -> str:
+        if not _is_safe_contract_path(value):
+            raise ValueError("file must be a safe repository-relative path")
+        return value
+
+
+class SymbolsResolve(Contract):
+    base_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    names: list[str] = Field(default_factory=list, max_length=200)
+    locations: list[SymbolLocation] = Field(default_factory=list, max_length=200)
+
+    @field_validator("names")
+    @classmethod
+    def valid_names(cls, values: list[str]) -> list[str]:
+        if any("\x00" in value for value in values):
+            raise ValueError("names must not contain NUL")
+        return values
+
+
+class SymbolsResolveResponse(Contract):
+    symbols: list[str]
 
 
 class Sampling(Contract):
@@ -198,6 +245,7 @@ class ModelOutcome(Contract):
     http_status: int | None = None
     error_code: str | None = None
     reason: str | None = None
+    provider_error_body: str | None = None
 
     @model_validator(mode="after")
     def validate_outcome_fields(self) -> Self:
@@ -299,6 +347,19 @@ class RunStatus(Contract):
 
 class IssueRunRequestV2(IssueRunRequest):
     base_commit: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{7,64}$")
+    fact_condition: Literal["C0", "C2"] | None = None
+    fact_snapshot: list[dict[str, Any]] | None = Field(default=None, max_length=500)
+    pr_branch_suffix: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9._-]{1,20}$"
+    )
+
+    @model_validator(mode="after")
+    def validate_fact_condition(self) -> Self:
+        if self.fact_condition == "C2" and self.fact_snapshot is None:
+            raise ValueError("C2 requires a frozen fact snapshot")
+        if self.fact_condition == "C0" and self.fact_snapshot is not None:
+            raise ValueError("C0 cannot carry a fact snapshot")
+        return self
 
 
 class RepoHeadResponse(Contract):
@@ -328,6 +389,7 @@ class OpenPrRequest(Contract):
     title: str = Field(min_length=1, max_length=256)
     body: str = Field(default="", max_length=60_000)
     files: list[PrFileChange] = Field(min_length=1, max_length=100)
+    branch_suffix: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._-]{1,20}$")
 
 
 class EvidenceFactItem(Contract):
@@ -371,6 +433,8 @@ class EvidenceCommentRequest(Contract):
     fix_files: list[str] = Field(default_factory=list)
     sync_decisions: list[SyncDecisionItem] = Field(default_factory=list)
     cited_facts: list[EvidenceFactItem] = Field(default_factory=list)
+    fact_ids_injected: list[str] = Field(default_factory=list)
+    fact_ids_cited: list[str] = Field(default_factory=list)
     models_used: list[ModelUsageItem] = Field(default_factory=list)
 
 
@@ -495,3 +559,61 @@ class IssueRunResultV2(Contract):
     decided_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+class FactQuery(Contract):
+    issue_refs: list[str] = Field(default_factory=list, max_length=100)
+    symbols: list[str] = Field(default_factory=list)
+    base_commit: str = Field(min_length=1, max_length=64)
+    ancestry_filter: bool = True
+    limit: int = Field(default=50, ge=1, le=1000)
+
+    @field_validator("issue_refs")
+    @classmethod
+    def validate_issue_refs(cls, values: list[str]) -> list[str]:
+        if any(
+            re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*", value) is None
+            for value in values
+        ):
+            raise ValueError("issue references must use owner/repo#number")
+        return list(dict.fromkeys(value.lower() for value in values))
+
+    @field_validator("symbols")
+    @classmethod
+    def validate_symbols(cls, symbols: list[str]) -> list[str]:
+        if any("\x00" in s for s in symbols):
+            raise ValueError("symbol names must not contain NUL characters")
+        return symbols
+
+
+class FactView(Contract):
+    id: str
+    claim: str = ""
+    kind: str = ""
+    area: str = ""
+    anchors: list[dict[str, Any]] = Field(default_factory=list)
+    valid_from_commit: str
+    closing_commits: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    decay_half_life_days: float = Field(default=90.0, gt=0.0)
+    last_confirmed_at: datetime | None = None
+    taint: int = Field(default=0, ge=0, le=3)
+    evidence_test: str | None = None
+    source_issue: str | None = None
+    supersedes: str | None = None
+
+
+class FactQueryResponse(Contract):
+    base_commit: str
+    facts: list[FactView] = Field(default_factory=list)
+    dropped: dict[str, int] = Field(default_factory=dict)
+
+
+class CloseByIssueRequest(Contract):
+    issue_ref: str = Field(min_length=1, max_length=200)
+    closing_commit: str = Field(min_length=1, max_length=64)
+    reason: Literal["linked_fix", "issue_closed", "issue_closed_not_planned"]
+
+
+class CloseByIssueResponse(Contract):
+    closed_fact_ids: list[str] = Field(default_factory=list)

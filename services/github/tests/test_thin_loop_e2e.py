@@ -302,6 +302,10 @@ class _InMemoryXtdbBridge:
         self.proposals: dict[str, list[dict[str, Any]]] = {}
 
     async def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if path == "/v1/symbols/resolve":
+            return {"symbols": []}
+        if path == "/v1/facts/query":
+            return {"base_commit": payload["base_commit"], "facts": [], "dropped": {}}
         if path == "/v1/rounds":
             rid = stable_id("round", payload["idempotency_key"])
             row = {
@@ -448,6 +452,8 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             if request.url.host == "api.github.com":
                 return fake_gh.handle(request)
+            if request.url.host == "memory":
+                return httpx.Response(503, json={"detail": "scip_not_configured"})
             return await handle_workflow_http(request)
 
     settings = GithubSettings(

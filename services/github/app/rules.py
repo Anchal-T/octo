@@ -464,9 +464,21 @@ def render_evidence_comment(
     else:
         lines.append("- None recorded.")
 
+    lines.extend(["", "### Injected facts"])
+    lines.extend(
+        [
+            f"- `{sanitize_inline(fid, max_chars=80)}`"
+            for fid in dict.fromkeys(request.fact_ids_injected)
+        ]
+        or ["- None recorded."]
+    )
     lines.extend(["", "### Cited facts"])
-    if not request.cited_facts:
-        lines.append("- None (memory retrieval not active for this run).")
+    lines.extend(
+        f"- `{sanitize_inline(fid, max_chars=80)}`"
+        for fid in dict.fromkeys(request.fact_ids_cited)
+    )
+    if not request.cited_facts and not request.fact_ids_cited:
+        lines.append("- None recorded.")
     else:
         for fact in request.cited_facts:
             fid = sanitize_inline(fact.fact_id, max_chars=80)

@@ -55,6 +55,7 @@ class GithubSettings:
     app_installation_id: int | None = None
     approvers: tuple[str, ...] = ()
     repo: str = ""
+    memory_url: str = "http://memory:8001"
     workflow_url: str = "http://workflow:8002"
     workflow_version: Literal["v1", "v2"] = "v1"
     sqlite_path: str = "/var/lib/agent-team/github/github.sqlite"
@@ -163,6 +164,7 @@ class GithubSettings:
             app_installation_id=app_installation_id,
             approvers=approvers,
             repo=source.get("GITHUB_REPO", ""),
+            memory_url=source.get("MEMORY_URL", "http://memory:8001").rstrip("/"),
             workflow_url=source.get("WORKFLOW_URL", "http://workflow:8002").rstrip("/"),
             workflow_version=workflow_version,
             sqlite_path=source.get(

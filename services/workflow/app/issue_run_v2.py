@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -13,6 +16,9 @@ from agentteam_contracts import (
     CommitStatusRequest,
     EventWrite,
     EvidenceCommentRequest,
+    FactQuery,
+    FactQueryResponse,
+    FactView,
     GithubWriteOutcome,
     IssueRunRequestV2,
     IssueRunResultV2,
@@ -30,6 +36,8 @@ from agentteam_contracts import (
     SyncDecisionItem,
 )
 
+from .fact_block import effective_confidence, parse_citations, render_fact_block
+from .fact_symbols import issue_references, symbol_candidates
 from .models import Ledger, ModelClient, Store
 from .models.pools import pin_for
 from .retries import WaitDecision, decide_delay, decide_wait
@@ -41,6 +49,8 @@ from .roles import (
 )
 from .sandbox import DockerSandbox, Sandbox
 from .triage import parse_triage, triage_messages
+
+logger = logging.getLogger(__name__)
 
 settings = Settings.from_env()
 agentteam_config = load_agentteam_config()
@@ -71,6 +81,135 @@ async def post_memory(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = await client.post(path, json=payload)
         response.raise_for_status()
         return response.json()
+
+
+def _render_fact_views(facts: list[FactView], now: datetime) -> dict[str, Any]:
+    rendered = render_fact_block(
+        facts, now, min_confidence=settings.fact_min_effective_confidence
+    )
+    return {
+        "text": rendered.text,
+        "injected_ids": rendered.injected_ids,
+        "confidence": {
+            fact.id: effective_confidence(fact, now)
+            for fact in facts
+            if fact.id in rendered.injected_ids
+        },
+        "failed": False,
+    }
+
+
+async def query_fact_block(
+    base_commit: str,
+    text: str,
+    now: datetime,
+    diff: str = "",
+    repo: str = "",
+    issue_id: str = "",
+    fact_snapshot: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if fact_snapshot is not None:
+        return _render_fact_views(
+            [FactView.model_validate(fact) for fact in fact_snapshot], now
+        )
+
+    try:
+        candidates = symbol_candidates(base_commit, text, diff)
+        resolved = await post_memory(
+            "/v1/symbols/resolve", candidates.model_dump(mode="json")
+        )
+        raw = await post_memory(
+            "/v1/facts/query",
+            FactQuery(
+                symbols=resolved["symbols"],
+                issue_refs=issue_references(repo, text, issue_id=issue_id)
+                if repo
+                else [],
+                base_commit=base_commit,
+                ancestry_filter=True,
+            ).model_dump(mode="json"),
+        )
+        return _render_fact_views(FactQueryResponse.model_validate(raw).facts, now)
+    except (httpx.HTTPError, ValueError, KeyError) as error:
+        logger.warning("fact_query_failed error_type=%s", type(error).__name__)
+        return {"text": "", "injected_ids": [], "confidence": {}, "failed": True}
+
+
+async def read_facts(
+    journal: RestateStepJournal,
+    *,
+    prefix: str,
+    step: str,
+    round_id: str,
+    base_commit: str,
+    text: str,
+    now: datetime,
+    diff: str = "",
+    repo: str = "",
+    issue_id: str = "",
+    fact_condition: str | None = None,
+    fact_snapshot: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if fact_condition == "C0":
+        return {
+            "text": "",
+            "injected_ids": [],
+            "confidence": {},
+            "failed": False,
+            "event_ids": [],
+        }
+    if fact_condition == "C2" and fact_snapshot is None:
+        raise ValueError("C2 requires a frozen fact snapshot")
+    result = await journal.run_step(
+        f"query-facts:{step}",
+        query_fact_block,
+        base_commit=base_commit,
+        text=text,
+        now=now,
+        diff=diff,
+        repo=repo,
+        issue_id=issue_id,
+        fact_snapshot=fact_snapshot if fact_condition == "C2" else None,
+    )
+    event_ids = []
+    if result["failed"]:
+        event_ids.append(
+            await journal.record_event(
+                f"fact-query-failed:{step}",
+                EventWrite(
+                    idempotency_key=f"{prefix}:fact_query_failed:{step}",
+                    source="agent",
+                    kind="fact_query_failed",
+                    taint=0,
+                    payload={
+                        "run_step": step,
+                        "base_commit": base_commit,
+                        "round_id": round_id,
+                    },
+                ),
+            )
+        )
+    for fact_id in result["injected_ids"]:
+        event_ids.append(
+            await journal.record_event(
+                f"fact-read:{step}:{fact_id}",
+                EventWrite(
+                    idempotency_key=f"{prefix}:fact_read:{step}:{fact_id}",
+                    source="agent",
+                    kind="fact_read",
+                    taint=0,
+                    payload={
+                        "fact_id": fact_id,
+                        "run_step": step,
+                        "base_commit": base_commit,
+                        "round_id": round_id,
+                        "effective_confidence": result["confidence"][fact_id],
+                        "condition": fact_condition or "memory_ancestry",
+                    },
+                ),
+            )
+        )
+    return {**result, "event_ids": event_ids}
 
 
 async def call_github_api(
@@ -107,6 +246,8 @@ def _key_prefix_v2(issue_id: str, attempt: int) -> str:
 class RestateStepJournal:
     def __init__(self, ctx: restate.WorkflowContext) -> None:
         self.ctx = ctx
+        self.injected_ids: dict[str, list[str]] = {}
+        self.cited_ids: dict[str, list[str]] = {}
 
     async def call_model(
         self, name: str, request: ModelCallRequest
@@ -120,8 +261,30 @@ class RestateStepJournal:
                 request=request,
             )
             if outcome.outcome == "completed":
+                # Parse the raw text and tool arguments before submit parsing trims
+                # summaries. Replay rebuilds this aggregate from journaled outputs.
+                text = (
+                    (outcome.text or "")
+                    + "\n"
+                    + "\n".join(
+                        json.dumps(
+                            call.get("function", {}).get("arguments", ""),
+                            ensure_ascii=False,
+                        )
+                        for call in outcome.tool_calls
+                        if isinstance(call.get("function"), dict)
+                    )
+                )
+                cited = parse_citations(text, self.injected_ids.get(request.run_id, []))
+                previous = self.cited_ids.setdefault(request.run_id, [])
+                previous.extend(fact_id for fact_id in cited if fact_id not in previous)
                 return outcome, provider
             if outcome.outcome in ("failed", "ledger_unavailable"):
+                if (
+                    outcome.http_status == 400
+                    and outcome.error_code == "tool_call_validation_failed"
+                ):
+                    return outcome, provider
                 raise restate.TerminalError(
                     f"{request.role} {outcome.outcome}: {outcome.error_code or 'unspecified'}"
                 )
@@ -245,6 +408,8 @@ def _retryable_result_v2(
     base_commit: str | None,
     area: str = "unknown",
 ) -> IssueRunResultV2:
+    if outcome.outcome == "failed":
+        raise restate.TerminalError(f"repo agent failed: {outcome.error_code}")
     status = "quota_exhausted" if outcome.outcome == "quota_exhausted" else "throttled"
     return IssueRunResultV2(
         issue_id=request.issue_id,
@@ -414,6 +579,33 @@ async def run_issue_v2(
     triage_prop_id = str(
         triage_prop_raw.get("id") or stable_id("prop", triage_prop_key)
     )
+    if triage is not None and (
+        issue_match := re.fullmatch(r"gh-\d+-(\d+)", request.issue_id)
+    ):
+        await ctx.run_typed(
+            "write-user-report-proposal",
+            post_memory,
+            path=f"/v1/rounds/{r1_id}/proposals",
+            payload=ProposalWrite(
+                idempotency_key=f"{prefix}:user-report-proposal:1",
+                round_id=r1_id,
+                agent_id="triager",
+                run_id=triage_run_id,
+                op="assert_fact",
+                evidence_event_ids=[issue_ev_id],
+                payload={
+                    "kind": "user_report",
+                    "claim": triage.summary,
+                    "area": area,
+                    "anchor_names": [],
+                    "confidence": settings.fact_user_report_initial_confidence,
+                    "decay_half_life_days": settings.fact_user_report_half_life_days,
+                    "evidence_test": None,
+                    "supersedes": None,
+                    "source_issue": f"{request.repo}#{issue_match[1]}",
+                },
+            ).model_dump(mode="json"),
+        )
     r1_commit_raw = await ctx.run_typed(
         "commit-round:1",
         post_memory,
@@ -452,6 +644,20 @@ async def run_issue_v2(
     )
     repro_run_key = f"{prefix}:repro:1"
     repro_run_id = stable_id("run", repro_run_key)
+    repro_facts = await read_facts(
+        journal,
+        prefix=prefix,
+        step="repro",
+        round_id=r2_id,
+        base_commit=base_commit,
+        text=request.title + "\n" + request.body,
+        repo=request.repo,
+        issue_id=request.issue_id,
+        now=datetime.fromisoformat(repro_basis_iso),
+        fact_condition=request.fact_condition,
+        fact_snapshot=request.fact_snapshot,
+    )
+    journal.injected_ids[repro_run_id] = repro_facts["injected_ids"]
     repro = await run_reproducer_step(
         journal=journal,
         sessions=sessions,
@@ -463,6 +669,7 @@ async def run_issue_v2(
         title=request.title,
         body=request.body,
         triage=triage,
+        fact_block=repro_facts["text"],
         turn_cap=settings.reproducer_turn_cap,
         prompt_token_cap=settings.reproducer_prompt_token_cap,
         cmd_timeout_s=settings.sandbox_cmd_timeout_s,
@@ -496,7 +703,7 @@ async def run_issue_v2(
             provider=repro.provider or triage_provider,
         )
 
-    await ctx.run_typed(
+    repro_run_record = await ctx.run_typed(
         "record-repro-run",
         post_memory,
         path="/v1/runs",
@@ -512,7 +719,9 @@ async def run_issue_v2(
             tokens_in=repro.tokens_in,
             tokens_out=repro.tokens_out,
             outcome="reproduced",
-            event_ids=list(repro.event_ids),
+            fact_ids_injected=repro_facts["injected_ids"],
+            fact_ids_cited=journal.cited_ids.get(repro_run_id, []),
+            event_ids=[*repro.event_ids, *repro_facts["event_ids"]],
             started_at=repro.started_at or read_basis,
             ended_at=repro.ended_at or read_basis,
         ).model_dump(mode="json"),
@@ -539,6 +748,30 @@ async def run_issue_v2(
         ).model_dump(mode="json"),
     )
     repro_prop_id = str(repro_prop_raw.get("id") or stable_id("prop", repro_prop_key))
+    if repro.fact_claim and repro.evidence_event_id:
+        await ctx.run_typed(
+            "write-bug-cause-proposal",
+            post_memory,
+            path=f"/v1/rounds/{r2_id}/proposals",
+            payload=ProposalWrite(
+                idempotency_key=f"{prefix}:bug-cause-proposal:1",
+                round_id=r2_id,
+                agent_id="reproducer",
+                run_id=repro_run_id,
+                op="assert_fact",
+                evidence_event_ids=[repro.evidence_event_id],
+                payload={
+                    "kind": "bug_cause",
+                    "claim": repro.fact_claim,
+                    "area": area,
+                    "anchor_names": list(repro.anchor_names),
+                    "confidence": 0.7,
+                    "decay_half_life_days": 90,
+                    "evidence_test": repro.test_node_id,
+                    "supersedes": None,
+                },
+            ).model_dump(mode="json"),
+        )
     r2_commit_raw = await ctx.run_typed(
         "commit-round:2",
         post_memory,
@@ -575,6 +808,7 @@ async def run_issue_v2(
     approved_fix_files: list[str] = []
     approved_test = None
     used_fix_attempts = 0
+    fact_run_records = [repro_run_record]
 
     for fix_attempt in range(1, settings.fixer_max_attempts + 1):
         used_fix_attempts = fix_attempt
@@ -597,6 +831,21 @@ async def run_issue_v2(
         )
         fix_run_key = f"{prefix}:fix:{fix_attempt}"
         fix_run_id = stable_id("run", fix_run_key)
+        fix_facts = await read_facts(
+            journal,
+            prefix=prefix,
+            step=f"fix:{fix_attempt}",
+            round_id=fix_round_id,
+            base_commit=base_commit,
+            text=request.title + "\n" + request.body,
+            repo=request.repo,
+            issue_id=request.issue_id,
+            now=datetime.fromisoformat(fix_basis_iso),
+            diff=repro.patch,
+            fact_condition=request.fact_condition,
+            fact_snapshot=request.fact_snapshot,
+        )
+        journal.injected_ids[fix_run_id] = fix_facts["injected_ids"]
         fix = await run_fixer_step(
             journal=journal,
             sessions=sessions,
@@ -612,6 +861,7 @@ async def run_issue_v2(
             test_node_id=repro.test_node_id,
             repro_diff=repro.patch,
             review_notes=review_notes,
+            fact_block=fix_facts["text"],
             turn_cap=settings.fixer_turn_cap,
             prompt_token_cap=settings.fixer_prompt_token_cap,
             cmd_timeout_s=settings.sandbox_cmd_timeout_s,
@@ -652,7 +902,7 @@ async def run_issue_v2(
                 failure_reason=fix.failure_reason or "fix_not_established",
             )
 
-        await ctx.run_typed(
+        fix_run_record = await ctx.run_typed(
             f"record-fix-run:{fix_attempt}",
             post_memory,
             path="/v1/runs",
@@ -668,11 +918,14 @@ async def run_issue_v2(
                 tokens_in=fix.tokens_in,
                 tokens_out=fix.tokens_out,
                 outcome="patched",
-                event_ids=list(fix.event_ids),
+                fact_ids_injected=fix_facts["injected_ids"],
+                fact_ids_cited=journal.cited_ids.get(fix_run_id, []),
+                event_ids=[*fix.event_ids, *fix_facts["event_ids"]],
                 started_at=fix.started_at or read_basis,
                 ended_at=fix.ended_at or read_basis,
             ).model_dump(mode="json"),
         )
+        fact_run_records.append(fix_run_record)
         fix_prop_key = f"{prefix}:fix-proposal:{fix_attempt}"
         fix_prop_raw = await ctx.run_typed(
             f"write-fix-proposal:{fix_attempt}",
@@ -907,6 +1160,7 @@ async def run_issue_v2(
             title=pr_title,
             body=pr_body,
             files=list(approved_test.resulting_files),
+            branch_suffix=request.pr_branch_suffix,
         ).model_dump(mode="json"),
     )
     if pr_out.pr_number is None or not pr_out.head_sha:
@@ -935,7 +1189,20 @@ async def run_issue_v2(
             repro_files=repro.files,
             fix_files=approved_fix_files,
             sync_decisions=sync_decisions,
-            cited_facts=[],
+            fact_ids_injected=list(
+                dict.fromkeys(
+                    fid
+                    for record in fact_run_records
+                    for fid in record.get("fact_ids_injected", [])
+                )
+            ),
+            fact_ids_cited=list(
+                dict.fromkeys(
+                    fid
+                    for record in fact_run_records
+                    for fid in record.get("fact_ids_cited", [])
+                )
+            ),
             models_used=list(models_used.values()),
         ).model_dump(mode="json"),
     )

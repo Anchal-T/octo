@@ -54,3 +54,22 @@ def test_workflow_key_keeps_attempt_one_and_suffixes_later_attempts():
 def test_workflow_key_rejects_attempt_outside_one_to_ninety_nine(attempt):
     with pytest.raises(ValueError):
         workflow_key("gh-1-2", attempt)
+
+
+def test_old_run_write_payload_defaults_to_empty_fact_lists():
+    from agentteam_contracts import RunWrite
+
+    run = RunWrite.model_validate(
+        {
+            "idempotency_key": "example-old-run",
+            "agent_id": "reproducer",
+            "role": "reproducer",
+            "round_id": "round-example",
+            "workflow_id": "example-workflow",
+            "step": "repro",
+            "outcome": "reproduced",
+            "started_at": "2026-11-15T00:00:00Z",
+        }
+    )
+    assert run.fact_ids_injected == []
+    assert run.fact_ids_cited == []

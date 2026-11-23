@@ -17,6 +17,10 @@ class Settings:
     scip_repo_path: str | None = None
     scip_project_name: str | None = None
     scip_cache_dir: str | None = None
+    fact_user_report_ttl_commits: int = 50
+    fact_user_report_half_life_days: float = 30.0
+    fact_min_effective_confidence: float = 0.6
+    fact_user_report_initial_confidence: float = 0.8
     sandbox_image: str = "python:3.12-slim"
     sandbox_repo_path: str | None = None
     sandbox_network: str = "none"
@@ -70,6 +74,18 @@ class Settings:
             scip_repo_path=os.getenv("SCIP_REPO_PATH") or None,
             scip_project_name=os.getenv("SCIP_PROJECT_NAME") or None,
             scip_cache_dir=os.getenv("SCIP_CACHE_DIR") or None,
+            fact_user_report_ttl_commits=int(
+                os.getenv("FACT_USER_REPORT_TTL_COMMITS", "50")
+            ),
+            fact_user_report_half_life_days=float(
+                os.getenv("FACT_USER_REPORT_HALF_LIFE_DAYS", "30")
+            ),
+            fact_min_effective_confidence=float(
+                os.getenv("FACT_MIN_EFFECTIVE_CONFIDENCE", "0.6")
+            ),
+            fact_user_report_initial_confidence=float(
+                os.getenv("FACT_USER_REPORT_INITIAL_CONFIDENCE", "0.8")
+            ),
             sandbox_image=os.getenv("SANDBOX_IMAGE", "python:3.12-slim"),
             sandbox_repo_path=os.getenv("SANDBOX_REPO_PATH") or None,
             sandbox_network=os.getenv("SANDBOX_NETWORK", "none"),

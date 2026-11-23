@@ -1,0 +1,203 @@
+{
+  "active": false,
+  "branch": "feat/p1-memory-wiring",
+  "checked_at": "2026-11-16T14:52:44.650630+00:00",
+  "checkpoint_sha256": "76befbe3e33216d2bded1dca6e502c17103dd17a283a0df2ce106af495ce65ec",
+  "daily_attempt_retries_by_state": [
+    {
+      "attempts": 51,
+      "retries": 8,
+      "state": "completed"
+    },
+    {
+      "attempts": 13,
+      "retries": 4,
+      "state": "refused"
+    },
+    {
+      "attempts": 12,
+      "retries": 0,
+      "state": "throttled"
+    }
+  ],
+  "daily_attempt_states": [
+    {
+      "attempts": 51,
+      "day_window": "2026-11-16T00:00:00Z",
+      "state": "completed",
+      "tokens_est": 144054
+    },
+    {
+      "attempts": 13,
+      "day_window": "2026-11-16T00:00:00Z",
+      "state": "refused",
+      "tokens_est": 50459
+    },
+    {
+      "attempts": 12,
+      "day_window": "2026-11-16T00:00:00Z",
+      "state": "throttled",
+      "tokens_est": 44220
+    }
+  ],
+  "daily_usage": {
+    "day_start": "2026-11-16T00:00:00Z",
+    "model_failures": 52,
+    "requests": 63,
+    "reserved_tokens": 188274,
+    "retries": 8,
+    "tokens_in": 127312,
+    "tokens_out": 3408
+  },
+  "frozen_fact_counts": {
+    "5": 0,
+    "6": 0,
+    "7": 0,
+    "8": 0,
+    "9": 0
+  },
+  "limitations": [
+    "T6/T7 are not established; raw results do not measure a nonempty memory treatment",
+    "Saved checkpoint per-slot counters predate current refused-attempt filtering",
+    "Exact deployed code SHA per historical slot was not recorded and remains UNVERIFIED",
+    "Live turn-5 nudge effectiveness remains UNVERIFIED"
+  ],
+  "live_comparison": "unmeasured: every frozen C2 fact snapshot is empty; protocol/prompt/accounting changed during the slice",
+  "model": "qwen/qwen3.8-27b",
+  "model_pin_verified_for_roles": {
+    "fixer": "qwen/qwen3.8-27b",
+    "reproducer": "qwen/qwen3.8-27b",
+    "tester": "qwen/qwen3.8-27b",
+    "triager": "qwen/qwen3.8-27b"
+  },
+  "no_provider_requests_made_during_closeout": true,
+  "pending_slots": [
+    "7:C2",
+    "8:C0",
+    "8:C2",
+    "9:C0",
+    "9:C2"
+  ],
+  "per_slot_current_ledger": [
+    {
+      "completed_at": "2026-11-16T06:51:04.218181+00:00",
+      "day_key": "2026-11-16T00:00:00Z",
+      "failure_reason": "repro_not_established",
+      "model_failures": 25,
+      "requests": 17,
+      "reserved_tokens": 73780,
+      "retries": 5,
+      "slot": "5:C0",
+      "snapshot_recorded_requests": 23,
+      "snapshot_recorded_reserved_tokens": 101594,
+      "status": "failed",
+      "tokens_in": 35497,
+      "tokens_out": 885
+    },
+    {
+      "completed_at": "2026-11-16T06:58:55.431885+00:00",
+      "day_key": "2026-11-16T00:00:00Z",
+      "failure_reason": "workflow returned HTTP 500",
+      "model_failures": 7,
+      "requests": 4,
+      "reserved_tokens": 12313,
+      "retries": 0,
+      "slot": "5:C2",
+      "snapshot_recorded_requests": 8,
+      "snapshot_recorded_reserved_tokens": 27004,
+      "status": "failed",
+      "tokens_in": 5589,
+      "tokens_out": 243
+    },
+    {
+      "completed_at": "2026-11-16T11:55:08.001171+00:00",
+      "day_key": "2026-11-16T00:00:00Z",
+      "failure_reason": "fix_not_established",
+      "model_failures": 10,
+      "requests": 27,
+      "reserved_tokens": 65863,
+      "retries": 1,
+      "slot": "6:C0",
+      "snapshot_recorded_requests": 27,
+      "snapshot_recorded_reserved_tokens": 65863,
+      "status": "failed",
+      "tokens_in": 60704,
+      "tokens_out": 1715
+    },
+    {
+      "completed_at": "2026-11-16T14:31:00.695098+00:00",
+      "day_key": "2026-11-16T00:00:00Z",
+      "failure_reason": null,
+      "model_failures": 7,
+      "requests": 11,
+      "reserved_tokens": 27837,
+      "retries": 2,
+      "slot": "7:C0",
+      "snapshot_recorded_requests": 11,
+      "snapshot_recorded_reserved_tokens": 27837,
+      "status": "quota_exhausted",
+      "tokens_in": 22671,
+      "tokens_out": 375
+    }
+  ],
+  "plan_slots": 10,
+  "repo": "Anchal-T/sqlparse",
+  "retired_attempt_90_states": [
+    {
+      "attempts": 2,
+      "state": "completed",
+      "tokens_est": 3028
+    },
+    {
+      "attempts": 3,
+      "state": "refused",
+      "tokens_est": 7954
+    },
+    {
+      "attempts": 2,
+      "state": "throttled",
+      "tokens_est": 5453
+    }
+  ],
+  "retired_usage_difference": {
+    "requests": 4,
+    "reserved_tokens": 8481,
+    "tokens_in": 2851,
+    "tokens_out": 190
+  },
+  "scheduled_resume": {
+    "executed": false,
+    "max_new_slots": 5,
+    "outside_allowed_utc_date": "refuse without provider calls",
+    "secrets_in_unit": false,
+    "source_and_frozen_input_guards": true,
+    "unit": "octo-p1-closeout-20261117.timer",
+    "when_ist": "2026-11-17 05:35 IST",
+    "when_utc": "2026-11-17T00:05:00Z"
+  },
+  "schema_version": 1,
+  "skipped": {
+    "6:C2": "user-directed: day 2 resumes at 7:C0"
+  },
+  "terminal_slots": 4,
+  "verification": {
+    "full_suite": {
+      "failed": 0,
+      "passed": 466,
+      "skipped": 14
+    },
+    "isolated_memory_tests": {
+      "failed": 0,
+      "passed": 108,
+      "skipped": 0
+    },
+    "review": {
+      "human_merge_approval": false,
+      "model": "opencode/hy4-flash-free",
+      "spec_findings": 0,
+      "standards_blocking": 0,
+      "standards_nonblocking": 2
+    },
+    "ruff": "repository-wide check passed"
+  }
+}

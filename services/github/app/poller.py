@@ -2,7 +2,9 @@ import asyncio
 import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+import httpx
 from agentteam_common.ids import workflow_key
 from agentteam_contracts import ApprovalRequest, IssueRunResult, IssueRunResultV2
 
@@ -49,6 +51,7 @@ class Poller:
         clock: Clock,
         sleep: Sleep,
         holder: str,
+        memory: Any | None = None,
     ) -> None:
         self.settings = settings
         self.github = github
@@ -57,6 +60,7 @@ class Poller:
         self.clock = clock
         self.sleep = sleep
         self.holder = holder
+        self.memory = memory
         self.self_login = ""
         self.approvers: tuple[str, ...] = ()
         self.repo_info: RepoInfo | None = None
@@ -180,6 +184,7 @@ class Poller:
                 task.result()
 
     async def _run_locked(self, summary: CycleSummary) -> None:
+        await self._sync_memory_push()
         watermark = self.store.get_meta("watermark")
         since = None
         if watermark is not None:
@@ -212,6 +217,33 @@ class Poller:
             if issue.is_pull_request:
                 current.pop(row.number, None)
             elif issue.state == "closed" or GITHUB_LABEL not in issue.labels:
+                if self.memory is not None and issue.state == "closed":
+                    reason = (
+                        "issue_closed_not_planned"
+                        if getattr(issue, "state_reason", None) == "not_planned"
+                        else "issue_closed"
+                    )
+                    closing_commit = (
+                        getattr(self, "latest_head_sha", None)
+                        or (
+                            getattr(self.repo_info, "default_branch_sha", None)
+                            if self.repo_info
+                            else None
+                        )
+                        or "HEAD"
+                    )
+                    issue_ref = f"{self.settings.repo}#{row.number}"
+                    try:
+                        await self.memory.close_by_issue(
+                            issue_ref=issue_ref,
+                            closing_commit=closing_commit,
+                            reason=reason,
+                        )
+                    except Exception as error:  # noqa: BLE001 - memory closure is best-effort.
+                        logger.warning(
+                            "memory_close_by_issue_failed error_type=%s",
+                            type(error).__name__,
+                        )
                 self.store.upsert_issue(
                     replace(
                         row,
@@ -245,6 +277,36 @@ class Poller:
             if watermark is not None:
                 latest = max(latest, self._datetime(watermark))
             self.store.set_meta("watermark", self._iso(latest))
+
+    async def _sync_memory_push(self) -> None:
+        if self.memory is None or self.repo_info is None:
+            return
+        try:
+            after = await self.github.get_branch_head(self.repo_info.default_branch)
+            self.latest_head_sha = after
+            before = self.store.get_meta("memory_push_head")
+            if after == before and self.store.get_meta("memory_push_reset") != "1":
+                return
+            if self.store.get_meta("memory_push_reset") == "1":
+                before = None
+            response = await self.memory.push(before=before, after=after)
+            if (
+                response.status_code == 409
+                and response.json().get("detail") == "non_fast_forward"
+            ):
+                logger.warning(
+                    "memory_push_non_fast_forward before=%s after=%s", before, after
+                )
+                self.store.set_meta("memory_push_head", after)
+                self.store.set_meta("memory_push_reset", "1")
+                return
+            if response.status_code == 200:
+                self.store.set_meta("memory_push_head", after)
+                self.store.set_meta("memory_push_reset", "0")
+            else:
+                logger.warning("memory_push_failed status=%s", response.status_code)
+        except httpx.HTTPError as error:
+            logger.warning("memory_push_failed error_type=%s", type(error).__name__)
 
     async def _process_issue(
         self, issue: GithubIssue, baseline: datetime, summary: CycleSummary

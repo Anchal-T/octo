@@ -52,3 +52,18 @@ def test_anchor_names_resolve_only_against_the_matching_base_commit(tmp_path):
     assert resolve_anchors([symbol], index, "other-base") is None
     assert resolve_anchors(["missing"], index, "base-1") is None
     assert resolve_anchors([], index, "base-1") is None
+
+
+def test_dotted_names_resolve_to_exact_scip_definitions():
+    symbol = "scip-python python sqlparse 0 `sqlparse.lexer`/Lexer#get_tokens()."
+    other = "scip-python python sqlparse 0 `sqlparse.sql`/Token#value."
+    index = ScipIndex(
+        {
+            s: (ScipDefinition(s, "sqlparse/lexer.py", (1, 0, 1), None),)
+            for s in (symbol, other)
+        }
+    )
+    assert index.resolve("sqlparse.lexer.Lexer.get_tokens") == symbol
+    assert index.resolve("sqlparse.sql.Token.value") == other
+    assert index.resolve("get_tokens") is None
+    assert index.resolve("sqlparse.lexer.missing") is None

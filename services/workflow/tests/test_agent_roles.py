@@ -9,8 +9,10 @@ import pytest
 from agentteam_contracts import ModelCallRequest, ModelOutcome, TriageResult
 
 from services.workflow.app.roles import (
-    FIXER_TOOLS,
+    FIXER_SYSTEM_PROMPT,
+    REPRODUCER_SYSTEM_PROMPT,
     REPRODUCER_TOOLS,
+    TOOL_CALL_FORMAT_HINT,
     BashAction,
     CleanCheckResult,
     SandboxSessionManager,
@@ -91,6 +93,12 @@ class FakeStepJournal:
             return ModelOutcome.model_validate(self.recorded[name]), "groq"
         self.model_calls += 1
         reply = self.replies.pop(0)
+        if isinstance(reply, ModelOutcome):
+            outcome = reply.model_copy(
+                update={"run_id": request.run_id, "step": request.step}
+            )
+            self.recorded[name] = outcome.model_dump(mode="json")
+            return outcome, "groq"
         if isinstance(reply, dict):
             text = reply.get("text")
             tool_calls = reply.get("tool_calls", [])
@@ -135,6 +143,180 @@ class FakeStepJournal:
         return self.recorded[name]
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("role", ["reproducer", "fixer"])
+@pytest.mark.parametrize("invalid_calls", [0, 1, 2, 3])
+async def test_repo_agent_retries_invalid_tool_call_same_turn(
+    tmp_path, role, invalid_calls
+):
+    repo = tmp_path / "repo"
+    sha = _init_buggy_repo(repo)
+    manager = SandboxSessionManager(
+        lambda base: LocalGitSandbox(
+            repo_path=repo,
+            base_commit=base,
+            work_root=tmp_path / "work",
+        )
+    )
+    failed = ModelOutcome(
+        outcome="failed",
+        request_id="invalid-call",
+        decided_at=NOW,
+        model_pinned="qwen/qwen3.8-27b",
+        run_id="run-retry",
+        step="unused",
+        http_status=400,
+        error_code="tool_call_validation_failed"
+        if invalid_calls
+        else "provider_http_400",
+        reason="tool call validation failed: missing command",
+        provider_error_body='{"error":{"failed_generation":"BAD_GENERATION"}}',
+    )
+    journal = FakeStepJournal(
+        [failed] * max(1, invalid_calls)
+        + [
+            json.dumps({"action": "bash", "command": "printf recovered"}),
+        ]
+    )
+    args = {
+        "journal": journal,
+        "sessions": manager,
+        "session_key": "retry-session",
+        "key_prefix": "retry-prefix",
+        "run_id": "run-retry",
+        "repo": "Anchal-T/demo",
+        "base_commit": sha,
+        "title": "Example issue",
+        "body": "Example body",
+        "triage": None,
+        "turn_cap": 1,
+        "prompt_token_cap": 5500,
+    }
+    if role == "reproducer":
+        result = await run_reproducer_step(**args)
+    else:
+        result = await run_fixer_step(
+            **args,
+            fix_attempt=1,
+            test_node_id="tests/test_calc.py::test_safe_divide_positive",
+            repro_diff="",
+            review_notes=None,
+        )
+    assert journal.model_calls == min(invalid_calls + 1, 3)
+    events = [event for event in journal.events if event["kind"] == "tool_call_retry"]
+    assert len(events) == min(invalid_calls, 2)
+    assert [e["payload"]["retry_count"] for e in events] == list(
+        range(1, len(events) + 1)
+    )
+    assert all(
+        e["payload"]["provider_error_body"] == failed.provider_error_body
+        for e in events
+    )
+    assert len({e["idempotency_key"] for e in events}) == len(events)
+    assert set(result.event_ids) == {
+        f"ev-{n}" for n in range(1, len(journal.events) + 1)
+    }
+    for retry, request in enumerate(journal.requests[1:], 1):
+        assert request.step == journal.requests[0].step + f":tool-retry:{retry}"
+        retry_message = request.messages[-1]
+        assert retry_message["role"] == "user"
+        assert retry_message["content"].startswith(
+            "Your last action was invalid: tool call validation failed: missing command. "
+        )
+        assert '{"action": "bash", "command": "cd /workspace && ls"}' in retry_message["content"]
+        assert '"anchor_names": ["a.b.C"]' in retry_message["content"]
+        assert "BAD_GENERATION" not in json.dumps(request.messages)
+    if 0 < invalid_calls < 3:
+        assert any(e["kind"] == "model_output" for e in journal.events)
+        assert any(
+            e["payload"].get("summary") == "exit_code=0\nrecovered"
+            for e in journal.events
+        )
+    else:
+        assert result.retry_outcome.error_code == failed.error_code
+        assert not any(e["kind"] == "model_output" for e in journal.events)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("edit_early", [False, True])
+async def test_fixer_edit_nudge_at_turn_five(tmp_path, edit_early):
+    """Regression for #6/C0: both fix attempts inspected for eight turns and
+    never edited. One deterministic nudge at turn 5 breaks the loop; no turn
+    cap is raised and the nudge is skipped once a source edit has landed."""
+    from services.workflow.app.roles import FIXER_EDIT_NUDGE, FIXER_EDIT_NUDGE_TURN
+
+    repo = tmp_path / "repo"
+    sha = _init_buggy_repo(repo)
+    manager = SandboxSessionManager(
+        lambda base: LocalGitSandbox(
+            repo_path=repo,
+            base_commit=base,
+            work_root=tmp_path / "work",
+        )
+    )
+    inspect = json.dumps({"action": "bash", "command": "printf inspecting"})
+    edit = json.dumps(
+        {"action": "bash", "command": "echo '# harness nudge test' >> pkg/calc.py"}
+    )
+    replies = [edit if edit_early and index == 0 else inspect for index in range(8)]
+    journal = FakeStepJournal(replies)
+    result = await run_fixer_step(
+        journal=journal,
+        sessions=manager,
+        session_key="nudge-session",
+        key_prefix="nudge-prefix",
+        run_id="run-nudge",
+        fix_attempt=1,
+        repo="Anchal-T/demo",
+        base_commit=sha,
+        title="Example issue",
+        body="Example body",
+        triage=None,
+        test_node_id="tests/test_calc.py::test_safe_divide_positive",
+        repro_diff="",
+        review_notes=None,
+        turn_cap=8,
+        prompt_token_cap=5500,
+    )
+    assert result.succeeded is False
+    assert len(journal.requests) == 8  # turn cap unchanged
+    nudged = [
+        index
+        for index, request in enumerate(journal.requests)
+        if any(
+            message.get("content") == FIXER_EDIT_NUDGE
+            for message in request.messages
+            if isinstance(message, dict)
+        )
+    ]
+    if edit_early:
+        assert nudged == []
+    else:
+        assert FIXER_EDIT_NUDGE_TURN == 5
+        assert nudged == [5]
+
+
+def test_repo_agents_use_text_actions_with_exact_json_contract():
+    """Regression for fork #5 C0/C2 and #6/C0: Qwen on Groq cannot reliably
+    produce provider-valid XML tool calls (it emits <command> or
+    < parameter=command> and quoted arrays), and every malformed call is
+    rejected before the harness sees it. The repo-agent roles therefore use
+    the harness's text-action path: the system prompt states the exact JSON
+    action contract and the native tool schemas are not sent on those calls."""
+    bash_example = '{"action": "bash", "command": "cd /workspace && ls"}'
+    submit_example = '"anchor_names": ["a.b.C"]'
+    assert bash_example in TOOL_CALL_FORMAT_HINT
+    assert submit_example in TOOL_CALL_FORMAT_HINT
+    assert "ONLY a JSON object" in TOOL_CALL_FORMAT_HINT
+    assert "no XML" in TOOL_CALL_FORMAT_HINT
+    for prompt in (REPRODUCER_SYSTEM_PROMPT, FIXER_SYSTEM_PROMPT):
+        assert TOOL_CALL_FORMAT_HINT in prompt
+    # The schemas remain a precise contract for any caller that still uses them.
+    anchor = REPRODUCER_TOOLS[1]["function"]["parameters"]["properties"]["anchor_names"]
+    assert anchor["type"] == "array"
+    assert "real JSON array" in anchor["description"]
+
+
 def test_fit_messages_to_cap_keeps_prompt_within_budget_and_quotes_issue():
     triage = TriageResult(
         kind="bug",
@@ -174,6 +356,16 @@ def test_repro_and_fix_parsers_accept_wrapped_json_tool_call():
 
     assert parse_repro_action(reply) == BashAction(command="ls")
     assert parse_fix_action(reply) == BashAction(command="ls")
+
+
+def test_parsers_accept_json_with_raw_newlines_in_command_string():
+    """#6/C0 repro turns 4 and 5 emitted a heredoc with real newlines inside
+    the JSON string; strict json.loads rejected the whole action."""
+    command = "cd /workspace && cat >> tests/test_format.py << 'EOF'\ndef test_x():\n    pass\nEOF\n"
+    reply = json.dumps({"action": "bash", "command": command})
+    raw_newlines = reply.replace("\\n", "\n")
+    assert parse_repro_action(raw_newlines) == BashAction(command=command)
+    assert parse_fix_action(raw_newlines) == BashAction(command=command)
 
 
 def test_repro_and_fix_parsers_accept_parameter_tool_call():
@@ -249,10 +441,7 @@ def test_reproducer_prompt_lists_tracked_files_within_token_cap():
     assert "src/module_0.py" in messages[1]["content"]
     assert "src/module_99.py" not in messages[1]["content"]
     assert (
-        estimate_messages_tokens(
-            messages, tools=REPRODUCER_TOOLS, tool_choice="required"
-        )
-        <= 600
+        estimate_messages_tokens(messages) <= 600
     )
 
 
@@ -437,6 +626,8 @@ async def test_reproducer_rejects_passing_or_broken_tests_and_accepts_failing_re
                 {
                     "action": "submit",
                     "test_node_id": "tests/test_repro.py::test_zero_divisor_returns_none",
+                    "fact_claim": "Zero divisor reaches division without a guard",
+                    "anchor_names": ["pkg.calc.safe_divide"],
                     "summary": "safe_divide raises ZeroDivisionError when b is 0",
                 }
             ),
@@ -459,16 +650,16 @@ async def test_reproducer_rejects_passing_or_broken_tests_and_accepts_failing_re
     )
 
     assert result.succeeded is True
+    assert result.fact_claim == "Zero divisor reaches division without a guard"
+    assert result.anchor_names == ("pkg.calc.safe_divide",)
+    assert result.evidence_event_id in result.event_ids
     assert result.test_node_id == "tests/test_repro.py::test_zero_divisor_returns_none"
     assert result.files == ["tests/test_repro.py"]
     assert "pkg/calc.py" not in result.patch
     assert "assert safe_divide(5, 0) is None" in result.patch
     first_request, second_request = journal.requests[:2]
-    assert first_request.tool_choice == second_request.tool_choice == "required"
-    assert {tool["function"]["name"] for tool in first_request.tools} == {
-        "bash",
-        "submit",
-    }
+    assert first_request.tool_choice is None and second_request.tool_choice is None
+    assert first_request.tools is None and second_request.tools is None
     assistant_call = second_request.messages[-2]
     assert assistant_call["role"] == "assistant"
     assert assistant_call["content"] == "I will inspect and create a minimal test."
@@ -476,12 +667,7 @@ async def test_reproducer_rejects_passing_or_broken_tests_and_accepts_failing_re
     assert second_request.messages[-1]["role"] == "tool"
     assert second_request.messages[-1]["tool_call_id"] == "call-repro-0"
     assert (
-        estimate_messages_tokens(
-            second_request.messages,
-            tools=second_request.tools,
-            tool_choice=second_request.tool_choice,
-        )
-        <= 5500
+        estimate_messages_tokens(second_request.messages) <= 5500
     )
 
 
@@ -597,22 +783,12 @@ async def test_fixer_rebuilds_lost_sandbox_on_replay_without_repeating_model_cal
     assert replay_journal.model_calls == 1
     first_request, second_request = replay_journal.requests
     assert first_request.role == second_request.role == "fixer"
-    assert first_request.tool_choice == second_request.tool_choice == "required"
-    assert {tool["function"]["name"] for tool in first_request.tools} == {
-        "bash",
-        "submit",
-    }
+    assert first_request.tool_choice is None and second_request.tool_choice is None
+    assert first_request.tools is None and second_request.tools is None
     assert second_request.messages[-2]["tool_calls"][0]["id"] == "call-fix-0"
     assert second_request.messages[-1]["role"] == "tool"
     assert second_request.messages[-1]["tool_call_id"] == "call-fix-0"
-    assert (
-        estimate_messages_tokens(
-            second_request.messages,
-            tools=FIXER_TOOLS,
-            tool_choice=second_request.tool_choice,
-        )
-        <= 5500
-    )
+    assert estimate_messages_tokens(second_request.messages) <= 5500
     assert resumed.files == ["pkg/calc.py"]
     assert "tests/test_repro.py" not in resumed.patch
 
@@ -762,3 +938,58 @@ async def test_tester_clean_checkout_approves_valid_fix_and_blocks_broken_suite(
     assert parse_tester_review("not json at all") is None
     fallback = finalize_tester_review(None, ok_check)
     assert fallback.verdict == "changes_requested"
+
+
+@pytest.mark.parametrize("role", ["reproducer", "fixer"])
+def test_fact_block_is_optional_and_appears_once_after_quoted_issue(role):
+    kwargs = {
+        "repo": "example/fork",
+        "title": "Example title",
+        "body": "Example body",
+        "triage": None,
+    }
+    if role == "fixer":
+        kwargs.update(
+            test_node_id="tests/test_example.py::test_example",
+            repro_diff="example diff",
+        )
+    build = reproducer_base_messages if role == "reproducer" else fixer_base_messages
+    original = build(**kwargs)
+    assert build(**kwargs, fact_block="") == original
+    quoted = "Reported by users, not verified (taint 2):\n> Title: Example title\n>\n> Example body"
+    expected = (
+        "Repository: example/fork\n" + quoted + "\n\n"
+        "Start by inspecting the relevant module and existing tests, then create a minimal failing pytest test."
+        if role == "reproducer"
+        else "Repository: example/fork\nFailing reproduction pytest node: tests/test_example.py::test_example\n"
+        "Reproduction test diff:\nexample diff\n\n" + quoted
+    )
+    assert original[1]["content"] == expected
+    block = "[fact-123456789abc, checked at aaaaaaa, confidence 0.8] Example fact"
+    with_facts = build(**kwargs, fact_block=block)
+    assert with_facts[0] == original[0]
+    assert with_facts[1]["content"].count(block) == 1
+    assert with_facts[1]["content"].index(block) > with_facts[1]["content"].index(
+        "Example body"
+    )
+
+
+def test_reproducer_optional_fact_fields_survive_submission_parsing():
+    action = parse_repro_action(
+        json.dumps(
+            {
+                "action": "submit",
+                "test_node_id": "tests/test_example.py::test_example",
+                "summary": "Example reproduction",
+                "fact_claim": "Example cause",
+                "anchor_names": ["sqlparse.lexer.Lexer.get_tokens"],
+            }
+        )
+    )
+    assert action is not None
+    assert action.fact_claim == "Example cause"
+    assert action.anchor_names == ("sqlparse.lexer.Lexer.get_tokens",)
+    schema = REPRODUCER_TOOLS[1]["function"]["parameters"]
+    assert schema["properties"]["anchor_names"]["items"] == {"type": "string"}
+    assert "fact_claim" not in schema["required"]
+    assert "anchor_names" not in schema["required"]

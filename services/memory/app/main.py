@@ -1,25 +1,41 @@
+import subprocess
+from threading import Lock
 from typing import Any
 
 from agentteam_contracts import (
+    CloseByIssueRequest,
+    CloseByIssueResponse,
     CommitRound,
     EventRecord,
     EventWrite,
+    FactQuery,
+    FactQueryResponse,
+    FactView,
     ProposalRecord,
     ProposalWrite,
+    RepoPush,
+    RepoPushResponse,
     RoundRecord,
     RoundWrite,
     RunRecord,
     RunWrite,
+    SymbolsResolve,
+    SymbolsResolveResponse,
 )
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from .dag import UnknownCommit
+from .fact_query import FactExpiryConfig, filter_valid
+from .git_repo import GitRepo
+from .repo import Repo
 from .store import IdempotencyConflict, MemoryStore, RoundConflict
 
 app = FastAPI(title="Agent Team Memory")
 store = MemoryStore()
+repo_push_lock = Lock()
 
 
 @app.exception_handler(RequestValidationError)
@@ -86,6 +102,8 @@ def _run(row: dict[str, Any]) -> RunRecord:
         cost_usd=row["cost_usd"],
         outcome=row["outcome"],
         event_ids=list(row.get("event_ids") or []),
+        fact_ids_injected=list(row.get("fact_ids_injected") or []),
+        fact_ids_cited=list(row.get("fact_ids_cited") or []),
         started_at=row["started_at"],
         ended_at=row.get("ended_at"),
     )
@@ -112,6 +130,60 @@ def health() -> dict[str, str]:
     except Exception as error:
         raise HTTPException(status_code=503, detail="XTDB is unavailable") from error
     return {"status": "ok"}
+
+
+@app.post("/v1/repo/push", response_model=RepoPushResponse)
+def repo_push(request: RepoPush):
+    if not store.settings.scip_repo_path or store.scip_indexer is None:
+        raise HTTPException(status_code=503, detail="scip_not_configured")
+    with repo_push_lock:
+        git = GitRepo(store.settings.scip_repo_path)
+        required = [sha for sha in (request.before, request.after) if sha]
+        if any(not git.has_commit(sha) for sha in required):
+            try:
+                git.fetch()
+            except (subprocess.SubprocessError, OSError) as error:
+                raise HTTPException(status_code=503, detail="fetch_failed") from error
+            for sha in required:
+                if not git.has_commit(sha):
+                    return JSONResponse(
+                        status_code=409, content={"detail": "unknown_sha", "sha": sha}
+                    )
+        if request.before and not git.is_ancestor(request.before, request.after):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "non_fast_forward",
+                    "before": request.before,
+                    "after": request.after,
+                },
+            )
+        recorded = {commit.sha for commit in store.get_commits()}
+        # A fresh memory store must include the boundary's ancestry as well.
+        before = request.before if request.before in recorded else None
+        shas = git.rev_list(request.after, before=before)
+        old_closures = {
+            (row["fact_id"], row["closing_commit"]) for row in store.all_fact_closures()
+        }
+        processor = Repo(store, git, store.scip_indexer)
+        # Repo skips recorded commits' indexing, but retries their idempotent
+        # closures so a crash after record_commit cannot lose invalidations.
+        processor.on_push(shas, request.branch)
+        if not shas:
+            processor.advance_main(request.after)
+        closed = sorted(
+            {
+                row["fact_id"]
+                for row in store.all_fact_closures()
+                if (row["fact_id"], row["closing_commit"]) not in old_closures
+            }
+        )
+        return RepoPushResponse(
+            processed=[sha for sha in shas if sha not in recorded],
+            already_recorded=[sha for sha in shas if sha in recorded],
+            closed_fact_ids=closed,
+            main_head=request.after,
+        )
 
 
 @app.post("/v1/events", response_model=EventRecord)
@@ -187,3 +259,121 @@ def commit_round(round_id: str, request: CommitRound) -> RoundRecord:
         return _round(store.commit_round(round_id))
     except RoundConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/v1/facts/query", response_model=FactQueryResponse)
+def query_facts(request: FactQuery) -> FactQueryResponse:
+    try:
+        dag = store.get_dag()
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="commit DAG unavailable") from error
+
+    if request.base_commit not in dag.commits:
+        raise HTTPException(status_code=404, detail="unknown base_commit")
+
+    try:
+        raw_facts = store.facts_for_symbols(request.symbols, full=True)
+        for issue_ref in request.issue_refs:
+            raw_facts.extend(
+                fact
+                for fact in store.facts_for_issue(issue_ref)
+                if fact.get("kind") == "user_report"
+            )
+        raw_facts = list({fact["_id"]: fact for fact in raw_facts}.values())
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    fact_ids = [f["_id"] for f in raw_facts if "_id" in f or "id" in f]
+    closures_rows = store.closures_for_facts(fact_ids)
+    closures: dict[str, set[str]] = {fid: set() for fid in fact_ids}
+    for row in closures_rows:
+        closures[row["fact_id"]].add(row["closing_commit"])
+
+    cfg = FactExpiryConfig(
+        user_report_ttl_commits=store.settings.fact_user_report_ttl_commits,
+        user_report_half_life_days=store.settings.fact_user_report_half_life_days,
+        min_effective_confidence=store.settings.fact_min_effective_confidence,
+        user_report_initial_confidence=store.settings.fact_user_report_initial_confidence,
+    )
+    base_time = dag.commits[request.base_commit].committed_at
+    try:
+        valid_facts, dropped = filter_valid(
+            raw_facts,
+            closures,
+            dag,
+            request.base_commit,
+            ancestry_filter=request.ancestry_filter,
+            cfg=cfg,
+            base_time=base_time,
+        )
+    except (UnknownCommit, KeyError) as error:
+        raise HTTPException(status_code=404, detail="unknown base_commit") from error
+
+    if request.limit is not None and request.limit > 0:
+        valid_facts = valid_facts[: request.limit]
+
+    fact_views = [
+        FactView(
+            id=f.get("_id") or f.get("id"),
+            claim=f.get("claim") or "",
+            kind=f.get("kind") or "",
+            area=f.get("area") or "",
+            anchors=f.get("anchors") or [],
+            valid_from_commit=f["valid_from_commit"],
+            closing_commits=sorted(
+                closures.get(f.get("_id") or f.get("id"))
+                or f.get("closing_commits")
+                or []
+            ),
+            confidence=float(
+                f.get("confidence") if f.get("confidence") is not None else 1.0
+            ),
+            decay_half_life_days=float(
+                f.get("decay_half_life_days")
+                if f.get("decay_half_life_days") is not None
+                else 90.0
+            ),
+            last_confirmed_at=f.get("last_confirmed_at"),
+            taint=int(f.get("taint", 0)),
+            evidence_test=f.get("evidence_test"),
+            source_issue=f.get("source_issue"),
+            supersedes=f.get("supersedes"),
+        )
+        for f in valid_facts
+    ]
+
+    return FactQueryResponse(
+        base_commit=request.base_commit,
+        facts=fact_views,
+        dropped=dropped,
+    )
+
+
+@app.post("/v1/symbols/resolve", response_model=SymbolsResolveResponse)
+def resolve_symbols(request: SymbolsResolve) -> SymbolsResolveResponse:
+    if store.scip_indexer is None:
+        raise HTTPException(status_code=503, detail="scip_not_configured")
+    with repo_push_lock:
+        try:
+            index = store.scip_indexer.load(request.base_commit)
+        except (subprocess.SubprocessError, FileNotFoundError) as error:
+            raise HTTPException(status_code=503, detail="index_unavailable") from error
+        symbols = {symbol for name in request.names if (symbol := index.resolve(name))}
+        for location in request.locations:
+            symbol = index.innermost(location.file, location.line - 1, location.line)
+            if symbol:
+                symbols.add(symbol)
+    return SymbolsResolveResponse(symbols=sorted(symbols))
+
+
+@app.post("/v1/facts/close-by-issue", response_model=CloseByIssueResponse)
+def close_by_issue(request: CloseByIssueRequest) -> CloseByIssueResponse:
+    try:
+        closed_fact_ids = store.close_facts_by_issue(
+            issue_ref=request.issue_ref,
+            closing_commit=request.closing_commit,
+            reason=request.reason,
+        )
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    return CloseByIssueResponse(closed_fact_ids=closed_fact_ids)

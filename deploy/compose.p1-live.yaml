@@ -1,0 +1,16 @@
+services:
+  workflow:
+    environment:
+      TRIAGER_MODEL: qwen/qwen3.8-27b
+      REPRODUCER_MODEL: qwen/qwen3.8-27b
+      FIXER_MODEL: qwen/qwen3.8-27b
+      TESTER_MODEL: qwen/qwen3.8-27b
+      GROQ_TPD: "190000"
+      MODELS_FREE_HOSTS: https://api.groq.com
+
+  github:
+    environment:
+      GITHUB_REPO: Anchal-T/sqlparse
+      GITHUB_WORKFLOW_VERSION: v2
+      GITHUB_PROCESS_OWN_ISSUES: "false"
+    command: ["python", "-m", "services.github.app.api_only"]

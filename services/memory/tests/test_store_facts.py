@@ -126,7 +126,10 @@ def test_commit_round_persists_normalized_facts_with_proposal_verdicts():
     round_id = _new_round(store, base_commit)
     run_id, evidence_ids = _new_run_and_evidence(store, round_id)
 
-    accepted = _proposal(store, round_id, run_id, evidence_ids, payload=_payload())
+    issue_ref = f"example/fork#{uuid4().int}"
+    accepted = _proposal(
+        store, round_id, run_id, evidence_ids, payload=_payload(source_issue=issue_ref)
+    )
     empty_anchor = _proposal(
         store,
         round_id,
@@ -172,6 +175,11 @@ def test_commit_round_persists_normalized_facts_with_proposal_verdicts():
     assert fact["valid_from_commit"] == base_commit
     assert fact["created_in_round"] == round_id
     assert fact["proposal_id"] == accepted["_id"]
+    assert store.facts_for_issue(issue_ref)[0]["source_issue"] == issue_ref
+    assert store.facts_for_symbols([SYMBOL], full=True)[0].keys() >= {
+        "source_issue",
+        "claim",
+    }
     empty_fact_id = (
         "fact-" + hashlib.sha1(empty_anchor["_id"].encode()).hexdigest()[:12]
     )
@@ -341,3 +349,65 @@ def test_fact_insert_conflict_rolls_back_proposal_and_round_updates():
     proposal_row = store.get_proposal(proposal["_id"])
     assert round_row is not None and round_row["status"] == "syncing"
     assert proposal_row is not None and proposal_row["status"] == "pending"
+
+
+def test_run_fact_ids_survive_xtdb_roundtrip():
+    store = MemoryStore()
+    round_id = _new_round(store, "a" * 40)  # synthetic base
+    request = RunWrite(
+        idempotency_key=str(uuid4()),
+        agent_id="reproducer-test",
+        role="reproducer",
+        round_id=round_id,
+        workflow_id="example-workflow",
+        step="repro",
+        outcome="reproduced",
+        started_at=COMMIT_TIME,
+        fact_ids_injected=["fact-111111111111", "fact-222222222222"],
+        fact_ids_cited=["fact-222222222222"],
+    )
+    row = store.create_run(request)
+    assert store.create_run(request)["_id"] == row["_id"]
+    saved = store.get_run(row["_id"])
+    assert saved["fact_ids_injected"] == request.fact_ids_injected
+    assert saved["fact_ids_cited"] == request.fact_ids_cited
+
+
+@pytest.mark.anyio
+async def test_issue_scoped_query_returns_only_related_unanchored_reports(monkeypatch):
+    import httpx
+
+    from services.memory.app import main
+    from services.memory.app.dag import Commit
+
+    store = MemoryStore()
+    base = uuid4().hex + "0" * 8
+    store.record_commit(Commit(base, (), COMMIT_TIME, "main", None, ()))
+    store.scip_indexer = FixedIndexer(base)
+    round_id = _new_round(store, base)
+    run_id, evidence_ids = _new_run_and_evidence(store, round_id)
+    source = f"Example/fork#{uuid4().int}"
+    for ref in (source, f"example/unrelated#{uuid4().int}"):
+        _proposal(
+            store,
+            round_id,
+            run_id,
+            evidence_ids,
+            payload=_payload(anchor_names=[], source_issue=ref, confidence=0.8),
+        )
+    assert len(store.commit_round(round_id)["committed_proposals"]) == 2
+    monkeypatch.setattr(main, "store", store)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=main.app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/v1/facts/query",
+            json={"base_commit": base, "issue_refs": [source.lower()]},
+        )
+        empty = await client.post("/v1/facts/query", json={"base_commit": base})
+    assert response.status_code == 200
+    assert len(response.json()["facts"]) == 1
+    assert response.json()["facts"][0]["source_issue"] == source
+    assert response.json()["facts"][0]["anchors"] == []
+    assert response.json()["facts"][0]["taint"] == 3
+    assert empty.json()["facts"] == []

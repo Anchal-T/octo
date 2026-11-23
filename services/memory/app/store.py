@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg.types.string import StrDumperVarchar
 
-from .dag import Commit, UnknownCommit
+from .dag import Commit, Dag, UnknownCommit
 from .scip_indexer import ScipIndexer
 from .sync import resolve_edit_conflicts, validate_proposal
 
@@ -177,15 +177,59 @@ class MemoryStore:
         with self._connect() as conn:
             return self._fetch(conn, "commits", sha)
 
+    def close_facts_by_issue(
+        self,
+        issue_ref: str,
+        closing_commit: str,
+        reason: str,
+    ) -> list[str]:
+        facts = self.facts_for_issue(issue_ref)
+        if not facts:
+            return []
+        fact_ids = [
+            f.get("_id") or f.get("id") for f in facts if "_id" in f or "id" in f
+        ]
+        existing_closures = self.closures_for_facts(fact_ids)
+        already_closed = {
+            c["fact_id"]
+            for c in existing_closures
+            if c["closing_commit"] == closing_commit
+        }
+        for fid in fact_ids:
+            if fid not in already_closed:
+                self.record_fact_closure(
+                    fact_id=fid,
+                    closing_commit=closing_commit,
+                    branch="main",
+                    closed_by_agent="github_poller",
+                    reason=reason,
+                    committed_at=datetime.now(UTC),
+                )
+        return fact_ids
+
+    def facts_for_issue(self, issue_ref: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            query = (
+                "SELECT _id, valid_from_commit, anchors, evidence_test, "
+                "claim, kind, area, confidence, decay_half_life_days, "
+                "last_confirmed_at, taint, supersedes, source_issue "
+                "FROM facts FOR ALL VALID_TIME WHERE LOWER(source_issue) = LOWER(%s)"
+            )
+            return list(conn.execute(query, (issue_ref,)).fetchall())
+
+    def get_dag(self) -> Dag:
+        return Dag.from_commits(self.get_commits())
+
     def get_commits(self) -> list[Commit]:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT _id, parents, committed_at, branch, author, changed_symbols, "
-                "merge_side_symbols FROM commits"
+                "merge_side_symbols, symbols_indexed FROM commits"
             ).fetchall()
         return [
             Commit(
                 sha=row["_id"],
+                symbols_indexed=row.get("symbols_indexed") is not False,
                 parents=tuple(row["parents"] or ()),
                 committed_at=row["committed_at"],
                 branch=row["branch"],
@@ -199,7 +243,9 @@ class MemoryStore:
             for row in rows
         ]
 
-    def facts_for_symbols(self, symbols: list[str]) -> list[dict[str, Any]]:
+    def facts_for_symbols(
+        self, symbols: list[str], *, full: bool = False
+    ) -> list[dict[str, Any]]:
         if any("\x00" in symbol for symbol in symbols):
             raise ValueError("symbol names must not contain NUL characters")
         symbols = list(dict.fromkeys(symbols))
@@ -209,13 +255,23 @@ class MemoryStore:
         with self._connect() as conn:
             for chunk in _chunks(symbols, _MAX_QUERY_PARAMS):
                 placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in chunk)
+                cols = (
+                    "SELECT _id, valid_from_commit, anchors, evidence_test, "
+                    "claim, kind, area, confidence, decay_half_life_days, "
+                    "last_confirmed_at, taint, supersedes, source_issue "
+                    if full
+                    else "SELECT _id, valid_from_commit, anchors, evidence_test "
+                )
                 query = sql.SQL(
-                    "SELECT _id, valid_from_commit, anchors, evidence_test "
-                    "FROM facts FOR ALL VALID_TIME "
+                    cols + "FROM facts FOR ALL VALID_TIME "
                     "WHERE EXISTS (SELECT 1 FROM UNNEST(anchors) AS a(anc) "
                     "WHERE (a.anc).symbol IN ({}))"
                 ).format(placeholders)
                 for row in conn.execute(query, chunk).fetchall():
+                    if full:
+                        row = {
+                            k: v for k, v in row.items() if not k.startswith("_column_")
+                        }
                     rows_by_id.setdefault(row["_id"], row)
         return list(rows_by_id.values())
 
@@ -327,6 +383,59 @@ class MemoryStore:
             )
         return record_id
 
+    def record_commit_metadata(self, commits: list[Commit]) -> None:
+        """Batch only missing ancestry rows; never overwrite computed symbol diffs."""
+        existing = {commit.sha: commit for commit in self.get_commits()}
+        Dag.from_commits(
+            [*existing.values(), *[c for c in commits if c.sha not in existing]]
+        )
+        for commit in commits:
+            old = existing.get(commit.sha)
+            if old and any(
+                getattr(old, field) != getattr(commit, field)
+                for field in ("parents", "committed_at", "branch", "author")
+            ):
+                raise IdempotencyConflict(
+                    f"commit {commit.sha} was recorded with different metadata"
+                )
+        new = [commit for commit in commits if commit.sha not in existing]
+        if any(commit.symbols_indexed for commit in new):
+            raise ValueError("metadata records must be explicitly unindexed")
+        with self._connect() as conn, conn.transaction():
+            for offset in range(0, len(new), 500):
+                chunk = new[offset : offset + 500]
+                placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in chunk)
+                conn.execute(
+                    sql.SQL(
+                        "ASSERT NOT EXISTS (SELECT 1 FROM commits WHERE _id IN ({})), 'commit already exists'"
+                    ).format(placeholders),
+                    tuple(c.sha for c in chunk),
+                )
+                rows = sql.SQL(", ").join(
+                    sql.SQL("(%s,%s,%s,%s,%s,%s,%s,%s,%s)") for _ in chunk
+                )
+                values = []
+                for c in chunk:
+                    values.extend(
+                        (
+                            c.sha,
+                            c.committed_at,
+                            Jsonb(list(c.parents)),
+                            c.committed_at,
+                            c.branch,
+                            c.author,
+                            Jsonb([]),
+                            Jsonb([]),
+                            False,
+                        )
+                    )
+                conn.execute(
+                    sql.SQL(
+                        "INSERT INTO commits (_id,_valid_from,parents,committed_at,branch,author,changed_symbols,merge_side_symbols,symbols_indexed) VALUES {}"
+                    ).format(rows),
+                    tuple(values),
+                )
+
     def record_commit(self, commit: Commit) -> dict[str, Any]:
         record = {
             "_id": commit.sha,
@@ -336,6 +445,7 @@ class MemoryStore:
             "branch": commit.branch,
             "author": commit.author,
             "changed_symbols": list(commit.changed_symbols),
+            "symbols_indexed": commit.symbols_indexed,
             "merge_side_symbols": [
                 {"parent": parent, "symbols": list(symbols)}
                 for parent, symbols in commit.merge_side_symbols
@@ -345,6 +455,38 @@ class MemoryStore:
             for parent in commit.parents:
                 if self._fetch(conn, "commits", parent) is None:
                     raise UnknownCommit(parent)
+            existing = self._fetch(conn, "commits", commit.sha)
+            if (
+                existing is not None
+                and existing.get("symbols_indexed") is False
+                and commit.symbols_indexed
+            ):
+                immutable = ("parents", "committed_at", "branch", "author")
+                if any(existing.get(field) != record[field] for field in immutable):
+                    raise IdempotencyConflict(
+                        f"commit {commit.sha} was recorded with different metadata"
+                    )
+                with conn.transaction():
+                    conn.execute(
+                        "ASSERT EXISTS (SELECT 1 FROM commits WHERE _id = %s AND symbols_indexed = FALSE), 'commit already indexed'",
+                        (commit.sha,),
+                    )
+                    conn.execute(
+                        "INSERT INTO commits (_id,_valid_from,parents,committed_at,branch,author,changed_symbols,merge_side_symbols,symbols_indexed) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            commit.sha,
+                            commit.committed_at,
+                            Jsonb(list(commit.parents)),
+                            commit.committed_at,
+                            commit.branch,
+                            commit.author,
+                            Jsonb(record["changed_symbols"]),
+                            Jsonb(record["merge_side_symbols"]),
+                            True,
+                        ),
+                    )
+                return self._fetch(conn, "commits", commit.sha)
             try:
                 with conn.transaction():
                     conn.execute(
@@ -360,8 +502,8 @@ class MemoryStore:
                         )
                     conn.execute(
                         "INSERT INTO commits (_id, _valid_from, parents, committed_at, "
-                        "branch, author, changed_symbols, merge_side_symbols) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        "branch, author, changed_symbols, merge_side_symbols, symbols_indexed) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (
                             record["_id"],
                             record["_valid_from"],
@@ -371,6 +513,7 @@ class MemoryStore:
                             record["author"],
                             Jsonb(record["changed_symbols"]),
                             Jsonb(record["merge_side_symbols"]),
+                            record["symbols_indexed"],
                         ),
                     )
             except psycopg.Error as error:
@@ -389,7 +532,11 @@ class MemoryStore:
                     "changed_symbols",
                     "merge_side_symbols",
                 )
-                if all(existing.get(field) == record[field] for field in fields):
+                if (
+                    all(existing.get(field) == record[field] for field in fields)
+                    and (existing.get("symbols_indexed") is not False)
+                    == commit.symbols_indexed
+                ):
                     return existing
                 raise IdempotencyConflict(
                     f"commit {commit.sha} was recorded with different data"
@@ -432,6 +579,8 @@ class MemoryStore:
             "cost_usd": request.cost_usd,
             "outcome": request.outcome,
             "event_ids": Jsonb(request.event_ids),
+            "fact_ids_injected": Jsonb(request.fact_ids_injected),
+            "fact_ids_cited": Jsonb(request.fact_ids_cited),
             "started_at": request.started_at,
             "ended_at": request.ended_at,
         }
@@ -605,8 +754,8 @@ class MemoryStore:
                                 "_id, _valid_from, claim, kind, area, anchors, "
                                 "provenance_event_ids, confidence, decay_half_life_days, "
                                 "last_confirmed_at, taint, valid_from_commit, supersedes, "
-                                "evidence_test, created_in_round, proposal_id"
-                                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                                "evidence_test, created_in_round, proposal_id, source_issue"
+                                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                                 (
                                     fact["_id"],
                                     fact["_valid_from"],
@@ -624,6 +773,7 @@ class MemoryStore:
                                     fact["evidence_test"],
                                     fact["created_in_round"],
                                     fact["proposal_id"],
+                                    fact["source_issue"],
                                 ),
                             )
                     conn.execute(
