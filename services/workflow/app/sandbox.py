@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Self
 
-from agentteam_common import is_safe_relative_path
+from agentteam_common import is_safe_relative_path, is_test_path
 
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _DIFF_FILE_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
@@ -34,6 +35,66 @@ _GIT_EXCLUDE_PATTERNS = (
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
+_REPRO_REPORT = "AGENTTEAM_REPRO_REPORT="
+_REPRO_PROBE = """
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+class ReproProbe:
+    def __init__(self):
+        self.collected = 0
+        self.errors = False
+        self.failure = None
+
+    def pytest_collection_finish(self, session):
+        self.collected = len(session.items)
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_makereport(self, item, call):
+        result = yield
+        report = result.get_result()
+        if not report.failed:
+            return
+        if report.when != "call" or call.excinfo is None:
+            self.errors = True
+            return
+        exception = call.excinfo.value
+        origin = None
+        tb = exception.__traceback__
+        if tb is not None:
+            while tb.tb_next is not None:
+                tb = tb.tb_next
+            path = Path(tb.tb_frame.f_code.co_filename).resolve()
+            if path.is_relative_to(Path.cwd()):
+                origin = path.relative_to(Path.cwd()).as_posix()
+        self.failure = {
+            "type": type(exception).__name__,
+            "assertion": isinstance(exception, AssertionError),
+            "origin": origin,
+        }
+
+probe = ReproProbe()
+status = pytest.main(["-q", "--tb=short", "--", sys.argv[1]], plugins=[probe])
+failure = probe.failure if probe.collected == 1 and not probe.errors else None
+print("AGENTTEAM_REPRO_REPORT=" + json.dumps(failure))
+sys.exit(status)
+"""
+
+_WRITE_FILE = """
+import sys
+from pathlib import Path
+
+path = Path.cwd() / sys.argv[1]
+if path.resolve() != path or path.is_symlink():
+    sys.exit("write_file refuses symbolic links")
+path.parent.mkdir(parents=True, exist_ok=True)
+with path.open(sys.argv[2]) as file:
+    file.write(sys.stdin.buffer.read())
+"""
+
 
 class SandboxLost(RuntimeError):
     pass
@@ -54,6 +115,13 @@ class TestResult:
     exit_code: int
     output_trimmed: str
     node_ids: tuple[str, ...] = ()
+    repro_verdict: str | None = None
+    failure_type: str | None = None
+    failure_origin: str | None = None
+
+    @property
+    def reproduced(self) -> bool:
+        return self.repro_verdict in {"assertion_failure", "source_error"}
 
 
 class Sandbox(Protocol):
@@ -61,6 +129,9 @@ class Sandbox(Protocol):
 
     def start(self) -> None: ...
     def exec(self, cmd: str, timeout_s: float = 60.0) -> Observation: ...
+    def write_file(
+        self, path: str, content: str, *, append: bool, timeout_s: float
+    ) -> Observation: ...
     def git_diff(self, paths: Sequence[str] | None = None) -> str: ...
     def changed_files(self) -> tuple[str, ...]: ...
     def apply(self, diff: str) -> None: ...
@@ -75,6 +146,9 @@ class Sandbox(Protocol):
         self,
         node_ids: Sequence[str] | None = None,
         timeout_s: float = 60.0,
+        *,
+        verify_repro: bool = False,
+        source_package: str | None = None,
     ) -> TestResult: ...
     def read_files(self, paths: Sequence[str]) -> dict[str, str | None]: ...
     def rebuild(self, last_diff: str = "") -> None: ...
@@ -87,6 +161,13 @@ def trim_output(text: str, max_chars: int = 2000) -> str:
     half = max_chars // 2
     omitted = len(text) - (2 * half)
     return f"{text[:half]}\n[... trimmed {omitted} characters ...]\n{text[-half:]}"
+
+
+def _timeout_output(error: subprocess.TimeoutExpired) -> str:
+    return "".join(
+        part.decode("utf-8", errors="replace") if isinstance(part, bytes) else part or ""
+        for part in (error.stdout, error.stderr)
+    )
 
 
 def validate_commit_sha(sha: str) -> str:
@@ -176,10 +257,28 @@ class _BaseGitSandbox:
         self.close()
 
     def exec(self, cmd: str, timeout_s: float = 60.0) -> Observation:
+        return self._observe(["bash", "-lc", cmd], timeout_s=timeout_s)
+
+    def write_file(
+        self, path: str, content: str, *, append: bool, timeout_s: float
+    ) -> Observation:
+        if not is_safe_relative_path(path):
+            raise ValueError("write_file requires a safe relative path")
+        return self._observe(
+            [self._python_bin, "-c", _WRITE_FILE, path, "ab" if append else "wb"],
+            input_text=content,
+            timeout_s=timeout_s,
+        )
+
+    def _observe(
+        self, argv: Sequence[str], *, input_text: str | None = None, timeout_s: float
+    ) -> Observation:
         try:
-            proc = self._run_in_workspace(["bash", "-lc", cmd], timeout_s=timeout_s)
+            proc = self._run_in_workspace(
+                argv, input_text=input_text, timeout_s=timeout_s
+            )
         except subprocess.TimeoutExpired as timed_out:
-            partial = (timed_out.stdout or "") + (timed_out.stderr or "")
+            partial = _timeout_output(timed_out)
             return Observation(
                 stdout_trimmed=trim_output(
                     f"{partial}\n[command timed out after {timeout_s}s]".strip(),
@@ -306,15 +405,23 @@ class _BaseGitSandbox:
         self,
         node_ids: Sequence[str] | None = None,
         timeout_s: float = 60.0,
+        *,
+        verify_repro: bool = False,
+        source_package: str | None = None,
     ) -> TestResult:
         validated = tuple(validate_test_node_id(node) for node in (node_ids or ()))
-        cmd = [self._python_bin, "-m", "pytest", "-q"]
-        if validated:
-            cmd.extend(["--", *validated])
+        if verify_repro:
+            if len(validated) != 1:
+                raise ValueError("reproduction verification requires one pytest node")
+            cmd = [self._python_bin, "-c", _REPRO_PROBE, validated[0]]
+        else:
+            cmd = [self._python_bin, "-m", "pytest", "-q"]
+            if validated:
+                cmd.extend(["--", *validated])
         try:
             proc = self._run_in_workspace(cmd, timeout_s=timeout_s)
         except subprocess.TimeoutExpired as timed_out:
-            partial = (timed_out.stdout or "") + (timed_out.stderr or "")
+            partial = _timeout_output(timed_out)
             return TestResult(
                 passed=False,
                 exit_code=124,
@@ -323,8 +430,14 @@ class _BaseGitSandbox:
                     self.max_output_chars,
                 ),
                 node_ids=validated,
+                repro_verdict="timeout" if verify_repro else None,
             )
         combined = proc.stdout
+        verdict = failure_type = failure_origin = None
+        if verify_repro:
+            combined, verdict, failure_type, failure_origin = self._classify_repro(
+                proc, source_package
+            )
         if proc.stderr:
             combined = f"{combined}\n{proc.stderr}" if combined else proc.stderr
         return TestResult(
@@ -332,7 +445,50 @@ class _BaseGitSandbox:
             exit_code=proc.returncode,
             output_trimmed=trim_output(combined, self.max_output_chars),
             node_ids=validated,
+            repro_verdict=verdict,
+            failure_type=failure_type,
+            failure_origin=failure_origin,
         )
+
+    def _classify_repro(
+        self, proc: subprocess.CompletedProcess[str], source_package: str | None
+    ) -> tuple[str, str, str | None, str | None]:
+        stdout, _, report = proc.stdout.rstrip("\n").rpartition("\n")
+        failure = None
+        if report.startswith(_REPRO_REPORT):
+            try:
+                failure = json.loads(report[len(_REPRO_REPORT) :])
+            except (ValueError, RecursionError):
+                pass
+        else:
+            stdout = proc.stdout
+        if proc.returncode == 0:
+            return stdout, "passed", None, None
+        if proc.returncode != 1 or not isinstance(failure, dict):
+            return stdout, "pytest_error", None, None
+        kind, origin, assertion = (failure.get(key) for key in ("type", "origin", "assertion"))
+        if (
+            not isinstance(kind, str)
+            or (origin is not None and not isinstance(origin, str))
+            or not isinstance(assertion, bool)
+        ):
+            return stdout, "pytest_error", None, None
+        if assertion:
+            verdict = "assertion_failure"
+        elif (
+            origin
+            and origin.endswith(".py")
+            and is_safe_relative_path(origin)
+            and not is_test_path(origin)
+            and (source_package is None or origin.startswith(f"{source_package}/"))
+            and self._run_in_workspace(
+                ["git", "--literal-pathspecs", "ls-tree", "--name-only", self.base_commit, "--", origin]
+            ).stdout.splitlines() == [origin]
+        ):
+            verdict = "source_error"
+        else:
+            verdict = "test_error"
+        return stdout, verdict, kind, origin
 
     def read_files(self, paths: Sequence[str]) -> dict[str, str | None]:
         results: dict[str, str | None] = {}

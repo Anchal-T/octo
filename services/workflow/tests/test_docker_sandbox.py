@@ -60,6 +60,55 @@ def test_trim_output_preserves_head_and_tail_when_over_limit():
     assert len(trimmed) <= 160
 
 
+@pytest.mark.parametrize(
+    ("test_code", "source_package", "verdict", "reproduced"),
+    [
+        (
+            "def test_repro():\n    divide(1, 0)\n",
+            "pkg",
+            "source_error",
+            True,
+        ),
+        (
+            "def test_repro():\n    divide(1, 0)\n",
+            "sqlparse",
+            "test_error",
+            False,
+        ),
+        (
+            (
+                "@pytest.fixture\ndef setup():\n    assert False\n\n"
+                "def test_repro(setup):\n    pass\n"
+            ),
+            "pkg",
+            "pytest_error",
+            False,
+        ),
+        (
+            (
+                "@pytest.fixture\ndef cleanup():\n    yield\n    assert False\n\n"
+                "def test_repro(cleanup):\n    assert False\n"
+            ),
+            "pkg",
+            "pytest_error",
+            False,
+        ),
+    ],
+)
+def test_repro_verdict_requires_a_test_call_failure(tmp_path, test_code, source_package, verdict, reproduced):
+    repo = tmp_path / "repo"
+    sha = _init_sample_repo(repo)
+    with LocalGitSandbox(repo_path=repo, base_commit=sha, work_root=tmp_path) as sandbox:
+        contents = "import pytest\nfrom pkg.calc import divide\n\n" + test_code
+        write = sandbox.write_file("tests/test_repro.py", contents, append=False, timeout_s=5)
+        assert write.exit_code == 0
+        result = sandbox.pytest(
+            ["tests/test_repro.py::test_repro"], verify_repro=True, source_package=source_package,
+        )
+        assert result.repro_verdict == verdict
+        assert result.reproduced is reproduced
+
+
 def test_docker_sandbox_runs_isolated_container_handles_timeout_and_rebuilds(tmp_path):
     repo = tmp_path / "repo"
     sha = _init_sample_repo(repo)

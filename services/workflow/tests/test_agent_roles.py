@@ -8,6 +8,11 @@ from typing import Any
 import pytest
 from agentteam_contracts import ModelCallRequest, ModelOutcome, TriageResult
 
+from services.workflow.app.repo_actions import (
+    ActionParseError,
+    WriteFileAction,
+    parse_raw_action,
+)
 from services.workflow.app.roles import (
     FIXER_SYSTEM_PROMPT,
     REPRODUCER_SYSTEM_PROMPT,
@@ -77,9 +82,11 @@ class FakeStepJournal:
         replies: list[str | dict[str, Any]],
         *,
         recorded: dict[str, Any] | None = None,
+        retry_step: str | None = None,
     ) -> None:
         self.replies = list(replies)
         self.recorded: dict[str, Any] = dict(recorded or {})
+        self.retry_step = retry_step
         self.model_calls = 0
         self.requests: list[ModelCallRequest] = []
         self.events: list[dict[str, Any]] = []
@@ -126,6 +133,8 @@ class FakeStepJournal:
     async def run_step(self, name: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
         if name in self.recorded:
             return self.recorded[name]
+        if name == self.retry_step:
+            fn(*args, **kwargs)
         result = fn(*args, **kwargs)
         if hasattr(result, "__await__"):
             result = await result
@@ -175,7 +184,7 @@ async def test_repo_agent_retries_invalid_tool_call_same_turn(
     journal = FakeStepJournal(
         [failed] * max(1, invalid_calls)
         + [
-            json.dumps({"action": "bash", "command": "printf recovered"}),
+            _raw_reply("bash", "printf recovered"),
         ]
     )
     args = {
@@ -223,8 +232,8 @@ async def test_repo_agent_retries_invalid_tool_call_same_turn(
         assert retry_message["content"].startswith(
             "Your last action was invalid: tool call validation failed: missing command. "
         )
-        assert '{"action": "bash", "command": "cd /workspace && ls"}' in retry_message["content"]
-        assert '"anchor_names": ["a.b.C"]' in retry_message["content"]
+        assert '{"action": "bash"}' in retry_message["content"]
+        assert ('"anchor_names": ["a.b.C"]' in retry_message["content"]) == (role == "reproducer")
         assert "BAD_GENERATION" not in json.dumps(request.messages)
     if 0 < invalid_calls < 3:
         assert any(e["kind"] == "model_output" for e in journal.events)
@@ -254,12 +263,10 @@ async def test_fixer_edit_nudge_at_turn_five(tmp_path, edit_early):
             work_root=tmp_path / "work",
         )
     )
-    inspect = json.dumps({"action": "bash", "command": "printf inspecting"})
-    edit = json.dumps(
-        {"action": "bash", "command": "echo '# harness nudge test' >> pkg/calc.py"}
-    )
+    inspect = _raw_reply("bash", "printf inspecting")
+    edit = _raw_reply("write_file", "# harness nudge test\n", path="pkg/calc.py", append=True)
     replies = [edit if edit_early and index == 0 else inspect for index in range(8)]
-    journal = FakeStepJournal(replies)
+    journal = FakeStepJournal(replies, retry_step="fix:1:tool:0" if edit_early else None)
     result = await run_fixer_step(
         journal=journal,
         sessions=manager,
@@ -291,6 +298,7 @@ async def test_fixer_edit_nudge_at_turn_five(tmp_path, edit_early):
     ]
     if edit_early:
         assert nudged == []
+        assert journal.recorded["fix:1:tool:0"]["git_diff"].count("# harness nudge test") == 1
     else:
         assert FIXER_EDIT_NUDGE_TURN == 5
         assert nudged == [5]
@@ -469,7 +477,7 @@ def test_tool_result_is_capped_to_last_8_kb_with_truncation_note():
 
 
 @pytest.mark.anyio
-async def test_reproducer_turn_two_request_has_groq_compatible_tool_history(tmp_path):
+async def test_reproducer_replays_legacy_journal_with_groq_compatible_tool_history(tmp_path):
     repo = tmp_path / "repo"
     sha = _init_buggy_repo(repo)
     manager = SandboxSessionManager(
@@ -499,7 +507,7 @@ async def test_reproducer_turn_two_request_has_groq_compatible_tool_history(tmp_
         }
         for turn in range(3)
     ]
-    journal = FakeStepJournal(replies)
+    journal = FakeStepJournal(replies, recorded={"repro-tracked-files": "pkg/calc.py"})
 
     result = await run_reproducer_step(
         journal=journal,
@@ -517,6 +525,7 @@ async def test_reproducer_turn_two_request_has_groq_compatible_tool_history(tmp_
     )
 
     assert result.succeeded is False
+    assert all(e["kind"] != "repro_stage" for e in journal.events)
     request = journal.requests[2]
     assert request.step == "repro:2"
     assert [message["role"] for message in request.messages] == [
@@ -563,73 +572,30 @@ async def test_reproducer_rejects_passing_or_broken_tests_and_accepts_failing_re
             work_root=tmp_path / "work",
         )
     )
+    path = "tests/test_repro.py"
+    node = f"{path}::test_zero_divisor_returns_none"
     journal = FakeStepJournal(
         [
-            # Turn 0: writes a passing test AND touches pkg/calc.py (should revert pkg/calc.py)
-            {
-                "text": "I will inspect and create a minimal test.",
-                "tool_calls": [
-                    {
-                        "id": "call-repro-0",
-                        "type": "function",
-                        "function": {
-                            "name": "bash",
-                            "arguments": json.dumps(
-                                {
-                                    "command": (
-                                        "echo 'def test_ok(): assert 1 == 1' > tests/test_repro.py && "
-                                        "echo '# bad' >> pkg/calc.py"
-                                    )
-                                }
-                            ),
-                        },
-                    }
-                ],
-            },
-            # Turn 1: tries to submit passing test -> rejected (exit 0 != 1)
-            json.dumps(
-                {
-                    "action": "submit",
-                    "test_node_id": "tests/test_repro.py::test_ok",
-                    "summary": "Passing test",
-                }
+            _raw_reply(
+                "bash",
+                "echo 'def test_ok(): assert 1 == 1' > tests/test_repro.py && "
+                "echo '# bad' >> pkg/calc.py",
             ),
-            # Turn 2: writes syntax error test -> submit rejected (exit 2 != 1)
-            json.dumps(
-                {
-                    "action": "bash",
-                    "command": "echo 'def test_broken(:' > tests/test_repro.py",
-                }
+            _raw_reply("submit", test_node_id=f"{path}::test_ok", summary="Passing test"),
+            _raw_reply("write_file", "def test_broken(:\n", path=path),
+            _raw_reply("submit", test_node_id=f"{path}::test_broken", summary="Syntax error"),
+            _raw_reply(
+                "write_file",
+                "from pkg.calc import safe_divide\n\n"
+                "def test_zero_divisor_returns_none():\n"
+                "    assert safe_divide(5, 0) is None\n",
+                path=path,
             ),
-            json.dumps(
-                {
-                    "action": "submit",
-                    "test_node_id": "tests/test_repro.py::test_broken",
-                    "summary": "Syntax error test",
-                }
-            ),
-            # Turn 4: writes genuine failing reproduction test
-            json.dumps(
-                {
-                    "action": "bash",
-                    "command": (
-                        "cat <<'EOF' > tests/test_repro.py\n"
-                        "from pkg.calc import safe_divide\n\n"
-                        "def test_zero_divisor_returns_none():\n"
-                        "    assert safe_divide(5, 0) is None\n"
-                        "EOF"
-                    ),
-                }
-            ),
-            # Turn 5: submits failing test -> accepted!
-            json.dumps(
-                {
-                    "action": "submit",
-                    "test_node_id": "tests/test_repro.py::test_zero_divisor_returns_none",
-                    "fact_claim": "Zero divisor reaches division without a guard",
-                    "anchor_names": ["pkg.calc.safe_divide"],
-                    "summary": "safe_divide raises ZeroDivisionError when b is 0",
-                }
+            _raw_reply(
+                "submit", test_node_id=node,
+                fact_claim="Zero divisor reaches division without a guard",
+                anchor_names=["pkg.calc.safe_divide"],
+                summary="safe_divide raises ZeroDivisionError when b is 0",
             ),
         ]
     )
@@ -660,15 +626,12 @@ async def test_reproducer_rejects_passing_or_broken_tests_and_accepts_failing_re
     first_request, second_request = journal.requests[:2]
     assert first_request.tool_choice is None and second_request.tool_choice is None
     assert first_request.tools is None and second_request.tools is None
-    assistant_call = second_request.messages[-2]
-    assert assistant_call["role"] == "assistant"
-    assert assistant_call["content"] == "I will inspect and create a minimal test."
-    assert assistant_call["tool_calls"][0]["id"] == "call-repro-0"
-    assert second_request.messages[-1]["role"] == "tool"
-    assert second_request.messages[-1]["tool_call_id"] == "call-repro-0"
-    assert (
-        estimate_messages_tokens(second_request.messages) <= 5500
-    )
+    assert any("Reverted disallowed edits: pkg/calc.py" in msg["content"]
+               for msg in second_request.messages)
+    verdicts = [event["payload"]["verdict"] for event in journal.events
+                if event["kind"] == "observation" and event["payload"]["tool"] == "pytest"]
+    assert verdicts == ["passed", "pytest_error", "source_error"]
+    assert estimate_messages_tokens(second_request.messages) <= 5500
 
 
 @pytest.mark.anyio
@@ -708,22 +671,7 @@ async def test_fixer_rebuilds_lost_sandbox_on_replay_without_repeating_model_cal
         "EOF\n"
         "echo '# tampered' >> tests/test_repro.py"
     )
-    partial_journal = FakeStepJournal(
-        [
-            {
-                "tool_calls": [
-                    {
-                        "id": "call-fix-0",
-                        "type": "function",
-                        "function": {
-                            "name": "bash",
-                            "arguments": json.dumps({"command": turn0_cmd}),
-                        },
-                    }
-                ]
-            }
-        ]
-    )
+    partial_journal = FakeStepJournal([_raw_reply("bash", turn0_cmd)])
     # Run with turn_cap=1 to capture recorded journal entries after Turn 0, then close W1's sandboxes.
     partial = await run_fixer_step(
         journal=partial_journal,
@@ -785,9 +733,9 @@ async def test_fixer_rebuilds_lost_sandbox_on_replay_without_repeating_model_cal
     assert first_request.role == second_request.role == "fixer"
     assert first_request.tool_choice is None and second_request.tool_choice is None
     assert first_request.tools is None and second_request.tools is None
-    assert second_request.messages[-2]["tool_calls"][0]["id"] == "call-fix-0"
-    assert second_request.messages[-1]["role"] == "tool"
-    assert second_request.messages[-1]["tool_call_id"] == "call-fix-0"
+    assert second_request.messages[-2]["content"].startswith('{"action": "bash"}\n')
+    assert second_request.messages[-1]["role"] == "user"
+    assert "Reverted disallowed edits: tests/test_repro.py" in second_request.messages[-1]["content"]
     assert estimate_messages_tokens(second_request.messages) <= 5500
     assert resumed.files == ["pkg/calc.py"]
     assert "tests/test_repro.py" not in resumed.patch
@@ -993,3 +941,163 @@ def test_reproducer_optional_fact_fields_survive_submission_parsing():
     assert schema["properties"]["anchor_names"]["items"] == {"type": "string"}
     assert "fact_claim" not in schema["required"]
     assert "anchor_names" not in schema["required"]
+
+
+def _raw_reply(action, body=None, **metadata):
+    header = json.dumps({"action": action, **metadata})
+    return header if body is None else f"{header}\n{body}"
+
+
+@pytest.mark.parametrize("reproducer", [False, True])
+def test_repository_action_parser_preserves_raw_bodies(reproducer):
+    body = '  value = "a\\\\b"\n\nEOF\n```\n'
+    assert parse_raw_action(_raw_reply("bash", body), reproducer=reproducer) == BashAction(body)
+    for contents in (body, "  \n", ""):
+        assert parse_raw_action(
+            _raw_reply("write_file", contents, path="tests/test_repro.py"),
+            reproducer=reproducer,
+        ) == WriteFileAction("tests/test_repro.py", contents)
+
+
+@pytest.mark.parametrize(
+    ("reply", "line", "column", "reason"),
+    [
+        ('{"action":}', 1, 11, "Expecting value"),
+        ('{"action": "bash"}', 2, 1, "requires a raw body"),
+        ('{"action": "write_file", "path": "../test.py"}\nx', 1, 26, "safe relative path"),
+        ('{"action": "submit", "summary": "done"}\n\ntext', 3, 1, "only the JSON header"),
+    ],
+)
+def test_repository_action_parse_errors_report_location_and_reason(reply, line, column, reason):
+    error = parse_raw_action(reply, reproducer=False)
+    assert isinstance(error, ActionParseError)
+    assert (error.line, error.column) == (line, column)
+    assert reason in error.reason
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("turn_cap", "path"), [(5, "tests/conftest.py"), (10, "tests/helper.py")])
+async def test_reproducer_stops_at_write_deadline_when_no_test_is_written(tmp_path, turn_cap, path):
+    repo = tmp_path / "repo"
+    sha = _init_buggy_repo(repo)
+    journal = FakeStepJournal([
+        _raw_reply("bash", "rm tests/test_calc.py"),
+        *[_raw_reply("bash", "git ls-files")] * 2,
+        _raw_reply("write_file", "def helper():\n    return 1\n", path=path),
+        _raw_reply("bash", "git ls-files"),
+    ])
+    result = await run_reproducer_step(
+        journal=journal,
+        sessions=SandboxSessionManager(
+            lambda commit: LocalGitSandbox(repo_path=repo, base_commit=commit, work_root=tmp_path)
+        ),
+        session_key="deadline",
+        key_prefix="deadline",
+        run_id="deadline",
+        repo="Anchal-T/demo",
+        base_commit=sha,
+        title="Example issue",
+        body="Example issue body",
+        triage=None,
+        turn_cap=turn_cap,
+        prompt_token_cap=5500,
+    )
+    assert result.failure_reason == "repro_not_established"
+    assert journal.model_calls == 5
+    assert [
+        (e["payload"]["stage"], e["payload"]["turn"]) for e in journal.events
+        if e["kind"] == "repro_stage"
+    ] == [("explore", 0), ("write", 3), ("deadline", 5)]
+
+
+@pytest.fixture
+def sqlparse_repro_replies():
+    saved = json.loads(
+        (Path(__file__).parent / "fixtures/p1_reproducer_replies.json").read_text()
+    )
+    repo_path = Path(__file__).resolve().parents[3] / "repos/sqlparse"
+    base = saved["base_commit"]
+    if not (repo_path / ".git").exists() or subprocess.run(
+        ["git", "-C", str(repo_path), "cat-file", "-e", f"{base}^{{commit}}"],
+        capture_output=True,
+        check=False,
+    ).returncode:
+        pytest.skip("requires the local sqlparse checkout at the recorded P1 base")
+    original_tokenize = subprocess.check_output(
+        ["git", "-C", str(repo_path), "show", f"{base}:tests/test_tokenize.py"], text=True
+    )
+    return repo_path, saved, original_tokenize
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("issue", [8, 9])
+async def test_p1_sqlparse_reproducer_replays_saved_replies(tmp_path, issue, sqlparse_repro_replies):
+    repo_path, saved, original_tokenize = sqlparse_repro_replies
+    base = saved["base_commit"]
+    case = saved[f"issue_{issue}"]
+    read_reply = case["read_reply"].split('\n\n')[-1]
+    inspect = _raw_reply("bash", json.loads(read_reply)["command"].replace("cd /workspace && ", ""))
+    if issue == 8:
+        path = "tests/test_tokenize.py"
+        node = f"{path}::test_escaped_backslash_in_string_literal"
+        old = case["old_test"]
+        repaired = old.replace("[t.value for t in tokens]", "[value for _, value in tokens]")
+        replies = [
+            case["malformed_reply"],
+            inspect,
+            inspect,
+            inspect,  # the fourth exploration command is refused
+            _raw_reply("write_file", old, path=path, append=True),
+            _raw_reply("run_test", test_node_id=node),
+            _raw_reply("submit", test_node_id=node, summary="Original test"),
+            _raw_reply("write_file", original_tokenize + repaired, path=path),
+            _raw_reply("run_test", test_node_id=node),
+            _raw_reply("submit", test_node_id=node, summary="Check both string tokens"),
+        ]
+    else:
+        submit_reply = case["submit_reply"].split('\n\n')[-1]
+        submit = json.loads(submit_reply)
+        node = submit["test_node_id"]
+        path = node.split("::", 1)[0]
+        replies = [
+            inspect,
+            _raw_reply("write_file", case["test"], path=path, append=True),
+            _raw_reply("run_test", test_node_id=node),
+            _raw_reply("submit", test_node_id=node, summary=submit["summary"]),
+        ]
+    journal = FakeStepJournal(replies)
+    result = await run_reproducer_step(
+        journal=journal,
+        sessions=SandboxSessionManager(
+            lambda commit: LocalGitSandbox(repo_path=repo_path, base_commit=commit, work_root=tmp_path)
+        ),
+        session_key=f"p1-{issue}",
+        key_prefix=f"p1-{issue}",
+        run_id=f"p1-{issue}",
+        repo="Anchal-T/sqlparse",
+        base_commit=base,
+        title=f"Saved reproduction for sqlparse issue {issue}",
+        body="Offline scripted replies from the P1 run.",
+        triage=None,
+        turn_cap=10,
+        prompt_token_cap=5500,
+    )
+    assert result.succeeded
+    assert result.test_node_id == node
+    assert journal.model_calls == len(replies) <= 10
+    verdicts = [e["payload"] for e in journal.events if e["kind"] == "observation" and e["payload"]["tool"] == "pytest"]
+    assert [e["verdict"] for e in verdicts] == (
+        ["test_error", "test_error", "assertion_failure", "assertion_failure"]
+        if issue == 8 else ["assertion_failure", "assertion_failure"]
+    )
+    assert f'"test_node_id": "{node}"' in journal.requests[-1].messages[-1]["content"]
+    assert all(estimate_messages_tokens(request.messages) <= 5500 for request in journal.requests)
+    stages = [e["payload"]["stage"] for e in journal.events if e["kind"] == "repro_stage"]
+    assert stages == (["explore", "write", "test", "submit"] if issue == 8 else ["explore", "test", "submit"])
+    if issue == 8:
+        assert "AttributeError" in verdicts[0]["summary"]
+        assert not any(e["kind"] == "observation" and e["payload"]["turn"] == 3 for e in journal.events)
+        errors = [e["payload"] for e in journal.events if e["kind"] == "action_parse_error"]
+        assert len(errors) == 1 and errors[0]["line"] == 1 and errors[0]["column"] > 1
+        assert "Expecting" in errors[0]["reason"]
+    assert len({e["idempotency_key"] for e in journal.events}) == len(journal.events)

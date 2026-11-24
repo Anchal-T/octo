@@ -1,0 +1,13 @@
+{
+  "base_commit": "09dbe1eec31ed1b3cd05366748865f11ba427d32",
+  "issue_8": {
+    "malformed_reply": "{\"action\": \"bash\", \"command\": \"cd /workspace && grep -n \"String.Single\\\\|backslash\\\\|\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\|escape\" sqlparse/keywords.py | head -50\"}",
+    "read_reply": "{\"action\": \"bash\", \"command\": \"cd /workspace && sed -n '155,175p' sqlparse/keywords.py\"}",
+    "old_test": "\n\n\ndef test_escaped_backslash_in_string_literal():\n    # A backslash escape (e.g. '\\\\') inside a single-quoted string must\n    # not terminate the string; the whole literal should be one token.\n    sql = r\"SELECT '\\\\', '\\\\'\"\n    tokens = list(lexer.tokenize(sql))\n    values = [t.value for t in tokens]\n    assert values == [\"SELECT\", \" \", \"'\\\\\\\\'\", \",\", \" \", \"'\\\\\\\\'\"], values\n"
+  },
+  "issue_9": {
+    "read_reply": "The bug is reproduced. The query is split into two statements. Let me look at the existing split tests to follow conventions.\n\n{\"action\": \"bash\", \"command\": \"cd /workspace && sed -n '1,40p' tests/test_split.py\"}",
+    "test": "\ndef test_split_escaped_quote_in_string_literal():\n    # Regression: a string literal containing an escaped quote should not\n    # cause the statement to be split at the following semicolon.\n    sql = r\"SELECT (')\\'');a');\"\n    stmts = sqlparse.parse(sql)\n    assert len(stmts) == 1\n    assert str(stmts[0]) == sql\n",
+    "submit_reply": "The test now fails as expected, reproducing the bug where the query is incorrectly split into two statements.\n\n{\"action\": \"submit\", \"test_node_id\": \"tests/test_split.py::test_split_escaped_quote_in_string_literal\", \"summary\": \"Added a regression test for the parser incorrectly splitting a SQL query containing a string literal with an escaped quote (SELECT (')\\\\'');a');) into two statements. The test asserts the query parses as a single statement and round-trips unchanged; it currently fails because sqlparse.parse returns two statements.\", \"anchor_names\": [\"sqlparse.parse\"]}"
+  }
+}

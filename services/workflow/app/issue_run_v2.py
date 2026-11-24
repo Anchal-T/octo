@@ -869,6 +869,7 @@ async def run_issue_v2(
             turn_cap=settings.fixer_turn_cap,
             prompt_token_cap=settings.fixer_prompt_token_cap,
             cmd_timeout_s=settings.sandbox_cmd_timeout_s,
+            raw_actions=repro.raw_actions,
         )
         if fix.retry_outcome is not None:
             ctx.set("stage", "failed")
@@ -1024,6 +1025,7 @@ async def run_issue_v2(
             fix_files=fix.files,
             prompt_token_cap=settings.tester_prompt_token_cap,
             cmd_timeout_s=settings.sandbox_cmd_timeout_s,
+            strict_repro=repro.raw_actions,
         )
         if test_res.retry_outcome is not None:
             ctx.set("stage", "failed")

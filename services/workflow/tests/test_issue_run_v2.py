@@ -332,17 +332,11 @@ async def test_issue_run_v2_happy_path_stale_head_guard_and_duplicate_approve(
                 )
             ],
             "reproducer": [
-                json.dumps(
-                    {
-                        "action": "bash",
-                        "command": (
-                            "cat <<'EOF' > tests/test_empty_word.py\n"
-                            "from sqlparse.lexer import tokenize_word\n\n"
-                            "def test_empty_returns_empty():\n"
-                            "    assert tokenize_word('') == ''\n"
-                            "EOF"
-                        ),
-                    }
+                json.dumps({"action": "write_file", "path": "tests/test_empty_word.py"}) + (
+                    "\n"
+                    "from sqlparse.lexer import tokenize_word\n\n"
+                    "def test_empty_returns_empty():\n"
+                    "    assert tokenize_word('') == ''\n"
                 ),
                 json.dumps(
                     {
@@ -353,18 +347,12 @@ async def test_issue_run_v2_happy_path_stale_head_guard_and_duplicate_approve(
                 ),
             ],
             "fixer": [
-                json.dumps(
-                    {
-                        "action": "bash",
-                        "command": (
-                            "cat <<'EOF' > sqlparse/lexer.py\n"
-                            "def tokenize_word(word: str) -> str:\n"
-                            "    if not word:\n"
-                            "        return ''\n"
-                            "    return word.upper()\n"
-                            "EOF"
-                        ),
-                    }
+                json.dumps({"action": "write_file", "path": "sqlparse/lexer.py"}) + (
+                    "\n"
+                    "def tokenize_word(word: str) -> str:\n"
+                    "    if not word:\n"
+                    "        return ''\n"
+                    "    return word.upper()\n"
                 ),
                 json.dumps({"action": "submit", "summary": "Return '' on empty word"}),
             ],
@@ -498,17 +486,11 @@ async def test_issue_run_v2_retries_fixer_on_changes_requested_and_handles_rejec
                 )
             ],
             "reproducer": [
-                json.dumps(
-                    {
-                        "action": "bash",
-                        "command": (
-                            "cat <<'EOF' > tests/test_empty_word.py\n"
-                            "from sqlparse.lexer import tokenize_word\n\n"
-                            "def test_empty_returns_empty():\n"
-                            "    assert tokenize_word('') == ''\n"
-                            "EOF"
-                        ),
-                    }
+                json.dumps({"action": "write_file", "path": "tests/test_empty_word.py"}) + (
+                    "\n"
+                    "from sqlparse.lexer import tokenize_word\n\n"
+                    "def test_empty_returns_empty():\n"
+                    "    assert tokenize_word('') == ''\n"
                 ),
                 json.dumps(
                     {
@@ -520,31 +502,19 @@ async def test_issue_run_v2_retries_fixer_on_changes_requested_and_handles_rejec
             ],
             "fixer": [
                 # Fix attempt 1: breaks existing test_tokenize_word_upper!
-                json.dumps(
-                    {
-                        "action": "bash",
-                        "command": (
-                            "cat <<'EOF' > sqlparse/lexer.py\n"
-                            "def tokenize_word(word: str) -> str:\n"
-                            "    return ''\n"
-                            "EOF"
-                        ),
-                    }
+                json.dumps({"action": "write_file", "path": "sqlparse/lexer.py"}) + (
+                    "\n"
+                    "def tokenize_word(word: str) -> str:\n"
+                    "    return ''\n"
                 ),
                 json.dumps({"action": "submit", "summary": "Always return empty"}),
                 # Fix attempt 2: fixes properly!
-                json.dumps(
-                    {
-                        "action": "bash",
-                        "command": (
-                            "cat <<'EOF' > sqlparse/lexer.py\n"
-                            "def tokenize_word(word: str) -> str:\n"
-                            "    if not word:\n"
-                            "        return ''\n"
-                            "    return word.upper()\n"
-                            "EOF"
-                        ),
-                    }
+                json.dumps({"action": "write_file", "path": "sqlparse/lexer.py"}) + (
+                    "\n"
+                    "def tokenize_word(word: str) -> str:\n"
+                    "    if not word:\n"
+                    "        return ''\n"
+                    "    return word.upper()\n"
                 ),
                 json.dumps({"action": "submit", "summary": "Handle empty and upper"}),
             ],
