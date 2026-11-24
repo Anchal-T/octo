@@ -1009,3 +1009,40 @@ async def test_repo_tool_retry_exhaustion_is_terminal_and_replay_safe(
         assert len(calls) == 2 + retries
     assert not ctx.sleeps
     assert not backend.prs_opened
+
+
+@pytest.mark.anyio
+async def test_linked_attempt_records_original_invocation_before_model_call(monkeypatch):
+    import restate
+
+    backend = FakeMemoryAndGithubBackend(base_sha=HEAD_SHA_1)
+    ctx = FakeWorkflowCtx("gh-1-7-r2")
+    monkeypatch.setattr(v2_mod, "post_memory", backend.post_memory)
+
+    def fail_after_evidence(request):
+        events = list(backend.events.values())
+        link = next(event for event in events if event["kind"] == "workflow_recovery")
+        assert link["payload"]["recovery_from"] == {
+            "invocation_id": "inv_exampleOriginal",
+            "attempt": 1,
+        }
+        assert link["payload"]["workflow_key"] == "gh-1-7-r2"
+        assert link["payload"]["base_commit"] == HEAD_SHA_1
+        raise restate.TerminalError("example stop after durable evidence")
+
+    monkeypatch.setattr(v2_mod, "call_model", fail_after_evidence)
+    request = IssueRunRequestV2(
+        issue_id="gh-1-7",
+        repo="Anchal-T/sqlparse",
+        title="Example issue for a linked recovery",
+        base_commit=HEAD_SHA_1,
+        read_basis=NOW,
+        attempt=2,
+        recovery_from={"invocation_id": "inv_exampleOriginal", "attempt": 1},
+    )
+    for _ in range(2):
+        with pytest.raises(restate.TerminalError, match="example stop"):
+            await v2_mod.run_issue_v2(ctx, request)
+    assert sum(
+        event["kind"] == "workflow_recovery" for event in backend.events.values()
+    ) == 1

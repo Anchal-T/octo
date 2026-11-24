@@ -2,9 +2,12 @@
 
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 
 import restate
+from agentteam_common import workflow_key
+from agentteam_contracts import IssueRunRequestV2
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -21,11 +24,39 @@ def fail_fake_provider() -> None:
     raise RuntimeError("synthetic provider failure")
 
 
+def record_checkpoint() -> str:
+    with evidence.joinpath("checkpoint").open("a") as stream:
+        stream.write("checkpoint\n")
+    return "saved"
+
+
 @issue_run.main(name="run")
-async def run(ctx: restate.WorkflowContext, _: None) -> None:
+async def run(ctx: restate.WorkflowContext, request: dict | None) -> dict | None:
+    if request and request.get("title") == "Paused example":
+        await ctx.run_typed("checkpoint", record_checkpoint)
+        await ctx.sleep(timedelta(seconds=5), name="resume-check")
+        return {"resumed": True}
+    if request and request.get("recovery_from"):
+        return request["recovery_from"]
     await ctx.run_typed(
         "fake-provider", fail_fake_provider, restate.RunOptions(max_attempts=2)
     )
+
+
+@app.post("/v2/issues/{issue_id}/start", status_code=202)
+async def start_attempt(issue_id: str, request: IssueRunRequestV2):
+    assert request.issue_id == issue_id
+    async with restate.create_client(os.environ["RESTATE_INGRESS"]) as client:
+        handle = await client.workflow_send(
+            run,
+            key=workflow_key(issue_id, request.attempt),
+            arg=request.model_dump(mode="json"),
+        )
+    return {
+        "issue_id": issue_id,
+        "attempt": request.attempt,
+        "invocation_id": handle.invocation_id,
+    }
 
 
 @app.get("/health")

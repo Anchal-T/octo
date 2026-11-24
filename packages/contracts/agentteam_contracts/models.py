@@ -4,7 +4,15 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 _MAX_CONTRACT_DEPTH = 64
 ModelRole = Literal["triager", "reproducer", "fixer", "tester"]
@@ -347,9 +355,15 @@ class RunStatus(Contract):
     attempt: int = Field(default=1, ge=1, le=99)
 
 
+class RecoveryOrigin(Contract):
+    invocation_id: str = Field(pattern=r"^inv_[A-Za-z0-9_]{1,96}$")
+    attempt: int = Field(ge=1, le=99)
+
+
 class IssueRunRequestV2(IssueRunRequest):
     base_commit: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{7,64}$")
     fact_condition: Literal["C0", "C2"] | None = None
+    recovery_from: RecoveryOrigin | None = None
     fact_snapshot: list[dict[str, Any]] | None = Field(default=None, max_length=500)
     pr_branch_suffix: str | None = Field(
         default=None, pattern=r"^[A-Za-z0-9._-]{1,20}$"
@@ -361,7 +375,20 @@ class IssueRunRequestV2(IssueRunRequest):
             raise ValueError("C2 requires a frozen fact snapshot")
         if self.fact_condition == "C0" and self.fact_snapshot is not None:
             raise ValueError("C0 cannot carry a fact snapshot")
+        if self.recovery_from is not None and (
+            self.recovery_from.attempt >= self.attempt
+            or self.base_commit is None
+            or self.read_basis is None
+        ):
+            raise ValueError("recovery requires an earlier attempt and pinned run inputs")
         return self
+
+    @model_serializer(mode="wrap")
+    def omit_absent_recovery_link(self, handler: SerializerFunctionWrapHandler) -> dict:
+        payload = handler(self)
+        if self.recovery_from is None:
+            payload.pop("recovery_from", None)
+        return payload
 
 
 class RepoHeadResponse(Contract):

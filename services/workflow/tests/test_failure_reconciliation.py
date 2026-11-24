@@ -10,6 +10,7 @@ import httpx
 import pytest
 import restate
 from agentteam_common import stable_id
+from agentteam_common.cli import run_cli
 
 from services.workflow.app import failure_reconciliation
 
@@ -134,7 +135,7 @@ async def test_reconciler_schedules_next_tick_when_admin_query_fails():
     os.environ.get("AGENTTEAM_TEST_DURABILITY") != "1",
     reason="opt-in Restate 1.8.1 crash test",
 )
-def test_pinned_restate_records_failure_after_worker_is_stopped(tmp_path):
+def test_pinned_restate_recovers_failed_and_paused_workflows(tmp_path, capsys):
     from services.workflow.tests.test_durability_integration import (
         IsolatedRestate,
         _poll_until,
@@ -168,6 +169,7 @@ def test_pinned_restate_records_failure_after_worker_is_stopped(tmp_path):
                 "GROQ_API_KEY": "",
                 "MEMORY_URL": worker_url,
                 "RESTATE_ADMIN_URL": server.admin,
+                "RESTATE_INGRESS": server.ingress,
                 "RECOVERY_PROBE_EVIDENCE": str(tmp_path),
             },
         )
@@ -245,6 +247,15 @@ def test_pinned_restate_records_failure_after_worker_is_stopped(tmp_path):
                 "attempt",
                 "attempt",
             ]
+            _verify_operator_recovery(
+                client,
+                server,
+                worker_url,
+                tmp_path,
+                capsys,
+                require_success,
+                _poll_until,
+            )
     finally:
         try:
             if worker is not None:
@@ -252,3 +263,72 @@ def test_pinned_restate_records_failure_after_worker_is_stopped(tmp_path):
                 worker.wait(timeout=10)
         finally:
             server.remove()
+
+
+def _verify_operator_recovery(
+    client, server, worker_url, evidence, capsys, require_success, poll_until
+):
+    request = {
+        "issue_id": "gh-1-8",
+        "repo": "Anchal-T/sqlparse",
+        "title": "Terminal example",
+        "base_commit": "a" * 40,
+        "read_basis": "2026-11-24T12:00:00Z",
+    }
+
+    def submit(key, payload):
+        return require_success(
+            client.post(f"{server.ingress}/IssueRunV2/{key}/run/send", json=payload)
+        )["invocationId"]
+
+    def status(invocation_id):
+        rows = require_success(
+            client.post(
+                f"{server.admin}/query",
+                json={
+                    "query": f"SELECT status FROM sys_invocation WHERE id = '{invocation_id}'"
+                },
+                headers={"Accept": "application/json"},
+            )
+        )["rows"]
+        return rows[0]["status"] if rows else None
+
+    def wait_for(invocation_id, expected):
+        poll_until(
+            expected, lambda: status(invocation_id), lambda value: value == expected
+        )
+
+    flags = [
+        "--admin-url",
+        server.admin,
+        "--memory-url",
+        worker_url,
+        "--workflow-url",
+        worker_url,
+    ]
+    failed = submit("gh-1-8", request)
+    wait_for(failed, "completed")
+    args = ["recover", failed, *flags, "--attempt", "2", "--apply"]
+    assert run_cli(args) == 0
+    linked = json.loads(capsys.readouterr().out)
+    assert (
+        linked["source_invocation_id"] == failed
+        and linked["workflow_key"] == "gh-1-8-r2"
+    )
+    wait_for(linked["invocation_id"], "completed")
+    assert run_cli(args) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["already_submitted"] is True
+    assert repeated["invocation_id"] == linked["invocation_id"]
+
+    paused = submit(
+        "gh-1-9", {**request, "issue_id": "gh-1-9", "title": "Paused example"}
+    )
+    wait_for(paused, "suspended")
+    client.patch(f"{server.admin}/invocations/{paused}/pause").raise_for_status()
+    wait_for(paused, "paused")
+    assert run_cli(["recover", paused, *flags, "--apply"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"action": "resume", "invocation_id": paused, "applied": True}
+    wait_for(paused, "completed")
+    assert (evidence / "checkpoint").read_text().splitlines() == ["checkpoint"]

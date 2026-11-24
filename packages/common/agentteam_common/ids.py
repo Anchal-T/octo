@@ -14,6 +14,12 @@ def workflow_key(issue_id: str, attempt: int) -> str:
     return f"{issue_id}-r{attempt}"
 
 
+def issue_run_v2_prefix(issue_id: str, attempt: int) -> str:
+    if attempt == 1:
+        return f"{issue_id}:v2"
+    return f"{issue_id}:v2:r{attempt}"
+
+
 def closure_id(fact_id: str, closing_commit: str) -> str:
     digest = sha256(f"{fact_id}|{closing_commit}".encode()).hexdigest()
     return f"fc-{digest[:20]}"

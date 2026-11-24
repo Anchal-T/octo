@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 import restate
 from agentteam_common import Settings, load_agentteam_config, stable_id, workflow_key
+from agentteam_common.ids import issue_run_v2_prefix
 from agentteam_contracts import (
     ApprovalDecision,
     ApprovalResult,
@@ -237,12 +238,6 @@ def make_sandbox(base_commit: str) -> Sandbox:
     )
 
 
-def _key_prefix_v2(issue_id: str, attempt: int) -> str:
-    if attempt == 1:
-        return f"{issue_id}:v2"
-    return f"{issue_id}:v2:r{attempt}"
-
-
 class RestateStepJournal:
     def __init__(self, ctx: restate.WorkflowContext, target: str) -> None:
         self.ctx = ctx
@@ -466,7 +461,7 @@ async def run_issue_v2(
         base_commit = repo_head.head_sha
         base_branch = repo_head.default_branch
 
-    prefix = _key_prefix_v2(request.issue_id, request.attempt)
+    prefix = issue_run_v2_prefix(request.issue_id, request.attempt)
     wf_key = workflow_key(request.issue_id, request.attempt)
     journal = RestateStepJournal(
         ctx, target=f"{request.repo}/issues/{request.issue_id}"
@@ -488,6 +483,23 @@ async def run_issue_v2(
             read_basis=read_basis,
         ).model_dump(mode="json"),
     )
+    if request.recovery_from is not None:
+        await journal.record_event(
+            "record-recovery",
+            EventWrite(
+                idempotency_key=f"{prefix}:recovery",
+                source="maintainer",
+                kind="workflow_recovery",
+                taint=0,
+                payload={
+                    "workflow_key": wf_key,
+                    "issue_id": request.issue_id,
+                    "attempt": request.attempt,
+                    "base_commit": base_commit,
+                    "recovery_from": request.recovery_from.model_dump(mode="json"),
+                },
+            ),
+        )
     issue_ev_key = f"{prefix}:issue"
     issue_ev_id = await journal.record_event(
         "record-issue",

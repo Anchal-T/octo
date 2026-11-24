@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Sequence
@@ -8,6 +9,8 @@ from urllib.parse import quote
 
 import httpx
 from agentteam_contracts import ApprovalRequest, ApprovalResult
+
+from .recovery import RecoveryError, recover_issue_run
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -50,6 +53,25 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.getenv("WORKFLOW_URL", "http://127.0.0.1:8002"),
         help="Workflow service base URL",
     )
+    recover = sub.add_parser(
+        "recover", help="Preview or recover a failed IssueRunV2 invocation."
+    )
+    recover.add_argument("invocation_id")
+    recover.add_argument(
+        "--attempt", type=int, help="New attempt number for a terminal failure"
+    )
+    recover.add_argument(
+        "--apply", action="store_true", help="Apply the recovery preview"
+    )
+    recover.add_argument(
+        "--admin-url", default=os.getenv("RESTATE_ADMIN_URL", "http://127.0.0.1:9070")
+    )
+    recover.add_argument(
+        "--memory-url", default=os.getenv("MEMORY_URL", "http://127.0.0.1:8001")
+    )
+    recover.add_argument(
+        "--workflow-url", default=os.getenv("WORKFLOW_URL", "http://127.0.0.1:8002")
+    )
     return parser
 
 
@@ -59,8 +81,8 @@ def run_cli(
     transport: httpx.BaseTransport | None = None,
 ) -> int:
     args = _build_parser().parse_args(list(argv) if argv is not None else None)
-    if args.command != "approve":
-        return 2
+    if args.command == "recover":
+        return _run_recovery(args, transport)
 
     request = ApprovalRequest(
         issue_id=args.issue_id,
@@ -106,6 +128,39 @@ def run_cli(
         return 0
     verb = "Approved" if request.approved else "Rejected"
     print(f"{verb} {result.issue_id} (attempt {result.attempt}, stage={result.stage}).")
+    return 0
+
+
+def _run_recovery(
+    args: argparse.Namespace, transport: httpx.BaseTransport | None
+) -> int:
+    try:
+        with httpx.Client(transport=transport, timeout=15, trust_env=False) as client:
+            result = recover_issue_run(
+                client,
+                admin_url=args.admin_url.rstrip("/"),
+                memory_url=args.memory_url.rstrip("/"),
+                workflow_url=args.workflow_url.rstrip("/"),
+                invocation_id=args.invocation_id,
+                attempt=args.attempt,
+                apply=args.apply,
+            )
+    except RecoveryError as error:
+        print(f"Recovery stopped: {error}", file=sys.stderr)
+        return 1
+    except httpx.HTTPStatusError as error:
+        print(
+            f"Recovery service returned HTTP {error.response.status_code}",
+            file=sys.stderr,
+        )
+        return 1
+    except httpx.HTTPError as error:
+        print(f"Recovery service unavailable: {type(error).__name__}", file=sys.stderr)
+        return 1
+    except (TypeError, ValueError, KeyError, RecursionError):
+        print("Recovery service returned invalid data", file=sys.stderr)
+        return 1
+    print(json.dumps(result))
     return 0
 
 
