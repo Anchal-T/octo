@@ -251,3 +251,7 @@ Use current library docs (e.g. Context7) instead of memory for Restate, FastAPI 
 
 Listed in `Design Doc.md` §10.3 and `Low Level Design.md` §8. Next topics to settle
 were models and docs. Ask Anchal before deciding any of them.
+
+## Plans and decisions
+Plans, reviews and decisions live in ~/anchal/Obsidian/General/Agent Team/Docs/.
+Read the relevant docs there before planning or coding. Record new decisions in Docs/Decisions/.
