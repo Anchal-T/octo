@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -20,6 +19,7 @@ from agentteam_contracts import (
 from agentteam_contracts.models import Contract
 from pydantic import Field
 
+from .models.budget import prompt_tokens_for_bytes
 from .repo_actions import (
     FIX_ACTION_FORMAT,
     RAW_ACTION_PROTOCOL,
@@ -381,6 +381,7 @@ def estimate_messages_tokens(
     *,
     tools: Sequence[dict[str, Any]] | None = None,
     tool_choice: str | None = None,
+    strict: bool = False,
 ) -> int:
     payload: dict[str, Any] = {"messages": list(messages)}
     if tools is not None:
@@ -390,7 +391,7 @@ def estimate_messages_tokens(
     encoded = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
-    return math.ceil(len(encoded) / 4)
+    return prompt_tokens_for_bytes(len(encoded), len(messages), strict=strict)
 
 
 def fit_messages_to_cap(
@@ -400,11 +401,12 @@ def fit_messages_to_cap(
     prompt_token_cap: int,
     tools: Sequence[dict[str, Any]] | None = None,
     tool_choice: str | None = None,
+    strict: bool = False,
 ) -> list[dict[str, Any]]:
     base = [dict(item) for item in base_messages]
     if not turns:
         return _shrink_base_if_needed(
-            base, prompt_token_cap, tools=tools, tool_choice=tool_choice
+            base, prompt_token_cap, tools=tools, tool_choice=tool_choice, strict=strict
         )
 
     for keep_recent in range(len(turns), 0, -1):
@@ -427,7 +429,7 @@ def fit_messages_to_cap(
             candidate.append(_trim_message(assistant_message, 600))
             candidate.append(_trim_message(result_message, 1400))
         if (
-            estimate_messages_tokens(candidate, tools=tools, tool_choice=tool_choice)
+            estimate_messages_tokens(candidate, tools=tools, tool_choice=tool_choice, strict=strict)
             <= prompt_token_cap
         ):
             return candidate
@@ -445,12 +447,12 @@ def fit_messages_to_cap(
             _trim_message(last_result, result_budget),
         ]
         if (
-            estimate_messages_tokens(compact, tools=tools, tool_choice=tool_choice)
+            estimate_messages_tokens(compact, tools=tools, tool_choice=tool_choice, strict=strict)
             <= prompt_token_cap
         ):
             return compact
     return _shrink_base_if_needed(
-        base, prompt_token_cap, tools=tools, tool_choice=tool_choice
+        base, prompt_token_cap, tools=tools, tool_choice=tool_choice, strict=strict
     )
 
 
@@ -467,13 +469,34 @@ def _shrink_base_if_needed(
     *,
     tools: Sequence[dict[str, Any]] | None = None,
     tool_choice: str | None = None,
+    strict: bool = False,
 ) -> list[dict[str, Any]]:
     if (
-        estimate_messages_tokens(base, tools=tools, tool_choice=tool_choice)
+        estimate_messages_tokens(base, tools=tools, tool_choice=tool_choice, strict=strict)
         <= prompt_token_cap
         or len(base) < 2
     ):
         return base
+    if strict:
+        user_text = base[1]["content"]
+        best = [base[0], {**base[1], "content": ""}]
+        low, high = 1, len(user_text)
+        while low <= high:
+            size = (low + high) // 2
+            clipped = user_text[:size] if size < 40 else trim_output(user_text, size)
+            candidate = [base[0], {**base[1], "content": clipped}]
+            if (
+                estimate_messages_tokens(
+                    candidate, tools=tools, tool_choice=tool_choice, strict=True
+                )
+                <= prompt_token_cap
+            ):
+                best = candidate
+                low = size + 1
+            else:
+                high = size - 1
+        return best
+
     overhead = len(
         json.dumps(
             {"tools": tools, "tool_choice": tool_choice},
@@ -504,6 +527,7 @@ def reproducer_base_messages(
     tracked_files: str = "",
     prompt_token_cap: int = 5500,
     raw_actions: bool = True,
+    strict_budget: bool = False,
 ) -> list[dict[str, str]]:
     triage_line = (
         f"Triaged area: {triage.area} ({triage.kind}, priority {triage.priority}) - {triage.summary}\n\n"
@@ -543,7 +567,7 @@ def reproducer_base_messages(
         if not path.strip():
             continue
         candidate = messages_for("\n".join([*selected_files, path]))
-        if estimate_messages_tokens(candidate) > prompt_token_cap:
+        if estimate_messages_tokens(candidate, strict=strict_budget) > prompt_token_cap:
             break
         selected_files.append(path)
     if selected_files:
@@ -603,6 +627,7 @@ def tester_messages(
     fix_diff: str,
     check: CleanCheckResult,
     prompt_token_cap: int = 5500,
+    strict_budget: bool = False,
 ) -> list[dict[str, str]]:
     user = (
         f"Repository: {repo}\n"
@@ -620,7 +645,7 @@ def tester_messages(
         {"role": "system", "content": TESTER_SYSTEM_PROMPT},
         {"role": "user", "content": user},
     ]
-    return _shrink_base_if_needed(msgs, prompt_token_cap)
+    return _shrink_base_if_needed(msgs, prompt_token_cap, strict=strict_budget)
 
 
 def _first_balanced_json_object(text: str) -> str | None:
@@ -1419,6 +1444,7 @@ async def run_reproducer_step(
     prompt_token_cap: int,
     cmd_timeout_s: float = 60.0,
     fact_block: str = "",
+    strict_budget: bool = False,
 ) -> ReproStepResult:
     tracked = await journal.run_step(
         "repro-tracked-files",
@@ -1440,6 +1466,7 @@ async def run_reproducer_step(
         tracked_files=tracked_files,
         prompt_token_cap=prompt_token_cap,
         raw_actions=raw_actions,
+        strict_budget=strict_budget,
     )
     turns: list[tuple[dict[str, Any], dict[str, Any]]] = []
     event_ids: list[str] = []
@@ -1484,13 +1511,18 @@ async def run_reproducer_step(
                     "role": "user",
                     "content": f"Reproducer turn {turn + 1}/{turn_cap}, stage {stage}. {hint}",
                 }]
-                tail_tokens = estimate_messages_tokens(prompt_tail) - estimate_messages_tokens([]) + 1
+                tail_tokens = (
+                    estimate_messages_tokens(prompt_tail, strict=strict_budget)
+                    - estimate_messages_tokens([], strict=strict_budget)
+                    + 1
+                )
             if turn == turn_cap:
                 break
             messages = fit_messages_to_cap(
                 base_msgs,
                 turns,
                 prompt_token_cap=prompt_token_cap - tail_tokens,
+                strict=strict_budget,
             )
             outcome, provider = await _call_repo_model(
                 journal,
@@ -1728,6 +1760,7 @@ async def run_fixer_step(
     cmd_timeout_s: float = 60.0,
     fact_block: str = "",
     raw_actions: bool = True,
+    strict_budget: bool = False,
 ) -> FixStepResult:
     base_msgs = fixer_base_messages(
         repo,
@@ -1754,13 +1787,23 @@ async def run_fixer_step(
 
     try:
         for turn in range(turn_cap):
+            nudge = []
+            if turn == FIXER_EDIT_NUDGE_TURN and not made_edit:
+                nudge = [{"role": "user", "content": FIXER_EDIT_NUDGE}]
+            nudge_tokens = 0
+            if nudge and strict_budget:
+                nudge_tokens = (
+                    estimate_messages_tokens(nudge, strict=True)
+                    - estimate_messages_tokens([], strict=True)
+                    + 1
+                )
             messages = fit_messages_to_cap(
                 base_msgs,
                 turns,
-                prompt_token_cap=prompt_token_cap,
+                prompt_token_cap=prompt_token_cap - nudge_tokens,
+                strict=strict_budget,
             )
-            if turn == FIXER_EDIT_NUDGE_TURN and not made_edit:
-                messages = [*messages, {"role": "user", "content": FIXER_EDIT_NUDGE}]
+            messages.extend(nudge)
             outcome, provider = await _call_repo_model(
                 journal,
                 f"{step_tag}:llm:{turn}",
@@ -1964,6 +2007,7 @@ async def run_tester_step(
     prompt_token_cap: int,
     cmd_timeout_s: float = 60.0,
     strict_repro: bool = True,
+    strict_budget: bool = False,
 ) -> TesterStepResult:
     step_tag = f"test:{fix_attempt}"
     raw_check = await journal.run_step(
@@ -2011,6 +2055,7 @@ async def run_tester_step(
         fix_diff=fix_diff,
         check=check,
         prompt_token_cap=prompt_token_cap,
+        strict_budget=strict_budget,
     )
     outcome, provider = await journal.call_model(
         f"{step_tag}:llm",

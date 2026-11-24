@@ -1101,3 +1101,28 @@ async def test_p1_sqlparse_reproducer_replays_saved_replies(tmp_path, issue, sql
         assert len(errors) == 1 and errors[0]["line"] == 1 and errors[0]["column"] > 1
         assert "Expecting" in errors[0]["reason"]
     assert len({e["idempotency_key"] for e in journal.events}) == len(journal.events)
+
+
+def test_strict_prompt_fitting_accounts_for_multibyte_content():
+    cap = 3500
+    base = reproducer_base_messages(
+        "Anchal-T/demo",
+        "Unicode issue",
+        "नमस्ते 🧪" * 1000,
+        None,
+        strict_budget=True,
+        prompt_token_cap=cap,
+    )
+    fitted = fit_messages_to_cap(
+        base,
+        [(
+            {"role": "assistant", "content": '{"action":"bash"}\nls'},
+            {"role": "user", "content": "output 🧪" * 1000},
+        )],
+        prompt_token_cap=cap,
+        strict=True,
+    )
+    assert fitted[0] == base[0]
+    assert fitted[1]["content"]
+    assert "Unicode issue" in fitted[1]["content"]
+    assert estimate_messages_tokens(fitted, strict=True) <= cap

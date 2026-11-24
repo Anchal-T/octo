@@ -10,6 +10,8 @@ from agentteam_contracts import ModelCallRequest, ModelOutcome
 from .pools import Pin, Pool
 from .store import Store
 
+_COUNTED_STATES_SQL = "('reserved', 'completed', 'throttled', 'failed')"
+
 
 @dataclass(frozen=True)
 class Reservation:
@@ -94,6 +96,21 @@ class Ledger:
                 (request_id,),
             ).fetchone()
             retry_ordinal = int(ordinal_row["next_ordinal"])
+            budget_mode = self.settings.models_budget_mode
+            other_mode = connection.execute(
+                "SELECT 1 FROM call_attempt "
+                "WHERE pool = ? AND day_window = ? AND budget_mode != ? "
+                f"AND state IN {_COUNTED_STATES_SQL} LIMIT 1",
+                (pool.pool, day_key, budget_mode),
+            ).fetchone()
+            if other_mode is not None:
+                # A UTC-day (or configured reset day) must use one accounting policy.
+                return Reservation(
+                    status="quota_exhausted",
+                    retry_ordinal=retry_ordinal,
+                    retry_at=(day_start + timedelta(days=1)).astimezone(UTC),
+                    scope="day_tokens",
+                )
             minute = self._usage(connection, pool.pool, "minute_window", minute_key)
             day = self._usage(connection, pool.pool, "day_window", day_key)
             limits = (
@@ -137,8 +154,8 @@ class Ledger:
             connection.execute(
                 "INSERT INTO call_attempt (request_id, retry_ordinal, run_id, step, "
                 "role, pool, model_pinned, payload_sha256, sampling_json, state, "
-                "tokens_est, minute_window, day_window, started_at, target, send_phase) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, 'pending')",
+                "tokens_est, budget_mode, minute_window, day_window, started_at, target, send_phase) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?, 'pending')",
                 (
                     request_id,
                     retry_ordinal,
@@ -150,6 +167,7 @@ class Ledger:
                     payload_sha256,
                     sampling_json,
                     tokens_est,
+                    budget_mode,
                     minute_key,
                     day_key,
                     _iso(now),
@@ -199,9 +217,9 @@ class Ledger:
         if window_column not in {"minute_window", "day_window"}:
             raise ValueError("unsupported quota window")
         row = connection.execute(
-            f"SELECT COUNT(*) AS requests, COALESCE(SUM(tokens_est), 0) AS tokens "
+            "SELECT COUNT(*) AS requests, COALESCE(SUM(COALESCE(tokens_accounted, tokens_est)), 0) AS tokens "
             f"FROM call_attempt WHERE pool = ? AND {window_column} = ? "
-            "AND state IN ('reserved', 'completed', 'throttled', 'failed')",
+            f"AND state IN {_COUNTED_STATES_SQL}",
             (pool, window_key),
         ).fetchone()
         return int(row["requests"]), int(row["tokens"])

@@ -6,6 +6,7 @@ services:
       FIXER_MODEL: qwen/qwen3.8-27b
       TESTER_MODEL: qwen/qwen3.8-27b
       GROQ_TPD: "190000"
+      MODELS_BUDGET_MODE: p1_estimate
       MODELS_FREE_HOSTS: https://api.groq.com
 
   github:

@@ -72,6 +72,12 @@ class Store:
             if "send_phase" not in columns:
                 connection.execute("ALTER TABLE call_attempt ADD COLUMN send_phase TEXT")
                 connection.execute("DROP VIEW IF EXISTS side_effect_receipt")
+            if "tokens_accounted" not in columns:
+                connection.execute("ALTER TABLE call_attempt ADD COLUMN tokens_accounted INTEGER")
+            if "budget_mode" not in columns:
+                connection.execute(
+                    "ALTER TABLE call_attempt ADD COLUMN budget_mode TEXT NOT NULL DEFAULT 'p1_estimate'"
+                )
             connection.execute(_RECEIPT_VIEW)
 
     @contextmanager
@@ -170,6 +176,7 @@ class Store:
         sampling_json: str,
         retry_ordinal: int,
         log_row: dict[str, Any],
+        tokens_accounted: int | None,
     ) -> None:
         with self.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -191,9 +198,9 @@ class Store:
                 ),
             )
             connection.execute(
-                "UPDATE call_attempt SET state = 'completed', send_phase = 'sent', decided_at = ? "
-                "WHERE request_id = ? AND retry_ordinal = ?",
-                (_iso(outcome.decided_at), outcome.request_id, retry_ordinal),
+                "UPDATE call_attempt SET state = 'completed', send_phase = 'sent', "
+                "decided_at = ?, tokens_accounted = ? WHERE request_id = ? AND retry_ordinal = ?",
+                (_iso(outcome.decided_at), tokens_accounted, outcome.request_id, retry_ordinal),
             )
             self._insert_log(connection, log_row)
 

@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from eval.stale_facts.live import (
     _USAGE_READ,
     DAILY_ESTIMATED_TOKEN_LIMIT,
@@ -537,3 +539,11 @@ def test_final_all_accounted_summary_and_skips(tmp_path, monkeypatch):
     assert "6:C2" not in restored["completed"]
     assert restored["skipped"] == {"6:C2": "user-directed"}
     assert restored["active"] is None
+
+
+def test_p1_preflight_rejects_strict_budget_mode(monkeypatch):
+    from eval.stale_facts import live
+
+    monkeypatch.setattr(live, "_compose_exec", lambda _: {"budget_mode": "strict"})
+    with pytest.raises(RuntimeError, match="p1_estimate"):
+        live.verify_live_config()

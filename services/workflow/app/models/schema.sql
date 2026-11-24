@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS call_attempt (
     sampling_json TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('reserved', 'completed', 'throttled', 'failed', 'refused')),
     tokens_est INTEGER NOT NULL,
+    tokens_accounted INTEGER,
+    budget_mode TEXT NOT NULL DEFAULT 'p1_estimate',
     minute_window TEXT NOT NULL,
     day_window TEXT NOT NULL,
     started_at TEXT NOT NULL,

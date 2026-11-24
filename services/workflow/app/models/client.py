@@ -16,6 +16,7 @@ from agentteam_common import Settings, stable_id
 from agentteam_contracts import ModelCallRequest, ModelOutcome
 from pydantic import ValidationError
 
+from .budget import prompt_tokens_for_bytes, supports_strict_prompt
 from .ledger import Ledger, Reservation
 from .pools import Pin, Pool
 from .store import Store
@@ -76,8 +77,9 @@ class ModelClient:
     def _call(self, request: ModelCallRequest, slot: bool | OSError) -> ModelOutcome:
         pin = self.authority.pin_for(request.role, model=request.model)
         pool = self.authority.pool
+        strict = self.settings.models_budget_mode == "strict"
         sampling_json, sampling, payload_sha256, prompt_tokens = _payload_identity(
-            request, pin
+            request, pin, strict=strict
         )
         request_id = stable_id(
             "mc",
@@ -85,7 +87,10 @@ class ModelClient:
         )
         overall_started = self._now()
         call_started_mono = self.monotonic()
-        tokens_est = prompt_tokens + min(pin.max_tokens, OUTPUT_RESERVE_TOKENS)
+        output_reserve = (
+            sampling["max_tokens"] if strict else min(pin.max_tokens, OUTPUT_RESERVE_TOKENS)
+        )
+        tokens_est = prompt_tokens + output_reserve
 
         if (
             request.sampling.max_tokens is not None
@@ -108,6 +113,18 @@ class ModelClient:
                 "failed",
                 "taint_refused",
                 "provider is not allowed to receive this taint level",
+                overall_started,
+            )
+        if strict and not supports_strict_prompt(
+            request.messages, tools=request.tools, tool_choice=request.tool_choice
+        ):
+            return self._uncalled_outcome(
+                request,
+                request_id,
+                pin,
+                "failed",
+                "unsupported_strict_prompt",
+                "strict token admission requires text-only system, user and assistant messages",
                 overall_started,
             )
         if prompt_tokens > pin.prompt_token_cap or tokens_est > pool.tpm:
@@ -554,16 +571,23 @@ class ModelClient:
                 tokens_out=tokens_out,
                 http_status=status,
             )
+            token_charge = _reported_token_charge(body, tokens_in, tokens_out) if strict else None
+            decision = (
+                "usage_over_reservation"
+                if token_charge is not None and token_charge > tokens_est
+                else "completed"
+            )
             try:
                 self.store.complete_attempt(
                     outcome=outcome,
                     payload_sha256=payload_sha256,
                     sampling_json=sampling_json,
                     retry_ordinal=ordinal,
+                    tokens_accounted=token_charge,
                     log_row=self._log_row(
                         outcome,
                         role=request.role,
-                        decision="completed",
+                        decision=decision,
                         retry_ordinal=ordinal,
                         started=started,
                         finished=finished,
@@ -587,7 +611,7 @@ class ModelClient:
                     reason="provider completion could not be persisted",
                     http_status=status,
                 )
-            self._log(outcome, decision="completed", retry_ordinal=ordinal)
+            self._log(outcome, decision=decision, retry_ordinal=ordinal)
             return outcome
 
     def _send(
@@ -946,7 +970,7 @@ class ModelClient:
 
 
 def _payload_identity(
-    request: ModelCallRequest, pin: Pin
+    request: ModelCallRequest, pin: Pin, *, strict: bool = False
 ) -> tuple[str, dict[str, Any], str, int]:
     sampling = request.sampling.model_dump(mode="json", exclude_none=True)
     sampling["max_tokens"] = sampling.get("max_tokens") or pin.max_tokens
@@ -958,7 +982,9 @@ def _payload_identity(
     prompt_json = json.dumps(
         prompt_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
-    prompt_tokens = math.ceil(len(prompt_json.encode("utf-8")) / 4)
+    prompt_tokens = prompt_tokens_for_bytes(
+        len(prompt_json.encode("utf-8")), len(request.messages), strict=strict
+    )
     payload_json = json.dumps(
         {**prompt_payload, "sampling": sampling},
         sort_keys=True,
@@ -1088,7 +1114,23 @@ def _completion_fields(
         for value in (prompt_tokens, completion_tokens)
     ):
         return None
+    if prompt_tokens + completion_tokens > max_sqlite_integer:
+        return None
     return model, content, tool_calls, prompt_tokens, completion_tokens
+
+
+def _reported_token_charge(body: dict[str, Any], tokens_in: int, tokens_out: int) -> int | None:
+    usage = body.get("usage")
+    if (
+        isinstance(usage, dict)
+        and type(usage.get("prompt_tokens")) is int
+        and type(usage.get("completion_tokens")) is int
+    ):
+        total = tokens_in + tokens_out
+        reported_total = usage.get("total_tokens", total)
+        if type(reported_total) is int and reported_total == total:
+            return total
+    return None
 
 
 def _provider_error_code(status: int) -> str:

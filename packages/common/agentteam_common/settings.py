@@ -68,6 +68,7 @@ class Settings:
     models_free_hosts: tuple[str, ...] = (GROQ_ORIGIN,)
     models_sqlite_path: str = "/var/lib/agent-team/models/models.sqlite"
     models_busy_timeout_ms: int = 5000
+    models_budget_mode: str = "p1_estimate"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -109,6 +110,7 @@ class Settings:
                 "MODELS_SQLITE_PATH", "/var/lib/agent-team/models/models.sqlite"
             ),
             models_busy_timeout_ms=int(os.getenv("MODELS_BUSY_TIMEOUT_MS", "5000")),
+            models_budget_mode=os.getenv("MODELS_BUDGET_MODE", "p1_estimate"),
         )
         settings.validate_model_config(strict_all_roles=True)
         return settings
@@ -116,6 +118,8 @@ class Settings:
     def validate_model_config(
         self, *, strict_all_roles: bool = False
     ) -> ModelAuthority:
+        if self.models_budget_mode not in {"p1_estimate", "strict"}:
+            raise ValueError("MODELS_BUDGET_MODE must be p1_estimate or strict")
         authority = ModelAuthority(self, strict_all_roles=strict_all_roles)
         if self.triager_wait_cap_s <= 0:
             raise ValueError("triager timeout and generation settings are invalid")

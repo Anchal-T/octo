@@ -1199,3 +1199,113 @@ def test_pool_recovers_an_interrupted_send_and_retains_its_quota_charge(tmp_path
     assert exhausted.outcome == "quota_exhausted"
     assert exhausted.scope == "day_requests"
     assert sends == 2
+
+
+@pytest.mark.parametrize("usage", [
+    {"prompt_tokens": 30, "completion_tokens": 20},
+    {"prompt_tokens": 30},
+    None,
+])
+def test_strict_admission_settles_only_complete_provider_usage(tmp_path, usage):
+    sends = []
+
+    def provider(request):
+        sends.append(json.loads(request.content)["max_tokens"])
+        response = {
+            "model": MODEL,
+            "choices": [{"message": {"content": "completed"}}],
+        }
+        if usage is not None:
+            response["usage"] = usage
+        return httpx.Response(200, json=response)
+
+    worker, _ = make_client(
+        tmp_path, provider, models_budget_mode="strict", groq_tpd=2600
+    )
+    request = model_request(content="Unicode prompt: नमस्ते 🧪")
+    first = worker.call(request)
+    assert first.outcome == "completed"
+    with worker.store.connection() as connection:
+        attempt = connection.execute(
+            "SELECT tokens_est, tokens_accounted, budget_mode FROM call_attempt"
+        ).fetchone()
+    assert attempt["budget_mode"] == "strict"
+    assert 2000 < attempt["tokens_est"] < 2600
+    complete_usage = usage is not None and "completion_tokens" in usage
+    assert attempt["tokens_accounted"] == (50 if complete_usage else None)
+
+    other, _ = make_client(
+        tmp_path, provider, models_budget_mode="strict", groq_tpd=2600
+    )
+    assert other.call(request) == first
+    second = other.call(model_request(run_id="another-app"))
+    if complete_usage:
+        assert second.outcome == "completed"
+        assert sends == [1024, 1024]
+    else:
+        assert second.outcome == "quota_exhausted"
+        assert second.scope == "day_tokens"
+        assert sends == [1024]
+
+
+def test_strict_mode_does_not_mix_accounting_in_an_active_quota_window(tmp_path):
+    def provider(request):
+        return httpx.Response(
+            200,
+            json={"model": MODEL, "choices": [{"message": {"content": "completed"}}]},
+        )
+
+    legacy, _ = make_client(tmp_path, provider, models_budget_mode="p1_estimate")
+    assert legacy.call(model_request()).outcome == "completed"
+    clock = FIXED_NOW
+    strict, _ = make_client(tmp_path, provider, models_budget_mode="strict", now=lambda: clock)
+    request = model_request(run_id="strict-run")
+
+    deferred = strict.call(request)
+    assert deferred.outcome == "quota_exhausted"
+    assert deferred.scope == "day_tokens"
+    clock = deferred.retry_at
+    assert strict.call(request).outcome == "completed"
+
+
+def test_strict_mode_rejects_tool_prompts_without_a_supported_template_bound(tmp_path):
+    def no_provider_call(request):
+        pytest.fail("unsupported strict prompt reached the provider")
+
+    client, _ = make_client(tmp_path, no_provider_call, models_budget_mode="strict")
+    request = model_request().model_copy(
+        update={"messages": [{"role": "user", "content": [{"type": "text", "text": "example"}]}]}
+    )
+    result = client.call(request)
+    assert result.outcome == "failed"
+    assert result.error_code == "unsupported_strict_prompt"
+
+
+def test_strict_admission_accounts_for_a_reported_overrun(tmp_path):
+    sends = 0
+
+    def provider(request):
+        nonlocal sends
+        sends += 1
+        assert json.loads(request.content)["max_tokens"] == 75
+        return httpx.Response(
+            200,
+            json={
+                "model": MODEL,
+                "choices": [{"message": {"content": "completed"}}],
+                "usage": {"prompt_tokens": 2500, "completion_tokens": 40, "total_tokens": 2540},
+            },
+        )
+
+    worker, _ = make_client(tmp_path, provider, models_budget_mode="strict", groq_tpd=2600)
+    request = model_request().model_copy(update={"sampling": Sampling(max_tokens=75)})
+    result = worker.call(request)
+    assert result.outcome == "completed"
+    with worker.store.connection() as connection:
+        attempt = connection.execute("SELECT tokens_est, tokens_accounted FROM call_attempt").fetchone()
+        decision = connection.execute("SELECT decision FROM call_log").fetchone()[0]
+    assert attempt["tokens_accounted"] == 2540 > attempt["tokens_est"]
+    assert attempt["tokens_est"] < 1300
+    assert decision == "usage_over_reservation"
+    assert worker.call(model_request(run_id="next")).scope == "day_tokens"
+    assert sends == 1

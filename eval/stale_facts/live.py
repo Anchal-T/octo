@@ -56,6 +56,7 @@ print(json.dumps({
   "pins": {role: pins[role].model for role in roles},
   "groq_tpd": s.groq_tpd,
   "reset_tz": s.groq_reset_tz,
+  "budget_mode": s.models_budget_mode,
   "output_reserve_tokens": OUTPUT_RESERVE_TOKENS,
   "max_call_reservation": max(
     p.prompt_token_cap + min(p.max_tokens, OUTPUT_RESERVE_TOKENS)
@@ -326,6 +327,8 @@ def _compose_exec(code: str, payload: dict[str, Any] | None = None) -> dict[str,
 
 def verify_live_config() -> dict[str, Any]:
     config = _compose_exec(_PIN_CHECK)
+    if config.get("budget_mode") != "p1_estimate":
+        raise RuntimeError("P1 live runs require the original p1_estimate budget mode")
     if set(config["pins"].values()) != {MODEL}:
         raise RuntimeError("All four workflow roles must be pinned to the locked model")
     if config["groq_tpd"] != DAILY_ESTIMATED_TOKEN_LIMIT:

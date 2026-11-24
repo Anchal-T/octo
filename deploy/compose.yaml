@@ -97,6 +97,7 @@ services:
       MODELS_FREE_HOSTS:
       MODELS_SQLITE_PATH: /var/lib/agent-team/models/models.sqlite
       MODELS_BUSY_TIMEOUT_MS: ${MODELS_BUSY_TIMEOUT_MS:-5000}
+      MODELS_BUDGET_MODE: ${MODELS_BUDGET_MODE:-p1_estimate}
     volumes:
       - models-data:/var/lib/agent-team/models
       - /var/run/docker.sock:/var/run/docker.sock

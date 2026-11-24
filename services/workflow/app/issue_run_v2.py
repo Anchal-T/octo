@@ -676,6 +676,7 @@ async def run_issue_v2(
         fact_block=repro_facts["text"],
         turn_cap=settings.reproducer_turn_cap,
         prompt_token_cap=settings.reproducer_prompt_token_cap,
+        strict_budget=settings.models_budget_mode == "strict",
         cmd_timeout_s=settings.sandbox_cmd_timeout_s,
     )
     if repro.retry_outcome is not None:
@@ -868,6 +869,7 @@ async def run_issue_v2(
             fact_block=fix_facts["text"],
             turn_cap=settings.fixer_turn_cap,
             prompt_token_cap=settings.fixer_prompt_token_cap,
+            strict_budget=settings.models_budget_mode == "strict",
             cmd_timeout_s=settings.sandbox_cmd_timeout_s,
             raw_actions=repro.raw_actions,
         )
@@ -1024,6 +1026,7 @@ async def run_issue_v2(
             repro_files=repro.files,
             fix_files=fix.files,
             prompt_token_cap=settings.tester_prompt_token_cap,
+            strict_budget=settings.models_budget_mode == "strict",
             cmd_timeout_s=settings.sandbox_cmd_timeout_s,
             strict_repro=repro.raw_actions,
         )
