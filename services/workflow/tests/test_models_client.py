@@ -1,7 +1,9 @@
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from threading import Event
 
 import httpx
 import pytest
@@ -991,3 +993,209 @@ def test_model_authority_rejects_cached_request_under_current_policy(
         ValueError, match="requested model is not authorized for role: fixer"
     ):
         restarted.call(wrong_model)
+
+
+def test_lost_provider_response_keeps_reservation_and_blocks_resend(tmp_path):
+    sends = 0
+
+    def provider(request):
+        nonlocal sends
+        sends += 1
+        raise httpx.ReadTimeout("lost response after send")
+
+    client, _ = make_client(tmp_path, provider, groq_rpd=1)
+    request = model_request()
+    first = client.call(request)
+    restarted, _ = make_client(tmp_path, provider, groq_rpd=1)
+    replay = restarted.call(request)
+    unrelated = restarted.call(model_request(run_id="run-2"))
+
+    assert first.outcome == replay.outcome == "failed"
+    assert first.error_code == replay.error_code == "provider_outcome_unknown"
+    assert first.request_id == replay.request_id
+    assert unrelated.outcome == "quota_exhausted"
+    assert unrelated.scope == "day_requests"
+    assert sends == 1
+    with restarted.store.connection() as connection:
+        receipt = connection.execute("SELECT outcome FROM side_effect_receipt").fetchone()
+    assert receipt["outcome"] == "outcome_unknown"
+
+
+@pytest.mark.parametrize("sent", [False, True], ids=["before-send", "after-send"])
+def test_interrupted_attempt_recovers_only_if_send_never_started(tmp_path, monkeypatch, sent):
+    class WorkerStopped(BaseException):
+        pass
+
+    sends = 0
+    clock = FIXED_NOW
+
+    def provider(request):
+        nonlocal sends
+        sends += 1
+        if sent:
+            raise WorkerStopped
+        return httpx.Response(
+            200,
+            json={
+                "model": MODEL,
+                "choices": [{"message": {"content": "completed"}}],
+            },
+        )
+
+    client, _ = make_client(tmp_path, provider, now=lambda: clock, groq_rpd=1)
+    if not sent:
+        def stop_before_send(**kwargs):
+            raise WorkerStopped
+
+        monkeypatch.setattr(client.store, "mark_sent", stop_before_send)
+
+    with pytest.raises(WorkerStopped):
+        client.call(model_request())
+
+    restored, _ = make_client(tmp_path, provider, now=lambda: clock, groq_rpd=1)
+    assert restored.call(model_request()).outcome == "throttled"
+    clock += timedelta(minutes=5)
+    outcome = restored.call(model_request())
+    assert sends == 1
+    if sent:
+        assert outcome.outcome == "failed"
+        assert outcome.error_code == "provider_outcome_unknown"
+    else:
+        assert outcome.outcome == "completed"
+        assert not restored.store.mark_sent(
+            request_id=outcome.request_id, retry_ordinal=1
+        )
+
+
+def test_legacy_interrupted_reservation_is_migrated_conservatively(tmp_path):
+    class WorkerStopped(BaseException):
+        pass
+
+    sends = 0
+
+    def provider(request):
+        nonlocal sends
+        sends += 1
+        raise WorkerStopped
+
+    client, _ = make_client(tmp_path, provider)
+    request = model_request()
+    with pytest.raises(WorkerStopped):
+        client.call(request)
+    with client.store.connection() as connection:
+        connection.execute("DROP VIEW side_effect_receipt")
+        connection.execute("ALTER TABLE call_attempt DROP COLUMN send_phase")
+
+    restarted, _ = make_client(tmp_path, provider, now=lambda: FIXED_NOW + timedelta(minutes=5))
+    result = restarted.call(request)
+    assert result.error_code == "provider_outcome_unknown"
+    assert sends == 1
+    with restarted.store.connection() as connection:
+        receipt = connection.execute("SELECT outcome FROM side_effect_receipt").fetchone()
+    assert receipt["outcome"] == "outcome_unknown"
+
+
+def test_pool_allows_only_one_active_call_between_workers(tmp_path):
+    entered = Event()
+    release = Event()
+    sends = []
+    clock = FIXED_NOW
+
+    def provider(request):
+        body = json.loads(request.content)
+        prompt = body["messages"][0]["content"]
+        sends.append(prompt)
+        if prompt == "first app":
+            entered.set()
+            assert release.wait(5), "test did not release the fake provider"
+        return httpx.Response(
+            200,
+            json={
+                "model": body["model"],
+                "choices": [{"message": {"content": prompt}}],
+            },
+        )
+
+    first_worker, _ = make_client(tmp_path, provider, now=lambda: clock)
+    second_worker, _ = make_client(tmp_path, provider, now=lambda: clock)
+    cached_request = model_request(run_id="cached", content="cached app")
+    cached = first_worker.call(cached_request)
+    assert cached.outcome == "completed"
+    first = model_request(content="first app")
+    second = model_request(run_id="run-2", content="second app").model_copy(
+        update={"role": "fixer", "target": "example/second/issues/1"}
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        pending = worker.submit(first_worker.call, first)
+        try:
+            assert entered.wait(5), "fake provider never received the first call"
+            duplicate = second_worker.call(first)
+            blocked = second_worker.call(second)
+            clock += timedelta(minutes=5)
+            late_blocked = second_worker.call(second)
+
+            assert [duplicate.outcome, blocked.outcome, late_blocked.outcome] == [
+                "throttled",
+                "throttled",
+                "throttled",
+            ]
+            assert blocked.request_id == late_blocked.request_id
+            assert blocked.error_code == "provider_pool_busy"
+            assert blocked.retry_in > 0
+            assert second_worker.call(cached_request) == cached
+            assert sends == ["cached app", "first app"]
+            with second_worker.store.connection() as connection:
+                attempts = connection.execute(
+                    "SELECT run_id, state FROM call_attempt ORDER BY run_id"
+                ).fetchall()
+            assert [tuple(attempt) for attempt in attempts] == [
+                ("cached", "completed"),
+                ("run-1", "reserved"),
+            ]
+        finally:
+            release.set()
+        completed = pending.result(timeout=5)
+
+    assert completed.outcome == "completed"
+    assert second_worker.call(first) == completed
+    assert second_worker.call(second).outcome == "completed"
+    assert sends == ["cached app", "first app", "second app"]
+
+
+def test_pool_recovers_an_interrupted_send_and_retains_its_quota_charge(tmp_path):
+    class WorkerStopped(BaseException):
+        pass
+
+    sends = 0
+    clock = FIXED_NOW
+
+    def provider(request):
+        nonlocal sends
+        sends += 1
+        if sends == 1:
+            raise WorkerStopped
+        return httpx.Response(
+            200,
+            json={
+                "model": MODEL,
+                "choices": [{"message": {"content": "completed"}}],
+            },
+        )
+
+    owner, _ = make_client(tmp_path, provider, now=lambda: clock, groq_rpd=2)
+    with pytest.raises(WorkerStopped):
+        owner.call(model_request())
+
+    worker, _ = make_client(tmp_path, provider, now=lambda: clock, groq_rpd=2)
+    different_request = model_request(run_id="run-2")
+    assert worker.call(different_request).outcome == "throttled"
+    assert sends == 1
+
+    clock += timedelta(minutes=5)
+    assert worker.call(different_request).outcome == "completed"
+    assert worker.call(model_request()).error_code == "provider_outcome_unknown"
+    exhausted = worker.call(model_request(run_id="run-3"))
+    assert exhausted.outcome == "quota_exhausted"
+    assert exhausted.scope == "day_requests"
+    assert sends == 2

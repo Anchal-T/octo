@@ -13,7 +13,14 @@ from .store import Store
 
 @dataclass(frozen=True)
 class Reservation:
-    status: Literal["reserved", "cached", "in_flight", "quota_exhausted"]
+    status: Literal[
+        "reserved",
+        "cached",
+        "in_flight",
+        "pool_busy",
+        "quota_exhausted",
+        "outcome_unknown",
+    ]
     retry_ordinal: int = 0
     completion: ModelOutcome | None = None
     retry_at: datetime | None = None
@@ -25,6 +32,12 @@ class Ledger:
     def __init__(self, settings: Settings, store: Store | None = None) -> None:
         self.settings = settings
         self.store = store or Store(settings)
+        self.pool_timeout_s = max(
+            settings.triager_timeout_s,
+            settings.reproducer_timeout_s,
+            settings.fixer_timeout_s,
+            settings.tester_timeout_s,
+        )
 
     def reserve(
         self,
@@ -62,18 +75,18 @@ class Ledger:
                     ),
                 )
 
-            reserved = connection.execute(
-                "SELECT retry_ordinal FROM call_attempt "
-                "WHERE request_id = ? AND state = 'reserved' "
+            pool_wait = self._recover_pool(connection, pool.pool, now)
+            previous = connection.execute(
+                "SELECT retry_ordinal, send_phase FROM call_attempt "
+                "WHERE request_id = ? AND (state = 'reserved' OR send_phase = 'unknown') "
                 "ORDER BY retry_ordinal DESC LIMIT 1",
                 (request_id,),
             ).fetchone()
-            if reserved is not None:
-                return Reservation(
-                    status="in_flight",
-                    retry_ordinal=int(reserved["retry_ordinal"]),
-                    retry_in=5.0,
-                )
+            if previous is not None:
+                ordinal = int(previous["retry_ordinal"])
+                if previous["send_phase"] == "unknown":
+                    return Reservation(status="outcome_unknown", retry_ordinal=ordinal)
+                return Reservation(status="in_flight", retry_ordinal=ordinal, retry_in=5.0)
 
             ordinal_row = connection.execute(
                 "SELECT COALESCE(MAX(retry_ordinal), 0) + 1 AS next_ordinal "
@@ -116,11 +129,16 @@ class Ledger:
                         scope=scope,
                     )
 
+            if pool_wait:
+                return Reservation(
+                    status="pool_busy", retry_ordinal=retry_ordinal, retry_in=pool_wait
+                )
+
             connection.execute(
                 "INSERT INTO call_attempt (request_id, retry_ordinal, run_id, step, "
                 "role, pool, model_pinned, payload_sha256, sampling_json, state, "
-                "tokens_est, minute_window, day_window, started_at, target) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?)",
+                "tokens_est, minute_window, day_window, started_at, target, send_phase) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, 'pending')",
                 (
                     request_id,
                     retry_ordinal,
@@ -139,6 +157,40 @@ class Ledger:
                 ),
             )
             return Reservation(status="reserved", retry_ordinal=retry_ordinal)
+
+    def _recover_pool(
+        self, connection: sqlite3.Connection, pool: str, now: datetime
+    ) -> float:
+        # The caller holds the host lock, so a live sender keeps its slot even
+        # if the wall-clock lease would have elapsed.
+        active = connection.execute(
+            "SELECT request_id, retry_ordinal, started_at, send_phase "
+            "FROM call_attempt WHERE pool = ? AND state = 'reserved'",
+            (pool,),
+        ).fetchall()
+        wait_s = 0.0
+        for attempt in active:
+            expires_at = datetime.fromisoformat(attempt["started_at"]) + timedelta(
+                seconds=self.pool_timeout_s + 60
+            )
+            if now < expires_at:
+                wait_s = max(wait_s, 5.0, (expires_at - now).total_seconds())
+                continue
+
+            # Legacy reservations without a marker may also have been sent.
+            never_sent = attempt["send_phase"] == "pending"
+            connection.execute(
+                "UPDATE call_attempt SET state = ?, send_phase = ?, decided_at = ? "
+                "WHERE request_id = ? AND retry_ordinal = ?",
+                (
+                    "refused" if never_sent else "failed",
+                    "pending" if never_sent else "unknown",
+                    _iso(now),
+                    attempt["request_id"],
+                    attempt["retry_ordinal"],
+                ),
+            )
+        return wait_s
 
     @staticmethod
     def _usage(

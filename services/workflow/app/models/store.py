@@ -1,3 +1,4 @@
+import fcntl
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -31,18 +32,47 @@ LOG_COLUMNS = (
 )
 
 
+_RECEIPT_VIEW = """
+CREATE VIEW IF NOT EXISTS side_effect_receipt AS
+SELECT
+    attempt.request_id || ':' || attempt.retry_ordinal AS idempotency_key,
+    'groq.chat_completion' AS action,
+    COALESCE(attempt.target, attempt.run_id) AS target,
+    attempt.payload_sha256 AS request_sha256,
+    CASE WHEN attempt.send_phase = 'unknown' THEN 'outcome_unknown'
+         WHEN attempt.state = 'reserved' AND attempt.send_phase = 'sent' THEN 'sent'
+         ELSE attempt.state END AS outcome,
+    COALESCE(attempt.decided_at, attempt.started_at) AS decided_at,
+    completion.response_json
+FROM call_attempt AS attempt
+LEFT JOIN completion
+    ON completion.request_id = attempt.request_id AND attempt.state = 'completed';
+"""
+
+
 class Store:
     def __init__(self, settings: Settings) -> None:
         self.path = settings.models_sqlite_path
+        ledger_path = Path(self.path).resolve()
+        self._provider_lock_path = ledger_path.with_name(
+            f"{ledger_path.name}.provider.lock"
+        )
         self.busy_timeout_ms = settings.models_busy_timeout_ms
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         schema = Path(__file__).with_name("schema.sql").read_text()
         with self.connection() as connection:
             connection.executescript(schema)
             connection.execute("BEGIN IMMEDIATE")
-            columns = connection.execute("PRAGMA table_info(call_attempt)")
-            if not any(column["name"] == "target" for column in columns):
+            columns = {
+                column["name"]
+                for column in connection.execute("PRAGMA table_info(call_attempt)")
+            }
+            if "target" not in columns:
                 connection.execute("ALTER TABLE call_attempt ADD COLUMN target TEXT")
+            if "send_phase" not in columns:
+                connection.execute("ALTER TABLE call_attempt ADD COLUMN send_phase TEXT")
+                connection.execute("DROP VIEW IF EXISTS side_effect_receipt")
+            connection.execute(_RECEIPT_VIEW)
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -67,6 +97,18 @@ class Store:
         connection.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
         return connection
 
+    @contextmanager
+    def try_provider_slot(self) -> Iterator[bool]:
+        # Closing the descriptor releases the slot, including on process exit.
+        # Workers must share both the ledger and this lock file on the same host.
+        with self._provider_lock_path.open("ab") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+            else:
+                yield True
+
     def get_completion(self, request_id: str) -> ModelOutcome | None:
         with self.connection() as connection:
             row = connection.execute(
@@ -86,6 +128,16 @@ class Store:
                 f"INSERT INTO call_log ({columns}) VALUES ({placeholders})", values
             )
 
+    def mark_sent(self, *, request_id: str, retry_ordinal: int) -> bool:
+        with self.connection() as connection:
+            result = connection.execute(
+                "UPDATE call_attempt SET send_phase = 'sent' "
+                "WHERE request_id = ? AND retry_ordinal = ? "
+                "AND state = 'reserved' AND send_phase = 'pending'",
+                (request_id, retry_ordinal),
+            )
+            return result.rowcount == 1
+
     def finish_attempt(
         self,
         *,
@@ -97,9 +149,16 @@ class Store:
         with self.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
-                "UPDATE call_attempt SET state = ?, decided_at = ? "
+                "UPDATE call_attempt SET state = ?, decided_at = ?, "
+                "send_phase = CASE WHEN ? THEN 'unknown' ELSE 'sent' END "
                 "WHERE request_id = ? AND retry_ordinal = ?",
-                (state, log_row["decided_at"], request_id, retry_ordinal),
+                (
+                    state,
+                    log_row["decided_at"],
+                    log_row["error_code"] == "provider_outcome_unknown",
+                    request_id,
+                    retry_ordinal,
+                ),
             )
             self._insert_log(connection, log_row)
 
@@ -132,7 +191,7 @@ class Store:
                 ),
             )
             connection.execute(
-                "UPDATE call_attempt SET state = 'completed', decided_at = ? "
+                "UPDATE call_attempt SET state = 'completed', send_phase = 'sent', decided_at = ? "
                 "WHERE request_id = ? AND retry_ordinal = ?",
                 (_iso(outcome.decided_at), outcome.request_id, retry_ordinal),
             )

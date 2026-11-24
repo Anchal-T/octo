@@ -5,6 +5,7 @@ import re
 import sqlite3
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
@@ -64,6 +65,15 @@ class ModelClient:
         self.sleep = sleep
 
     def call(self, request: ModelCallRequest) -> ModelOutcome:
+        with ExitStack() as stack:
+            slot: bool | OSError
+            try:
+                slot = stack.enter_context(self.store.try_provider_slot())
+            except OSError as error:
+                slot = error
+            return self._call(request, slot)
+
+    def _call(self, request: ModelCallRequest, slot: bool | OSError) -> ModelOutcome:
         pin = self.authority.pin_for(request.role, model=request.model)
         pool = self.authority.pool
         sampling_json, sampling, payload_sha256, prompt_tokens = _payload_identity(
@@ -111,6 +121,25 @@ class ModelClient:
                 overall_started,
             )
 
+        if isinstance(slot, OSError):
+            return self._ledger_error(request, request_id, pin, slot, overall_started)
+        if not slot:
+            try:
+                completion = self.store.get_completion(request_id)
+            except (sqlite3.Error, OSError, ValidationError) as error:
+                return self._ledger_error(
+                    request, request_id, pin, error, overall_started
+                )
+            if completion is not None:
+                return self._cached(completion, 0, role=request.role)
+            return self._in_flight(
+                request,
+                request_id,
+                pin,
+                Reservation(status="pool_busy", retry_in=self.ledger.pool_timeout_s),
+                overall_started,
+            )
+
         retry_count = 0
         in_call_retries = 0
         while True:
@@ -137,7 +166,7 @@ class ModelClient:
                     reservation.retry_ordinal,
                     role=request.role,
                 )
-            if reservation.status == "in_flight":
+            if reservation.status in ("in_flight", "pool_busy"):
                 return self._in_flight(request, request_id, pin, reservation, started)
             if reservation.status == "quota_exhausted":
                 return self._quota_exhausted(
@@ -150,9 +179,38 @@ class ModelClient:
 
             ordinal = reservation.retry_ordinal
             retry_count = max(retry_count, ordinal - 1)
+            if reservation.status == "outcome_unknown":
+                outcome = self._result(
+                    "failed",
+                    request,
+                    request_id,
+                    pin,
+                    retry_count=retry_count,
+                    error_code="provider_outcome_unknown",
+                    reason="previous provider call may have been sent",
+                )
+                self._record_without_attempt(
+                    outcome,
+                    role=request.role,
+                    decision="outcome_unknown",
+                    retry_ordinal=ordinal,
+                )
+                return outcome
+
+            try:
+                claimed = self.store.mark_sent(
+                    request_id=request_id, retry_ordinal=ordinal
+                )
+            except (sqlite3.Error, OSError) as error:
+                return self._ledger_error(
+                    request, request_id, pin, error, overall_started, ordinal
+                )
+            if not claimed:
+                continue
+
             try:
                 response = self._send(request, pin, sampling, pool, call_started_mono)
-            except (httpx.TimeoutException, httpx.NetworkError):
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
                 return self._throttled_reserved(
                     request,
                     request_id,
@@ -163,6 +221,18 @@ class ModelClient:
                     started,
                     retry_in=5.0,
                     error_code="provider_unavailable",
+                )
+            except httpx.TransportError:
+                return self._fail_reserved(
+                    request,
+                    request_id,
+                    pin,
+                    retry_count,
+                    ordinal,
+                    overall_started,
+                    started,
+                    error_code="provider_outcome_unknown",
+                    reason="provider connection failed after send may have started",
                 )
             except httpx.HTTPError:
                 return self._fail_reserved(
@@ -616,7 +686,11 @@ class ModelClient:
             retry_ordinal,
             "failed",
             role=request.role,
-            decision="failed",
+            decision=(
+                "outcome_unknown"
+                if error_code == "provider_outcome_unknown"
+                else "failed"
+            ),
             started=attempt_started,
             finished=finished,
             http_status=http_status,
@@ -681,11 +755,14 @@ class ModelClient:
             retry_in=reservation.retry_in or 5.0,
             retry_count=max(0, reservation.retry_ordinal - 1),
             decided_at=decided_at,
+            error_code=(
+                "provider_pool_busy" if reservation.status == "pool_busy" else None
+            ),
         )
         self._record_without_attempt(
             outcome,
             role=request.role,
-            decision="in_flight",
+            decision=reservation.status,
             retry_ordinal=reservation.retry_ordinal,
         )
         return outcome

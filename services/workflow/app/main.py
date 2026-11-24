@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from restate.client_types import HttpError as RestateHttpError
 
+from .failure_reconciliation import reconciler
 from .issue_run_v2 import (
     approve_issue_v2,
     info_issue_v2,
@@ -291,7 +292,7 @@ async def run_issue_v1(
 
 app.mount(
     "/restate/v1",
-    restate.app(services=[issue_run, issue_run_v1, issue_run_v2]),
+    restate.app(services=[issue_run, issue_run_v1, issue_run_v2, reconciler]),
 )
 
 
