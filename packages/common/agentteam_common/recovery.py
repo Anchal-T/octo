@@ -46,6 +46,14 @@ def _find_workflow(client: httpx.Client, admin_url: str, condition: str) -> dict
     return rows[0] if rows else None
 
 
+def _find_origin(client: httpx.Client, admin_url: str, invocation_id: str) -> dict:
+    invocation_id = _invocation_id(invocation_id)
+    original = _find_workflow(client, admin_url, f"id = '{invocation_id}'")
+    if original is None:
+        raise RecoveryError("IssueRunV2 invocation was not found")
+    return original
+
+
 def _read_run_input(
     client: httpx.Client, admin_url: str, invocation_id: str
 ) -> IssueRunRequestV2 | None:
@@ -102,33 +110,16 @@ def _pin_recovery_inputs(
     return {"base_commit": original.base_commit, "read_basis": original.read_basis}
 
 
-def recover_issue_run(
+def _build_linked_attempt(
     client: httpx.Client,
     *,
     admin_url: str,
     memory_url: str,
-    workflow_url: str,
     invocation_id: str,
+    original: dict,
     attempt: int | None,
-    apply: bool,
-) -> dict:
-    invocation_id = _invocation_id(invocation_id)
-    original = _find_workflow(client, admin_url, f"id = '{invocation_id}'")
-    if original is None:
-        raise RecoveryError("IssueRunV2 invocation was not found")
-    status = original["status"]
-    if status == "paused":
-        if attempt is not None:
-            raise RecoveryError(
-                "Resume the paused invocation using its current attempt"
-            )
-        if apply:
-            client.patch(
-                f"{admin_url}/invocations/{invocation_id}/resume"
-            ).raise_for_status()
-        return {"action": "resume", "invocation_id": invocation_id, "applied": apply}
-
-    if status != "completed" or original["completion_result"] != "failure":
+) -> IssueRunRequestV2:
+    if original["status"] != "completed" or original["completion_result"] != "failure":
         raise RecoveryError(
             "Recovery requires a paused or terminal failed IssueRunV2 invocation"
         )
@@ -160,7 +151,18 @@ def recover_issue_run(
             "The failed attempt reached PR dispatch. Inspect its GitHub receipts first."
         )
 
-    retry = IssueRunRequestV2.model_validate(
+    if previous.recovery_from is not None:
+        recovery_steps = _query(
+            client,
+            admin_url,
+            f"SELECT name FROM sys_journal WHERE id = '{invocation_id}' "
+            "AND name IN ('verify-recovery', 'record-recovery')",
+        )
+        # Recording starts only after verification returns successfully.
+        if {row["name"] for row in recovery_steps} != {"verify-recovery", "record-recovery"}:
+            raise RecoveryError("The failed recovery attempt was not verified and recorded")
+
+    return IssueRunRequestV2.model_validate(
         {
             **previous.model_dump(),
             **_pin_recovery_inputs(client, memory_url, previous),
@@ -170,6 +172,60 @@ def recover_issue_run(
                 "attempt": previous.attempt,
             },
         }
+    )
+
+
+def verify_linked_attempt(
+    client: httpx.Client,
+    *,
+    admin_url: str,
+    memory_url: str,
+    request: IssueRunRequestV2,
+) -> None:
+    if request.recovery_from is None:
+        raise RecoveryError("A linked attempt requires an original invocation")
+    invocation_id = request.recovery_from.invocation_id
+    expected = _build_linked_attempt(
+        client,
+        admin_url=admin_url,
+        memory_url=memory_url,
+        invocation_id=invocation_id,
+        original=_find_origin(client, admin_url, invocation_id),
+        attempt=request.attempt,
+    )
+    if request != expected:
+        raise RecoveryError("Recovery input does not match the original invocation")
+
+
+def recover_issue_run(
+    client: httpx.Client,
+    *,
+    admin_url: str,
+    memory_url: str,
+    workflow_url: str,
+    invocation_id: str,
+    attempt: int | None,
+    apply: bool,
+) -> dict:
+    original = _find_origin(client, admin_url, invocation_id)
+    if original["status"] == "paused":
+        if attempt is not None:
+            raise RecoveryError(
+                "Resume the paused invocation using its current attempt"
+            )
+        if apply:
+            client.patch(
+                f"{admin_url}/invocations/{invocation_id}/resume"
+            ).raise_for_status()
+        return {"action": "resume", "invocation_id": invocation_id, "applied": apply}
+
+    retry = _build_linked_attempt(
+        client,
+        admin_url=admin_url,
+        memory_url=memory_url,
+        invocation_id=invocation_id,
+        original=original,
+        attempt=attempt,
     )
     key = workflow_key(retry.issue_id, retry.attempt)
     encoded_key = key.replace("'", "''")

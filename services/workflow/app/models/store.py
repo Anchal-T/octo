@@ -74,6 +74,8 @@ class Store:
                 connection.execute("DROP VIEW IF EXISTS side_effect_receipt")
             if "tokens_accounted" not in columns:
                 connection.execute("ALTER TABLE call_attempt ADD COLUMN tokens_accounted INTEGER")
+            if "failure_json" not in columns:
+                connection.execute("ALTER TABLE call_attempt ADD COLUMN failure_json TEXT")
             if "budget_mode" not in columns:
                 connection.execute(
                     "ALTER TABLE call_attempt ADD COLUMN budget_mode TEXT NOT NULL DEFAULT 'p1_estimate'"
@@ -115,15 +117,51 @@ class Store:
             else:
                 yield True
 
-    def get_completion(self, request_id: str) -> ModelOutcome | None:
-        with self.connection() as connection:
-            row = connection.execute(
-                "SELECT response_json FROM completion WHERE request_id = ?",
-                (request_id,),
-            ).fetchone()
-        if row is None:
+    @staticmethod
+    def recorded_outcome(
+        connection: sqlite3.Connection, request_id: str, *, retry_refused: bool
+    ) -> ModelOutcome | None:
+        completion = connection.execute(
+            "SELECT response_json FROM completion WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+        if completion is not None:
+            return ModelOutcome.model_validate_json(completion["response_json"])
+
+        failure = connection.execute(
+            "SELECT retry_ordinal, model_pinned, run_id, step, started_at, decided_at, "
+            "failure_json FROM call_attempt WHERE request_id = ? "
+            "AND (state = 'failed' OR (state = 'refused' AND NOT ?)) "
+            "AND (failure_json IS NOT NULL OR COALESCE(send_phase, 'sent') = 'sent') "
+            "ORDER BY retry_ordinal DESC LIMIT 1",
+            (request_id, retry_refused),
+        ).fetchone()
+        if failure is None:
             return None
-        return ModelOutcome.model_validate_json(row["response_json"])
+        if failure["failure_json"] is not None:
+            return ModelOutcome.model_validate_json(failure["failure_json"])
+
+        # Older ledgers have the terminal status and log, but no serialized outcome.
+        log = connection.execute(
+            "SELECT error_code, http_status, model_reported, finished_at FROM call_log "
+            "WHERE request_id = ? AND retry_ordinal = ? AND decision = 'failed' "
+            "ORDER BY seq DESC LIMIT 1",
+            (request_id, failure["retry_ordinal"]),
+        ).fetchone()
+        return ModelOutcome.model_validate(
+            {
+                **(dict(log) if log is not None else {}),
+                "outcome": "failed",
+                "request_id": request_id,
+                "model_pinned": failure["model_pinned"],
+                "run_id": failure["run_id"],
+                "step": failure["step"],
+                "retry_count": failure["retry_ordinal"] - 1,
+                "started_at": failure["started_at"],
+                "decided_at": failure["decided_at"] or failure["started_at"],
+                "reason": "previous provider call was recorded as failed",
+            }
+        )
 
     def append_log(self, row: dict[str, Any]) -> None:
         placeholders = ", ".join("?" for _ in LOG_COLUMNS)
@@ -147,7 +185,7 @@ class Store:
     def finish_attempt(
         self,
         *,
-        request_id: str,
+        outcome: ModelOutcome,
         retry_ordinal: int,
         state: str,
         log_row: dict[str, Any],
@@ -156,13 +194,14 @@ class Store:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "UPDATE call_attempt SET state = ?, decided_at = ?, "
-                "send_phase = CASE WHEN ? THEN 'unknown' ELSE 'sent' END "
+                "send_phase = CASE WHEN ? THEN 'unknown' ELSE 'sent' END, failure_json = ? "
                 "WHERE request_id = ? AND retry_ordinal = ?",
                 (
                     state,
                     log_row["decided_at"],
-                    log_row["error_code"] == "provider_outcome_unknown",
-                    request_id,
+                    outcome.error_code == "provider_outcome_unknown",
+                    outcome.model_dump_json() if outcome.outcome == "failed" else None,
+                    outcome.request_id,
                     retry_ordinal,
                 ),
             )

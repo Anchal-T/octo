@@ -1,7 +1,7 @@
 import asyncio
 import json
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,13 @@ from services.memory.app.sync import validate_proposal
 from services.workflow.app import issue_run_v2 as v2_mod
 from services.workflow.app import main as workflow_main
 from services.workflow.app.sandbox import LocalGitSandbox
+from services.workflow.tests.test_operator_recovery import (
+    BASIS,
+    NEW_KEY,
+    ORIGIN,
+    SHA,
+    RecoveryFixture,
+)
 
 NOW = datetime(2026, 11, 12, 12, tzinfo=UTC)
 HEAD_SHA_1 = "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"
@@ -1011,38 +1018,84 @@ async def test_repo_tool_retry_exhaustion_is_terminal_and_replay_safe(
     assert not backend.prs_opened
 
 
+def _recovery_request(monkeypatch, fixture, **updates):
+    client = httpx.Client
+    monkeypatch.setattr(
+        v2_mod.httpx,
+        "Client",
+        lambda **kwargs: client(transport=httpx.MockTransport(fixture.transport), **kwargs),
+    )
+    monkeypatch.setenv("RESTATE_ADMIN_URL", "http://admin")
+    monkeypatch.setattr(v2_mod, "settings", replace(v2_mod.settings, memory_url="http://memory"))
+    return IssueRunRequestV2.model_validate(
+        {
+            **fixture.input,
+            "base_commit": SHA,
+            "read_basis": BASIS,
+            "attempt": 3,
+            "recovery_from": {"invocation_id": ORIGIN, "attempt": 2},
+            **updates,
+        }
+    )
+
+
 @pytest.mark.anyio
-async def test_linked_attempt_records_original_invocation_before_model_call(monkeypatch):
+async def test_linked_attempt_records_verified_invocation_before_model_call(monkeypatch):
     import restate
 
+    request = _recovery_request(monkeypatch, RecoveryFixture())
     backend = FakeMemoryAndGithubBackend(base_sha=HEAD_SHA_1)
-    ctx = FakeWorkflowCtx("gh-1-7-r2")
+    ctx = FakeWorkflowCtx(NEW_KEY)
     monkeypatch.setattr(v2_mod, "post_memory", backend.post_memory)
 
     def fail_after_evidence(request):
         events = list(backend.events.values())
         link = next(event for event in events if event["kind"] == "workflow_recovery")
+        assert link["source"] == "tool"
         assert link["payload"]["recovery_from"] == {
-            "invocation_id": "inv_exampleOriginal",
-            "attempt": 1,
+            "invocation_id": ORIGIN,
+            "attempt": 2,
         }
-        assert link["payload"]["workflow_key"] == "gh-1-7-r2"
-        assert link["payload"]["base_commit"] == HEAD_SHA_1
+        assert link["payload"]["workflow_key"] == NEW_KEY
+        assert link["payload"]["base_commit"] == SHA
         raise restate.TerminalError("example stop after durable evidence")
 
     monkeypatch.setattr(v2_mod, "call_model", fail_after_evidence)
-    request = IssueRunRequestV2(
-        issue_id="gh-1-7",
-        repo="Anchal-T/sqlparse",
-        title="Example issue for a linked recovery",
-        base_commit=HEAD_SHA_1,
-        read_basis=NOW,
-        attempt=2,
-        recovery_from={"invocation_id": "inv_exampleOriginal", "attempt": 1},
-    )
     for _ in range(2):
         with pytest.raises(restate.TerminalError, match="example stop"):
             await v2_mod.run_issue_v2(ctx, request)
     assert sum(
         event["kind"] == "workflow_recovery" for event in backend.events.values()
     ) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("fixture_args", "updates", "message"),
+    [
+        ({"status": None}, {}, "invocation was not found"),
+        ({"status": "paused"}, {}, "terminal failed"),
+        ({"pr_recorded": True}, {}, "reached PR dispatch"),
+        ({}, {"issue_id": "gh-1-42"}, "does not match"),
+        ({}, {"fact_snapshot": []}, "does not match"),
+    ],
+)
+async def test_linked_attempt_rejects_unverified_origin_before_side_effects(
+    monkeypatch, fixture_args, updates, message
+):
+    import restate
+
+    request = _recovery_request(monkeypatch, RecoveryFixture(**fixture_args), **updates)
+    backend = FakeMemoryAndGithubBackend(base_sha=HEAD_SHA_1)
+    monkeypatch.setattr(v2_mod, "post_memory", backend.post_memory)
+
+    def unexpected_model_call(request):
+        pytest.fail("Unverified recovery reached model work")
+
+    monkeypatch.setattr(v2_mod, "call_model", unexpected_model_call)
+    ctx = FakeWorkflowCtx(NEW_KEY)
+    with pytest.raises(restate.TerminalError, match=message):
+        await v2_mod.run_issue_v2(ctx, request)
+    assert ctx.state["stage"] == "failed"
+    assert not backend.events
+    assert not backend.rounds

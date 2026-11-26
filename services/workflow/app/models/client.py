@@ -65,16 +65,18 @@ class ModelClient:
         self.monotonic = monotonic
         self.sleep = sleep
 
-    def call(self, request: ModelCallRequest) -> ModelOutcome:
+    def call(self, request: ModelCallRequest, *, retry_refused: bool = False) -> ModelOutcome:
         with ExitStack() as stack:
             slot: bool | OSError
             try:
                 slot = stack.enter_context(self.store.try_provider_slot())
             except OSError as error:
                 slot = error
-            return self._call(request, slot)
+            return self._call(request, slot, retry_refused=retry_refused)
 
-    def _call(self, request: ModelCallRequest, slot: bool | OSError) -> ModelOutcome:
+    def _call(
+        self, request: ModelCallRequest, slot: bool | OSError, *, retry_refused: bool
+    ) -> ModelOutcome:
         pin = self.authority.pin_for(request.role, model=request.model)
         pool = self.authority.pool
         strict = self.settings.models_budget_mode == "strict"
@@ -142,7 +144,10 @@ class ModelClient:
             return self._ledger_error(request, request_id, pin, slot, overall_started)
         if not slot:
             try:
-                completion = self.store.get_completion(request_id)
+                with self.store.connection() as connection:
+                    completion = self.store.recorded_outcome(
+                        connection, request_id, retry_refused=retry_refused
+                    )
             except (sqlite3.Error, OSError, ValidationError) as error:
                 return self._ledger_error(
                     request, request_id, pin, error, overall_started
@@ -171,6 +176,7 @@ class ModelClient:
                     sampling_json=sampling_json,
                     tokens_est=tokens_est,
                     now=started,
+                    retry_refused=retry_refused,
                 )
             except (sqlite3.Error, OSError, ValidationError) as error:
                 return self._ledger_error(
@@ -871,7 +877,7 @@ class ModelClient:
         )
         try:
             self.store.finish_attempt(
-                request_id=outcome.request_id,
+                outcome=outcome,
                 retry_ordinal=retry_ordinal,
                 state=state,
                 log_row=row,

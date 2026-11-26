@@ -316,6 +316,17 @@ def _verify_operator_recovery(
         and linked["workflow_key"] == "gh-1-8-r2"
     )
     wait_for(linked["invocation_id"], "completed")
+    rows = require_success(
+        client.post(
+            f"{server.admin}/query",
+            json={
+                "query": "SELECT completion_result FROM sys_invocation "
+                f"WHERE id = '{linked['invocation_id']}'"
+            },
+            headers={"Accept": "application/json"},
+        )
+    )["rows"]
+    assert rows == [{"completion_result": "success"}]
     assert run_cli(args) == 0
     repeated = json.loads(capsys.readouterr().out)
     assert repeated["already_submitted"] is True

@@ -52,6 +52,7 @@ class Ledger:
         sampling_json: str,
         tokens_est: int,
         now: datetime,
+        retry_refused: bool = False,
     ) -> Reservation:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("quota reservations require a timezone-aware datetime")
@@ -65,17 +66,11 @@ class Ledger:
 
         with self.store.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            completion = connection.execute(
-                "SELECT response_json FROM completion WHERE request_id = ?",
-                (request_id,),
-            ).fetchone()
-            if completion is not None:
-                return Reservation(
-                    status="cached",
-                    completion=ModelOutcome.model_validate_json(
-                        completion["response_json"]
-                    ),
-                )
+            outcome = self.store.recorded_outcome(
+                connection, request_id, retry_refused=retry_refused
+            )
+            if outcome is not None:
+                return Reservation(status="cached", completion=outcome)
 
             pool_wait = self._recover_pool(connection, pool.pool, now)
             previous = connection.execute(
@@ -88,7 +83,7 @@ class Ledger:
                 ordinal = int(previous["retry_ordinal"])
                 if previous["send_phase"] == "unknown":
                     return Reservation(status="outcome_unknown", retry_ordinal=ordinal)
-                return Reservation(status="in_flight", retry_ordinal=ordinal, retry_in=5.0)
+                return Reservation(status="in_flight", retry_ordinal=ordinal, retry_in=pool_wait)
 
             ordinal_row = connection.execute(
                 "SELECT COALESCE(MAX(retry_ordinal), 0) + 1 AS next_ordinal "

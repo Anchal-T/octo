@@ -499,17 +499,13 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
             return resp.json()
 
     # Scripted free Groq model replies for two complete runs (Issue #7 and Issue #8).
-    repro_bash = json.dumps(
-        {
-            "action": "bash",
-            "command": (
-                "cat <<'EOF' > tests/test_empty_quotes.py\n"
-                "from sqlparse.lexer import strip_quotes\n\n"
-                "def test_strip_quotes_empty():\n"
-                "    assert strip_quotes('') == ''\n"
-                "EOF"
-            ),
-        }
+    repro_write = json.dumps(
+        {"action": "write_file", "path": "tests/test_empty_quotes.py"}
+    ) + (
+        "\n"
+        "from sqlparse.lexer import strip_quotes\n\n"
+        "def test_strip_quotes_empty():\n"
+        "    assert strip_quotes('') == ''\n"
     )
     repro_submit = json.dumps(
         {
@@ -518,18 +514,12 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
             "summary": "strip_quotes('') raises IndexError",
         }
     )
-    fix_bash = json.dumps(
-        {
-            "action": "bash",
-            "command": (
-                "cat <<'EOF' > sqlparse/lexer.py\n"
-                "def strip_quotes(val: str) -> str:\n"
-                '    if len(val) >= 2 and val[0] == "\'" and val[-1] == "\'":\n'
-                "        return val[1:-1]\n"
-                "    return val\n"
-                "EOF"
-            ),
-        }
+    fix_write = json.dumps({"action": "write_file", "path": "sqlparse/lexer.py"}) + (
+        "\n"
+        "def strip_quotes(val: str) -> str:\n"
+        '    if len(val) >= 2 and val[0] == "\'" and val[-1] == "\'":\n'
+        "        return val[1:-1]\n"
+        "    return val\n"
     )
     fix_submit = json.dumps(
         {"action": "submit", "summary": "Guard len(val) >= 2 in strip_quotes"}
@@ -550,7 +540,7 @@ async def test_thin_loop_end_to_end_approve_after_new_push_and_reject_path(
         }
     )
     replies = iter(
-        [triage_reply, repro_bash, repro_submit, fix_bash, fix_submit, tester_reply] * 2
+        [triage_reply, repro_write, repro_submit, fix_write, fix_submit, tester_reply] * 2
     )
     billed_calls = []
     model_settings = replace(

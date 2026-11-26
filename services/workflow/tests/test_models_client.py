@@ -774,28 +774,46 @@ def test_non_http_provider_exception_settles_reserved_attempt(tmp_path):
     assert [attempt["state"] for attempt in attempts] == ["failed"]
 
 
-def test_reported_model_mismatch_is_not_cached(tmp_path):
+@pytest.mark.parametrize(
+    ("response", "error_code"),
+    [
+        (
+            {
+                "model": "another/model",
+                "choices": [{"message": {"content": "must not be used"}}],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2},
+            },
+            "model_mismatch",
+        ),
+        ({"model": MODEL, "choices": []}, "invalid_provider_response"),
+    ],
+)
+@pytest.mark.parametrize("legacy", [False, True], ids=["current", "legacy"])
+def test_terminal_provider_failure_replays_without_sending(
+    tmp_path, response, error_code, legacy
+):
     calls = 0
 
     def provider(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(
-            200,
-            json={
-                "model": "another/model",
-                "choices": [{"message": {"content": "must not be used"}}],
-                "usage": {"prompt_tokens": 4, "completion_tokens": 2},
-            },
-        )
+        return httpx.Response(200, json=response)
 
     client, _ = make_client(tmp_path, provider)
     first = client.call(model_request())
-    second = client.call(model_request())
+    if legacy:
+        with client.store.connection() as connection:
+            connection.execute("ALTER TABLE call_attempt DROP COLUMN failure_json")
+    restarted, _ = make_client(tmp_path, provider)
+    second = restarted.call(model_request())
 
-    assert first.outcome == second.outcome == "failed"
-    assert first.error_code == "model_mismatch"
-    assert calls == 2
+    assert first.outcome == "failed"
+    assert first.error_code == error_code
+    assert second.outcome == "failed"
+    assert second.error_code == error_code
+    if not legacy:
+        assert second == first
+    assert calls == 1
 
 
 def test_token_window_quota_returns_minute_scope_before_provider_call(tmp_path):
@@ -1053,9 +1071,13 @@ def test_interrupted_attempt_recovers_only_if_send_never_started(tmp_path, monke
         client.call(model_request())
 
     restored, _ = make_client(tmp_path, provider, now=lambda: clock, groq_rpd=1)
-    assert restored.call(model_request()).outcome == "throttled"
-    clock += timedelta(minutes=5)
-    outcome = restored.call(model_request())
+    for _ in range(3):
+        outcome = restored.call(model_request())
+        if outcome.outcome != "throttled":
+            break
+        assert outcome.retry_in is not None
+        clock += timedelta(seconds=outcome.retry_in)
+
     assert sends == 1
     if sent:
         assert outcome.outcome == "failed"

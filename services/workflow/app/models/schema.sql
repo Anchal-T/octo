@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS call_attempt (
     decided_at TEXT,
     target TEXT,
     send_phase TEXT,
+    failure_json TEXT,
     PRIMARY KEY (request_id, retry_ordinal)
 );
 

@@ -23,9 +23,10 @@ ARGS = [
 
 
 class RecoveryFixture:
-    def __init__(self, *, status="completed", pr_recorded=False):
+    def __init__(self, *, status="completed", pr_recorded=False, recovery_recorded=False):
         self.status = status
         self.pr_recorded = pr_recorded
+        self.recovery_recorded = recovery_recorded
         self.input = {
             "issue_id": "gh-1-8",
             "repo": "Anchal-T/sqlparse",
@@ -76,6 +77,12 @@ class RecoveryFixture:
                 if "sys_journal" in query:
                     if "open-pr:" in query:
                         rows = [{"name": "open-pr:1"}] if self.pr_recorded else []
+                    elif "record-recovery" in query:
+                        rows = (
+                            [{"name": "verify-recovery"}, {"name": "record-recovery"}]
+                            if self.recovery_recorded
+                            else []
+                        )
                     else:
                         value = (
                             self.starts[0]
@@ -112,16 +119,20 @@ class RecoveryFixture:
                         )
                     else:
                         assert ORIGIN in query
-                        rows = [
-                            {
-                                "id": ORIGIN,
-                                "target_service_key": OLD_KEY,
-                                "status": self.status,
-                                "completion_result": "failure"
-                                if self.status == "completed"
-                                else None,
-                            }
-                        ]
+                        rows = (
+                            [
+                                {
+                                    "id": ORIGIN,
+                                    "target_service_key": OLD_KEY,
+                                    "status": self.status,
+                                    "completion_result": "failure"
+                                    if self.status == "completed"
+                                    else None,
+                                }
+                            ]
+                            if self.status is not None
+                            else []
+                        )
                 else:
                     pytest.fail("unexpected recovery query")
                 return httpx.Response(200, json={"rows": rows})
@@ -170,6 +181,25 @@ def test_operator_blocks_retry_when_pr_dispatch_may_have_happened(capsys):
     assert run_cli([*ARGS, "--attempt", "3", "--apply"], transport=transport) == 1
     assert "PR dispatch" in capsys.readouterr().err
     assert not fixture.patches and not fixture.starts
+
+
+@pytest.mark.parametrize("recovery_recorded", [False, True])
+def test_operator_can_retry_linked_failure_only_after_verification(capsys, recovery_recorded):
+    fixture = RecoveryFixture(recovery_recorded=recovery_recorded)
+    fixture.input.update(
+        base_commit=SHA,
+        read_basis=BASIS,
+        recovery_from={"invocation_id": "inv_previousRecovery", "attempt": 1},
+    )
+    transport = httpx.MockTransport(fixture.transport)
+    status = run_cli([*ARGS, "--attempt", "3", "--apply"], transport=transport)
+    if recovery_recorded:
+        assert status == 0
+        assert len(fixture.starts) == 1
+    else:
+        assert status == 1
+        assert "not verified" in capsys.readouterr().err
+        assert not fixture.starts
 
 
 def test_ordinary_workflow_request_keeps_the_existing_wire_payload():

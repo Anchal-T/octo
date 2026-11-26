@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ import httpx
 import restate
 from agentteam_common import Settings, load_agentteam_config, stable_id, workflow_key
 from agentteam_common.ids import issue_run_v2_prefix
+from agentteam_common.recovery import RecoveryError, verify_linked_attempt
 from agentteam_contracts import (
     ApprovalDecision,
     ApprovalResult,
@@ -61,6 +63,20 @@ _model_client: ModelClient | None = None
 
 def current_basis() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def verify_recovery(request: IssueRunRequestV2) -> None:
+    admin_url = os.environ.get("RESTATE_ADMIN_URL", "http://127.0.0.1:9070").rstrip("/")
+    with httpx.Client(timeout=5, trust_env=False) as client:
+        try:
+            verify_linked_attempt(
+                client,
+                admin_url=admin_url,
+                memory_url=settings.memory_url.rstrip("/"),
+                request=request,
+            )
+        except RecoveryError as error:
+            raise restate.TerminalError(str(error), status_code=422) from error
 
 
 def call_model(request: ModelCallRequest) -> ModelOutcome:
@@ -440,6 +456,18 @@ async def run_issue_v2(
         ctx.set("stage", "failed")
         raise restate.TerminalError("repository is not configured") from error
 
+    if request.recovery_from is not None:
+        try:
+            await ctx.run_typed(
+                "verify-recovery",
+                verify_recovery,
+                restate.RunOptions(max_attempts=2),
+                request=request,
+            )
+        except restate.TerminalError:
+            ctx.set("stage", "failed")
+            raise
+
     if request.read_basis is None:
         basis_iso = await ctx.run_typed("read-basis", current_basis)
         read_basis = datetime.fromisoformat(basis_iso)
@@ -488,7 +516,7 @@ async def run_issue_v2(
             "record-recovery",
             EventWrite(
                 idempotency_key=f"{prefix}:recovery",
-                source="maintainer",
+                source="tool",
                 kind="workflow_recovery",
                 taint=0,
                 payload={

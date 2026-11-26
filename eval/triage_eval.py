@@ -986,7 +986,8 @@ def run_triage_eval(
                 source="github_issue",
             )
             for attempt_idx in range(1, max_task_attempts + 1):
-                outcome = model_client.call(request)
+                # On a new eval invocation, retry calls the provider definitively refused.
+                outcome = model_client.call(request, retry_refused=True)
                 last_outcome = outcome
 
                 if outcome.outcome == "completed":

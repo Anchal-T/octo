@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from services.workflow.app.failure_reconciliation import reconciler
+from services.workflow.app.issue_run_v2 import verify_recovery
 
 app = FastAPI()
 issue_run = restate.Workflow("IssueRunV2")
@@ -37,6 +38,12 @@ async def run(ctx: restate.WorkflowContext, request: dict | None) -> dict | None
         await ctx.sleep(timedelta(seconds=5), name="resume-check")
         return {"resumed": True}
     if request and request.get("recovery_from"):
+        await ctx.run_typed(
+            "verify-recovery",
+            verify_recovery,
+            restate.RunOptions(max_attempts=2),
+            request=IssueRunRequestV2.model_validate(request),
+        )
         return request["recovery_from"]
     await ctx.run_typed(
         "fake-provider", fail_fake_provider, restate.RunOptions(max_attempts=2)
